@@ -7,12 +7,35 @@ Nothing outside bridge/ speaks RCON or knows about Lua. The execution layer
 (agent/execution.py) and primitives (agent/primitives/) construct Action objects.
 bridge/action_executor.py translates them into RCON commands.
 
-Rules:
+Rules
+-----
 - Pure data. No LLM calls. No RCON.
 - Every concrete action is a frozen dataclass that inherits from Action.
-- The discriminator field `kind` is set automatically via __init_subclass__
-  so pattern-matching in the executor is straightforward.
+- Every concrete action declares a CLASS-LEVEL `category: ActionCategory` so the
+  execution layer can filter by context (e.g. no COMBAT actions when biters off,
+  no VEHICLE actions when not in a vehicle).
+- The `kind` property is the class name — used as a discriminator by the executor.
 - All coordinate types use Position from world/state.py to keep units consistent.
+
+Scope of this file
+------------------
+These are PRIMITIVE actions — single atomic operations the bridge can execute in
+one RCON round-trip. Multi-step sequences (walk to patch, mine N ore, return to
+base) are composed by agent/primitives/ and agent/execution.py, not here.
+
+Known omissions
+---------------
+Circuit networks: Factorio's circuit network is a full embedded programming
+language (wire connections, combinator logic, signal vocabularies, memory cells).
+Modelling it requires its own type hierarchy and is intentionally deferred. The
+agent can play a complete game — including defence and Space Age content — without
+circuit networks. Adding them later means adding new Action subclasses (ConnectWire,
+SetCombinatorCondition, etc.) and extending the Lua mod; no existing code changes.
+
+Combat and vehicle actions are present as stubs (see COMBAT and VEHICLE sections).
+They are included in ALL_ACTION_TYPES but the execution layer gates them by
+category, so they are never emitted when biters are disabled or no vehicle is
+occupied.
 """
 
 from __future__ import annotations
@@ -25,165 +48,484 @@ from world.state import Direction, Position
 
 
 # ---------------------------------------------------------------------------
+# ActionCategory
+# ---------------------------------------------------------------------------
+
+class ActionCategory(Enum):
+    """
+    Broad category for each action type.
+
+    Used by the execution layer to decide which actions are valid in the
+    current context:
+
+      MOVEMENT  — always available (on foot)
+      MINING    — always available
+      CRAFTING  — always available (player crafting queue)
+      BUILDING  — always available
+      INVENTORY — always available
+      RESEARCH  — always available
+      PLAYER    — always available (equipment, consumables)
+      VEHICLE   — only when player is currently occupying a vehicle
+      COMBAT    — intended for use when BITERS_ENABLED=True, but the category
+                  exists unconditionally; the execution layer enforces the gate
+      META      — always available (Wait, NoOp, etc.)
+    """
+    MOVEMENT  = "movement"
+    MINING    = "mining"
+    CRAFTING  = "crafting"
+    BUILDING  = "building"
+    INVENTORY = "inventory"
+    RESEARCH  = "research"
+    PLAYER    = "player"
+    VEHICLE   = "vehicle"
+    COMBAT    = "combat"
+    META      = "meta"
+
+
+# ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Action:
-    """Abstract base — never instantiate directly."""
+    """
+    Abstract base — never instantiate directly.
+
+    Every subclass must declare a class-level `category: ActionCategory`.
+    The `kind` property returns the class name for use as an executor
+    discriminator.
+    """
 
     @property
     def kind(self) -> str:
         return type(self).__name__
 
+    @property
+    def category(self) -> ActionCategory:
+        # Subclasses override this at the class level; this fallback exists
+        # only so the base class is valid Python.
+        raise NotImplementedError(f"{type(self).__name__} must declare category")
+
 
 # ---------------------------------------------------------------------------
-# Movement
+# MOVEMENT
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class MoveTo(Action):
-    """Walk the player character to a map position."""
+    """
+    Walk the player character (on foot) to a map position.
+
+    Not valid inside a vehicle — use DriveVehicle instead, which has
+    different movement physics and collision behaviour.
+    """
     position: Position
-    # If True, pathfind around obstacles; if False, walk direct (risky but fast)
-    pathfind: bool = True
+    pathfind: bool = True   # True: route around obstacles; False: walk direct
+    category: ActionCategory = field(default=ActionCategory.MOVEMENT, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class StopMovement(Action):
-    """Halt all movement immediately."""
+    """Halt all on-foot movement immediately."""
+    category: ActionCategory = field(default=ActionCategory.MOVEMENT, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Mining / resource collection
+# MINING
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class MineResource(Action):
-    """Start mining a resource tile at the given position."""
+    """
+    Mine a resource tile at the given position.
+
+    count=0 means mine until inventory is full or the patch is exhausted.
+    The bridge issues repeated mining commands; the execution layer monitors
+    progress via WorldState.
+    """
     position: Position
-    resource: str   # Factorio item name, e.g. "iron-ore"
-    count: int = 1  # How many to mine before stopping (0 = mine until full)
+    resource: str        # Factorio internal resource name, e.g. "iron-ore"
+    count: int = 1       # 0 = mine until full / exhausted
+    category: ActionCategory = field(default=ActionCategory.MINING, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class MineEntity(Action):
-    """Deconstruct (mine) a placed entity."""
+    """
+    Deconstruct (mine) a placed entity, returning its items to inventory.
+
+    The entity must be within the player's reach radius.
+    """
     entity_id: int
+    category: ActionCategory = field(default=ActionCategory.MINING, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Crafting
+# CRAFTING
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CraftItem(Action):
-    """Hand-craft an item in the player's crafting queue."""
-    recipe: str     # Factorio recipe name
+    """
+    Queue hand-crafting of an item.
+
+    Uses the player's crafting queue, not an assembler. All ingredient items
+    must already be in the player's inventory (or recursively hand-craftable).
+    """
+    recipe: str      # Factorio recipe name
     count: int = 1
+    category: ActionCategory = field(default=ActionCategory.CRAFTING, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Building / placing
+# BUILDING
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class PlaceEntity(Action):
-    """Place an item from inventory onto the map."""
-    item: str           # Item to place (must be in inventory)
+    """Place an item from inventory onto the map as a building."""
+    item: str            # Item to place (must be in player inventory)
     position: Position
     direction: Direction = Direction.NORTH
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class SetRecipe(Action):
-    """Set the active recipe of an assembler, chemical plant, etc."""
+    """Set the active recipe of an assembler, chemical plant, oil refinery, etc."""
     entity_id: int
     recipe: str
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class SetFilter(Action):
-    """Set a filter slot on an inserter, splitter, or filter inserter."""
+    """
+    Set a filter slot on a filter inserter, splitter, or loader.
+
+    slot is 0-indexed. item is the Factorio internal item name to filter for,
+    or "" to clear the slot.
+    """
     entity_id: int
     slot: int
-    item: str
+    item: str            # "" to clear
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
 
-
-# ---------------------------------------------------------------------------
-# Blueprint
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ApplyBlueprint(Action):
     """
     Paste a blueprint string at a map position.
-    The bridge translates this into the Lua API call.
+
+    position is the top-left anchor tile; the bridge normalises to Factorio's
+    coordinate convention. force_build=True deconstructs any overlapping
+    entities before placing — use with caution outside safe test environments.
+
+    Blueprint strings are the standard Factorio exchange format (base64-encoded
+    zlib-compressed JSON). The agent obtains them from
+    memory/blueprint_library/library.json or from the rich examiner's extraction
+    output.
     """
-    blueprint_string: str   # Full Factorio blueprint exchange string
-    position: Position       # Top-left anchor or centre (bridge normalises)
+    blueprint_string: str    # Factorio blueprint exchange string
+    position: Position        # Top-left anchor tile
     direction: Direction = Direction.NORTH
-    force_build: bool = False  # If True, deconstruct overlapping entities first
+    force_build: bool = False
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Research
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class SetResearchQueue(Action):
-    """Replace the current research queue with the given ordered list."""
-    technologies: list[str]   # Ordered; first = research next
-
-
-# ---------------------------------------------------------------------------
-# Inventory / item management
+# INVENTORY
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class TransferItems(Action):
-    """Move items between player inventory and a nearby container/machine."""
+    """
+    Move items between the player's inventory and a nearby container or machine.
+
+    direction controls which way items flow:
+      "to_entity"   — player inventory → entity
+      "from_entity" — entity → player inventory
+
+    count=-1 means transfer all available.
+    """
     entity_id: int
     item: str
     count: int
-    direction: str = "to_entity"   # "to_entity" | "from_entity"
+    direction: str = "to_entity"    # "to_entity" | "from_entity"
+    category: ActionCategory = field(default=ActionCategory.INVENTORY, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Meta / control
+# RESEARCH
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SetResearchQueue(Action):
+    """
+    Replace the current research queue with the given ordered technology list.
+
+    First entry is researched next. An empty list cancels current research.
+    Technologies must be unlockable given the current research state; the
+    execution layer is responsible for validating prerequisites.
+    """
+    technologies: list[str]    # Ordered; first = research next
+    category: ActionCategory = field(default=ActionCategory.RESEARCH, init=False, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# PLAYER  (equipment, consumables, character state)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class EquipArmor(Action):
+    """
+    Equip an armor item from inventory into the player's armor slot.
+
+    If the slot is already occupied the existing armor is swapped to inventory.
+    The item must be an armor type; the bridge validates this before sending.
+    """
+    item: str    # Factorio internal armor item name, e.g. "heavy-armor"
+    category: ActionCategory = field(default=ActionCategory.PLAYER, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class UseItem(Action):
+    """
+    Use a consumable or throwable item.
+
+    Covers a broad set of one-shot uses:
+      - Healing:    "raw-fish", "medical-pack" (modded)
+      - Capsules:   "poison-capsule", "slowdown-capsule", etc.
+      - Grenades:   "grenade", "cluster-grenade"
+      - Other:      any item with a use-on-self or use-on-ground activation
+
+    target_position is required for thrown/targeted items (capsules, grenades).
+    Leave as None for self-use items (fish).
+
+    Note: grenades and offensive capsules are combat actions in intent but
+    categorised as PLAYER because they can be used without biters being
+    present (e.g. clearing trees). The execution layer may apply additional
+    context gates.
+    """
+    item: str
+    target_position: Optional[Position] = None
+    category: ActionCategory = field(default=ActionCategory.PLAYER, init=False, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# VEHICLE  (only valid when player is occupying a vehicle)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class EnterVehicle(Action):
+    """
+    Board a nearby vehicle (car, tank, spidertron, train).
+
+    The vehicle entity must be within reach. Once boarded, MOVEMENT actions
+    are replaced by DriveVehicle; standard MoveTo is no longer valid until
+    ExitVehicle is issued.
+    """
+    entity_id: int    # Vehicle entity to board
+    category: ActionCategory = field(default=ActionCategory.VEHICLE, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ExitVehicle(Action):
+    """
+    Dismount the currently occupied vehicle.
+
+    The player is placed adjacent to the vehicle. After this action, standard
+    on-foot MOVEMENT actions become valid again.
+    """
+    category: ActionCategory = field(default=ActionCategory.VEHICLE, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class DriveVehicle(Action):
+    """
+    Drive the currently occupied vehicle to a map position.
+
+    Semantically equivalent to MoveTo but uses vehicle movement physics:
+    - Vehicles have momentum and turning radius (cars, tanks).
+    - Spidertrons pathfind differently and can traverse water.
+    - Trains follow rails and cannot freeform navigate.
+    - Collision with entities causes damage to both vehicle and obstacle.
+
+    The bridge implementation for each vehicle type is distinct. The execution
+    layer is responsible for knowing which vehicle is occupied and emitting the
+    appropriate sub-command.
+
+    pathfind=False is risky for vehicles with momentum — prefer True except in
+    open terrain or for spidertrons.
+    """
+    position: Position
+    pathfind: bool = True
+    category: ActionCategory = field(default=ActionCategory.VEHICLE, init=False, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# COMBAT  (intended for BITERS_ENABLED=True; category gates emission)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SelectWeapon(Action):
+    """
+    Switch to a specific weapon in the player's weapon slots.
+
+    slot is 0-indexed (slot 0 = primary, slot 1 = secondary, etc.).
+    The weapon item must already be in the corresponding equipment slot.
+    """
+    slot: int    # 0-indexed weapon slot
+    category: ActionCategory = field(default=ActionCategory.COMBAT, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ShootAt(Action):
+    """
+    Fire the currently selected weapon at a target.
+
+    Exactly one of target_entity_id or target_position must be provided:
+      target_entity_id — track and shoot a specific unit (biters, worms, etc.)
+      target_position  — shoot at a fixed map coordinate (area denial, structures)
+
+    The bridge maps this to Factorio's shooting_state and attack_target APIs.
+    The execution layer is responsible for selecting the appropriate form based
+    on whether a specific entity is being tracked or an area is being suppressed.
+    """
+    target_entity_id: Optional[int] = None
+    target_position: Optional[Position] = None
+    category: ActionCategory = field(default=ActionCategory.COMBAT, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (self.target_entity_id is None) == (self.target_position is None):
+            raise ValueError(
+                "ShootAt requires exactly one of target_entity_id or target_position, "
+                f"got entity_id={self.target_entity_id!r}, position={self.target_position!r}"
+            )
+
+
+@dataclass(frozen=True)
+class StopShooting(Action):
+    """
+    Stop firing. Issued when a combat engagement ends or is interrupted.
+    """
+    category: ActionCategory = field(default=ActionCategory.COMBAT, init=False, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# META
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Wait(Action):
     """
-    Do nothing for a number of game ticks.
-    The execution layer emits this when it is waiting on a crafting timer,
-    belt fill, etc., rather than busy-looping.
+    Do nothing for a specified number of game ticks.
+
+    The execution layer emits this when polling for a condition (crafting
+    timer, belt fill, research completion) rather than busy-looping. The
+    bridge does not send any RCON command — it simply sleeps for the
+    equivalent real-world duration before the next poll.
     """
     ticks: int
+    category: ActionCategory = field(default=ActionCategory.META, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class NoOp(Action):
-    """Explicit no-operation — used by stub modules and tests."""
+    """Explicit no-operation. Used by stub modules, tests, and safe fallbacks."""
+    category: ActionCategory = field(default=ActionCategory.META, init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
-# Action type registry — all concrete types in one place
+# Registry and helpers
 # ---------------------------------------------------------------------------
 
 ALL_ACTION_TYPES: tuple[type[Action], ...] = (
+    # MOVEMENT
     MoveTo,
     StopMovement,
+    # MINING
     MineResource,
     MineEntity,
+    # CRAFTING
     CraftItem,
+    # BUILDING
     PlaceEntity,
     SetRecipe,
     SetFilter,
     ApplyBlueprint,
-    SetResearchQueue,
+    # INVENTORY
     TransferItems,
+    # RESEARCH
+    SetResearchQueue,
+    # PLAYER
+    EquipArmor,
+    UseItem,
+    # VEHICLE
+    EnterVehicle,
+    ExitVehicle,
+    DriveVehicle,
+    # COMBAT
+    SelectWeapon,
+    ShootAt,
+    StopShooting,
+    # META
     Wait,
     NoOp,
 )
+
+# Map from ActionCategory to the action types that belong to it.
+# Built once at import time; used by the execution layer for context filtering.
+import dataclasses as _dc
+
+ACTIONS_BY_CATEGORY: dict[ActionCategory, tuple[type[Action], ...]] = {}
+for _action_type in ALL_ACTION_TYPES:
+    # category is always the last field, declared with a fixed default.
+    _cat = _dc.fields(_action_type)[-1].default  # ActionCategory instance
+    ACTIONS_BY_CATEGORY.setdefault(_cat, ())
+    ACTIONS_BY_CATEGORY[_cat] = ACTIONS_BY_CATEGORY[_cat] + (_action_type,)
+
+
+def actions_for_context(
+    in_vehicle: bool = False,
+    biters_enabled: bool = False,
+) -> tuple[type[Action], ...]:
+    """
+    Return the subset of action types valid in the current execution context.
+
+    Parameters
+    ----------
+    in_vehicle      : True when the player is currently occupying a vehicle.
+                      Gates VEHICLE category actions (valid) and excludes
+                      on-foot MOVEMENT actions (MoveTo, StopMovement).
+    biters_enabled  : True when BITERS_ENABLED=True in config.
+                      COMBAT actions are included only when True.
+
+    The execution layer calls this at goal-start and after any context change
+    (boarding/exiting a vehicle, biter config toggle) to refresh its valid
+    action set.
+    """
+    excluded: set[ActionCategory] = set()
+
+    if in_vehicle:
+        excluded.add(ActionCategory.MOVEMENT)   # use DriveVehicle instead
+    else:
+        excluded.add(ActionCategory.VEHICLE)    # not in a vehicle
+
+    if not biters_enabled:
+        excluded.add(ActionCategory.COMBAT)
+
+    return tuple(
+        action_type
+        for action_type in ALL_ACTION_TYPES
+        if action_type not in _get_excluded_types(excluded)
+    )
+
+
+def _get_excluded_types(
+    excluded_categories: set[ActionCategory],
+) -> set[type[Action]]:
+    result: set[type[Action]] = set()
+    for cat in excluded_categories:
+        result.update(ACTIONS_BY_CATEGORY.get(cat, ()))
+    return result
