@@ -73,6 +73,16 @@ class Position:
     def distance_to(self, other: "Position") -> float:
         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
 
+    @property
+    def has_damage(self) -> bool:
+        """True if any placed entity is currently below full health."""
+        return bool(self.damaged_entities)
+
+    @property
+    def recent_losses(self) -> list[DestroyedEntity]:
+        """All destroyed entities within the TTL window (pruning done by bridge)."""
+        return self.destroyed_entities
+
     def __repr__(self) -> str:
         return f"({self.x:.1f}, {self.y:.1f})"
 
@@ -157,6 +167,35 @@ class ResourcePatch:
     observed_at: int = 0              # Tick of last bridge update
 
 
+
+# ---------------------------------------------------------------------------
+# Ground items
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GroundItem:
+    """
+    An item stack lying on the ground (dropped from destroyed buildings,
+    inventory overflow, player deaths, manually thrown items, etc.).
+
+    Populated only within the bridge's local scan radius — the full map is
+    never searched. Stale outside that radius.
+
+    Fields
+    ------
+    item        : Factorio internal item name, e.g. "iron-plate".
+    position    : Tile position of the item entity.
+    count       : Stack size on the ground.
+    observed_at : Game tick when this record was last seen by the bridge.
+    age_ticks   : How many ticks the item has been on the ground (Factorio
+                  tracks this; items despawn after a configurable duration).
+    """
+    item: str
+    position: Position
+    count: int
+    observed_at: int = 0
+    age_ticks: int = 0
+
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
@@ -209,7 +248,63 @@ class LogisticsState:
 
 
 # ---------------------------------------------------------------------------
-# Threat (empty when biters are disabled)
+# Structural damage
+# (cause-agnostic: biters, vehicles, player error, deconstruction, etc.)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DamagedEntity:
+    """
+    A placed entity that has taken damage and is currently below full health.
+
+    Populated whenever damage is detected regardless of cause — biter attack,
+    vehicle collision, player error, or anything else. Always a world-level
+    observation; not tied to biter activity.
+
+    Fields
+    ------
+    entity_id       : Factorio unit_number.
+    name            : Factorio internal entity name.
+    position        : Map position.
+    health_fraction : Current health as a fraction of maximum. In the range
+                      (0.0, 1.0) — never exactly 1.0 (undamaged entities are
+                      excluded) and never 0.0 (that would be destroyed).
+    observed_at     : Game tick when this reading was taken.
+    """
+    entity_id: int
+    name: str
+    position: Position
+    health_fraction: float   # (0.0, 1.0) exclusive on both ends
+    observed_at: int = 0
+
+
+@dataclass
+class DestroyedEntity:
+    """
+    A record of an entity destroyed during the current run.
+
+    Kept in a rolling window (see WorldState.destroyed_ttl_ticks) so the agent
+    can plan recovery without the list growing unboundedly.  The bridge prunes
+    records older than destroyed_ttl_ticks on each update.
+
+    cause is best-effort — the Lua mod may not always be able to determine why
+    an entity was destroyed.
+
+    Fields
+    ------
+    name         : Factorio internal entity name (unit_number is gone at destruction).
+    position     : Last known map position.
+    destroyed_at : Game tick of destruction.
+    cause        : "biter" | "vehicle" | "deconstruct" | "unknown"
+    """
+    name: str
+    position: Position
+    destroyed_at: int
+    cause: str = "unknown"   # "biter" | "vehicle" | "deconstruct" | "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Threat (biter-specific — empty when BITERS_ENABLED=False)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -222,9 +317,18 @@ class BiterBase:
 
 @dataclass
 class ThreatState:
+    """
+    Biter-specific threat information.
+
+    All fields are empty / zero when BITERS_ENABLED=False. The bridge stub
+    populates nothing here; consumers should check is_empty before acting.
+
+    Structural damage (DamagedEntity, DestroyedEntity) lives on WorldState
+    directly — it is cause-agnostic and present regardless of biter config.
+    """
     biter_bases: list[BiterBase] = field(default_factory=list)
     pollution_cloud: list[Position] = field(default_factory=list)  # Sparse sample
-    # Seconds until next predicted attack on a given structure (entity_id → seconds)
+    # Game ticks until next predicted attack per structure (entity_id → ticks)
     attack_timers: dict[int, float] = field(default_factory=dict)
     evolution_factor: float = 0.0
 
@@ -263,6 +367,9 @@ class WorldState:
       - entities near player     — refreshed on local scan (moderately fresh)
       - entities far from player — may be many ticks stale
       - resource_map             — updated only when agent visits a patch (very stale)
+      - ground_items             — populated within local scan radius only; empty outside it
+      - damaged_entities         — refreshed on each bridge scan; empty when nothing is damaged
+      - destroyed_entities       — rolling window (destroyed_ttl_ticks); pruned by bridge
       - threat                   — only meaningful when biters are enabled and
                                    the scanner is actively polling biter territory
 
@@ -275,7 +382,8 @@ class WorldState:
 
     Section names used in observed_at
     ----------------------------------
-    "player", "entities", "resource_map", "research", "logistics", "threat"
+    "player", "entities", "resource_map", "ground_items", "research", "logistics",
+    "damaged_entities", "destroyed_entities", "threat"
     """
 
     # Game clock — tick of the most recent bridge poll
@@ -290,9 +398,18 @@ class WorldState:
     player: PlayerState = field(default_factory=PlayerState)
     entities: list[EntityState] = field(default_factory=list)
     resource_map: list[ResourcePatch] = field(default_factory=list)
+    ground_items: list[GroundItem] = field(default_factory=list)
     research: ResearchState = field(default_factory=ResearchState)
     logistics: LogisticsState = field(default_factory=LogisticsState)
     threat: ThreatState = field(default_factory=ThreatState)
+
+    # Structural damage — cause-agnostic, always active regardless of biter config.
+    # Populated by the bridge whenever damage or destruction is observed; not
+    # gated on BITERS_ENABLED.
+    damaged_entities: list[DamagedEntity] = field(default_factory=list)
+    destroyed_entities: list[DestroyedEntity] = field(default_factory=list)
+    # Bridge prunes destroyed_entities older than this many ticks on each update.
+    destroyed_ttl_ticks: int = 18_000   # ~5 min at 60 tps
 
     # Convenience accessors ------------------------------------------------
 
@@ -329,6 +446,16 @@ class WorldState:
     @property
     def game_time_seconds(self) -> float:
         return self.tick / 60.0
+
+    @property
+    def has_damage(self) -> bool:
+        """True if any placed entity is currently below full health."""
+        return bool(self.damaged_entities)
+
+    @property
+    def recent_losses(self) -> list[DestroyedEntity]:
+        """All destroyed entities within the TTL window (pruning done by bridge)."""
+        return self.destroyed_entities
 
     def __repr__(self) -> str:
         return (

@@ -91,19 +91,119 @@ class Anomaly:
     position_y: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class BoundingBox:
+    """
+    Axis-aligned rectangular region in Factorio tile coordinates.
+
+    Matches the coordinate system used by Factorio's blueprint capture API
+    (LuaSurface.create_script_inventory / get_blueprint_entities area param),
+    so this value can be passed directly to the bridge when extracting a
+    blueprint string.
+
+    All coordinates are tile integers (Factorio's map uses integer tile positions
+    even though entity positions are floats). min < max on both axes.
+    """
+    min_x: int
+    min_y: int
+    max_x: int
+    max_y: int
+
+    @property
+    def width(self) -> int:
+        return self.max_x - self.min_x
+
+    @property
+    def height(self) -> int:
+        return self.max_y - self.min_y
+
+    @property
+    def area(self) -> int:
+        return self.width * self.height
+
+    @property
+    def center_x(self) -> float:
+        return (self.min_x + self.max_x) / 2.0
+
+    @property
+    def center_y(self) -> float:
+        return (self.min_y + self.max_y) / 2.0
+
+    def contains(self, x: float, y: float) -> bool:
+        return self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y
+
+    def __repr__(self) -> str:
+        return f"BoundingBox(({self.min_x},{self.min_y})→({self.max_x},{self.max_y}) {self.width}×{self.height})"
+
+
 @dataclass
 class BlueprintCandidate:
     """
-    (Rich mode only) A sub-factory region flagged as worth extracting as a
-    reusable blueprint. The curator (memory/blueprint_library/blueprint_curator.py)
-    acts on these.
+    (Rich mode only) A sub-factory region nominated for extraction as a
+    reusable blueprint.
+
+    This is a NOMINATION only — it records why a region looks worth capturing.
+    Evaluation of a stored blueprint (throughput per tile, tech tier, estimated
+    improvability, etc.) is handled by BlueprintRecord in
+    memory/blueprint_library/ once the blueprint has actually been extracted
+    and run in production. Do not add evaluation fields here.
+
+    The curator (memory/blueprint_library/blueprint_curator.py) reads these
+    and decides whether to act on them (extract, deduplicate, store).
+
+    Fields
+    ------
+    region_description  : Human-readable description, e.g. "4-lane iron smelting column".
+    bounds              : Tile-aligned bounding box. Passed directly to the
+                          bridge's blueprint-capture call.
+    performance_metric  : Observed throughput summary, e.g. "62 iron-plate/min
+                          sustained for 300 ticks". Stored with the nomination
+                          so the curator can filter low-quality candidates.
+    rationale           : Why the rich examiner flagged this region (e.g.
+                          "sustained output 20% above prior best for this item").
     """
-    region_description: str     # Human-readable description of what it does
-    center_x: float
-    center_y: float
-    radius: float               # Suggested capture radius in tiles
-    performance_metric: str     # e.g. "60 iron-plate/min sustained for 5 min"
-    rationale: str              # Why the rich examiner flagged this
+    region_description: str
+    bounds: BoundingBox
+    performance_metric: str
+    rationale: str
+
+
+
+@dataclass
+class DamagedEntityRecord:
+    """
+    An entity observed below full health during the audit period.
+
+    Mirrors world.state.DamagedEntity but is a snapshot owned by the report —
+    the examiner copies relevant fields rather than holding a live reference
+    into the state tree. This keeps the report self-contained for serialisation
+    and LLM context injection.
+
+    Cause-agnostic: may result from biter attack, vehicle collision, player
+    error, or anything else. Always populated when damage exists, regardless
+    of BITERS_ENABLED.
+    """
+    entity_id: int
+    name: str
+    position_x: float
+    position_y: float
+    health_fraction: float   # (0.0, 1.0)
+
+
+@dataclass
+class DestroyedEntityRecord:
+    """
+    An entity destroyed during (or just before) the audit period.
+
+    Pulled from WorldState.destroyed_entities within the observation window.
+    Cause-agnostic: biter attack, vehicle collision, player deconstruction, etc.
+    Always populated when destruction events exist, regardless of BITERS_ENABLED.
+    """
+    name: str
+    position_x: float
+    position_y: float
+    destroyed_at: int   # Game tick
+    cause: str          # "biter" | "vehicle" | "deconstruct" | "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +231,18 @@ class AuditReport:
     belt_congestion     : Belt segments where flow has stalled.
     production_rates    : item_name → items/minute over the observation window.
     anomalies           : Anything unusual, ordered by severity descending.
-    blueprint_candidates: (rich only) Sub-factory regions worth extracting.
+                          The examiner automatically promotes damaged/destroyed
+                          entities into CRITICAL anomalies — callers should not
+                          need to inspect damaged_entities separately for
+                          alerting purposes, but the structured lists are there
+                          for recovery planning.
+    damaged_entities    : Entities observed below full health this period.
+                          Populated whenever damage exists — cause-agnostic,
+                          not gated on BITERS_ENABLED.
+    destroyed_entities  : Entities destroyed during (or just before) this period.
+                          Cause-agnostic, not gated on BITERS_ENABLED.
+    blueprint_candidates: (rich only) Sub-factory regions nominated for extraction.
+                          See BlueprintCandidate for the nomination/evaluation split.
     llm_observations    : (rich only) The LLM's own free-text summary.
     accumulated         : True when this report merges multiple prior reports
                           (used when handing a backlog to the LLM after rate-
@@ -154,6 +265,10 @@ class AuditReport:
 
     # Anomalies — always populated
     anomalies: list[Anomaly] = field(default_factory=list)
+
+    # Structural damage — always present, empty when BITERS_ENABLED=False
+    damaged_entities: list[DamagedEntityRecord] = field(default_factory=list)
+    destroyed_entities: list[DestroyedEntityRecord] = field(default_factory=list)
 
     # Rich-only fields
     blueprint_candidates: Optional[list[BlueprintCandidate]] = None
@@ -181,6 +296,11 @@ class AuditReport:
     @property
     def total_idle(self) -> int:
         return len(self.idle_entities)
+
+    @property
+    def has_structural_damage(self) -> bool:
+        """True if any entities are damaged or were destroyed this period."""
+        return bool(self.damaged_entities or self.destroyed_entities)
 
     def production_rate(self, item: str) -> float:
         """Return items/minute for a specific item, 0.0 if not tracked."""
@@ -240,6 +360,22 @@ class AuditReport:
             reverse=True,
         )
 
+        # Damaged entities — union by entity_id
+        seen_damaged = {e.entity_id for e in self.damaged_entities}
+        merged_damaged = list(self.damaged_entities) + [
+            e for e in other.damaged_entities if e.entity_id not in seen_damaged
+        ]
+
+        # Destroyed entities — union by (name, position_x, position_y, destroyed_at)
+        seen_destroyed = {
+            (e.name, e.position_x, e.position_y, e.destroyed_at)
+            for e in self.destroyed_entities
+        }
+        merged_destroyed = list(self.destroyed_entities) + [
+            e for e in other.destroyed_entities
+            if (e.name, e.position_x, e.position_y, e.destroyed_at) not in seen_destroyed
+        ]
+
         # Rich fields
         bp_candidates = (
             (self.blueprint_candidates or []) + (other.blueprint_candidates or [])
@@ -259,6 +395,8 @@ class AuditReport:
             belt_congestion=merged_belts,
             production_rates=merged_rates,
             anomalies=merged_anomalies,
+            damaged_entities=merged_damaged,
+            destroyed_entities=merged_destroyed,
             blueprint_candidates=bp_candidates,
             llm_observations=llm_obs,
             accumulated=True,
@@ -274,6 +412,8 @@ class AuditReport:
             f"power={self.power_satisfaction:.0%}",
             f"congested_belts={len(self.belt_congestion)}",
             f"anomalies={len(self.anomalies)}",
+            f"damaged={len(self.damaged_entities)}",
+            f"destroyed={len(self.destroyed_entities)}",
         ]
         if self.accumulated:
             parts.append("(accumulated)")
