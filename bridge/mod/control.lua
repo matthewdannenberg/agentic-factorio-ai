@@ -1,7 +1,7 @@
 -- bridge/mod/control.lua
 --
 -- Factorio mod — exposes game state to the Python agent via RCON and accepts
--- action commands. All output is JSON strings produced by game.table_to_json().
+-- action commands. All output is JSON strings produced by helpers.table_to_json().
 --
 -- Target: Factorio 2.x (Space Age). Not compatible with 1.x.
 --
