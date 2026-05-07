@@ -1,0 +1,9 @@
+{
+  "name": "factorio-agent",
+  "version": "0.1.0",
+  "title": "Factorio Agent Bridge",
+  "author": "factorio-agent",
+  "description": "RCON bridge mod for the Factorio agent. Exposes game state as JSON and accepts action commands. Not intended for use outside the agent.",
+  "factorio_version": "2.0",
+  "dependencies": ["base >= 2.0.0"]
+}
