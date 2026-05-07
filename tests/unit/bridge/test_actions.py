@@ -1,9 +1,9 @@
 """
-tests/bridge/test_actions.py
+tests/unit/bridge/test_actions.py
 
 Tests for bridge/actions.py 
 
-Run with:  python tests/bridge/test_actions.py
+Run with:  python tests/unit/bridge/test_actions.py
 """
 
 from __future__ import annotations
@@ -23,7 +23,10 @@ from bridge.actions import (
     SelectWeapon, ShootAt, StopShooting,
     Wait, NoOp,
 )
-
+from world.state import (
+    Direction,
+    Position
+)
 
 class TestActionCategory(unittest.TestCase):
     def test_all_action_types_have_category(self):

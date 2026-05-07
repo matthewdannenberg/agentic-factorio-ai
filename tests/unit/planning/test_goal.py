@@ -1,9 +1,9 @@
 """
-tests/planning/test_goal.py
+tests/unit/planning/test_goal.py
 
 Tests for planning/goal.py 
 
-Run with:  python tests/planning/test_goal.py
+Run with:  python tests/unit/planning/test_goal.py
 """
 
 from __future__ import annotations

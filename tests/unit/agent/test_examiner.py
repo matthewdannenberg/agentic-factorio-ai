@@ -1,9 +1,9 @@
 """
-tests/agent/test_examiner.py
+tests/unit/agent/test_examiner.py
 
 Tests for agent/examiner/*.py
 
-Run with:  python tests/agent/test_examiner.py
+Run with:  python tests/unit/agent/test_examiner.py
 """
 
 from __future__ import annotations

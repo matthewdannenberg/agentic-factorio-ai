@@ -1,9 +1,9 @@
 """
-tests/world/agent/test_state.py
+tests/unit/world/agent/test_state.py
 
 Tests for world/state.py 
 
-Run with:  python tests/world/agent/test_state.py
+Run with:  python tests/unit/world/agent/test_state.py
 """
 
 from __future__ import annotations
