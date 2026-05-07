@@ -14,6 +14,9 @@ The system must demonstrate two distinct capabilities eventually:
 Biters are disabled initially. The architecture must support enabling them without structural
 rewrites.
 
+Target game version: **Factorio 2.x (Space Age)**. The Lua mod and all API assumptions are
+written against the 2.x runtime API. The mod is not compatible with 1.x.
+
 ---
 
 ## Key Design Decisions
@@ -143,6 +146,16 @@ in one RCON round-trip. Multi-step sequences (walk to patch → mine N ore → r
 are composed by `agent/primitives/` and `agent/execution.py`. Nothing in `actions.py`
 sequences or loops.
 
+### Entity Scanning Is Mod-Compatible by Design
+
+The Lua mod's entity scanner uses Factorio's `unit_number` property rather than a whitelist
+of entity type strings. `unit_number` is assigned by the engine to all persistent,
+player-interactable entities — assemblers, inserters, poles, chests, modded machines, turrets,
+trains — and is not assigned to trees, rocks, resources, decoratives, projectiles, or other
+cosmetic/transient objects. This means any building added by any mod is automatically visible
+to the agent without code changes. Player characters (which also have unit numbers) are
+excluded by an explicit type check.
+
 ---
 
 ## Project Structure
@@ -156,6 +169,7 @@ factorio-agent/
 │   ├── state_parser.py              # Raw Lua output → WorldState
 │   ├── action_executor.py           # Action objects → RCON commands
 │   └── mod/
+│       ├── info.json                # Factorio mod metadata (factorio_version: "2.0")
 │       └── control.lua              # Lua mod — exposes state, accepts commands
 │
 ├── world/                           # Pure data — no LLM, no RCON
@@ -214,14 +228,18 @@ factorio-agent/
 │
 ├── config.py                        # All tunable parameters
 │                                    # BITERS_ENABLED, LLM_CALL_BUDGET, TICK_INTERVAL
+│                                    # RCON_HOST/PORT/PASSWORD, scan radii
 │
 └── tests/
-    ├── mock_game_state.py           # Fake WorldState — no Factorio needed
-    ├── test_core_dataclasses.py     # 128 tests covering all core types
-    ├── test_bridge.py
-    ├── test_planning.py
-    ├── test_examiner.py
-    └── test_goal_tree.py
+    ├── unit/
+    │   └── bridge/
+    │       ├── test_rcon_client.py
+    │       ├── test_state_parser.py  # 80 tests — parser, partial updates, edge cases
+    │       └── test_action_executor.py
+    ├── mock_game_state.py            # Fake WorldState — no Factorio needed
+    ├── test_core_dataclasses.py      # 128 tests covering all core types
+    └── integration/
+        └── test_bridge_live.lua      # In-game console test suite (requires running game)
 ```
 
 ---
@@ -349,6 +367,112 @@ Valid transitions:
 
 ---
 
+## Bridge Layer
+
+### Overview
+
+The bridge layer is the only part of the system that speaks RCON or knows about Lua. It has
+three Python components and one embedded Lua component.
+
+```
+Python agent                          Factorio game process
+─────────────────                     ─────────────────────
+ActionExecutor  ──── RCON /c cmd ───► control.lua (fa.*)
+StateParser     ◄─── JSON string ──── control.lua (fa.*)
+RconClient          (TCP socket)
+```
+
+### `bridge/rcon_client.py` — RconClient
+
+Manages the TCP connection to Factorio's RCON server. Implements the RCON binary protocol
+(4-byte little-endian length-prefixed packets, type-3 auth, type-2 exec, type-0 response).
+Thread-safe via a single lock. Reconnects with exponential backoff on transient failures.
+
+Key methods: `connect()`, `send(command) → str`, `is_connected() → bool`, `close()`.
+Also usable as a context manager. Raises `BridgeError` on unrecoverable failures.
+
+### `bridge/state_parser.py` — StateParser
+
+Translates JSON strings from the Lua mod into `WorldState` objects. Accepts either a full
+snapshot or a single-section partial update.
+
+Key design properties:
+- Unknown resource names (e.g. mod resources) are registered in `ResourceRegistry` rather
+  than rejected. The parser is the first point where mod resources enter the Python model.
+- Every populated section stamps `WorldState.observed_at[section] = current_tick`. Absent
+  sections are not stamped, preserving staleness information for consumers.
+- `destroyed_entities` is a rolling window: new events from the Lua circular buffer are
+  merged with the existing list, then pruned to `WorldState.destroyed_ttl_ticks`.
+- `DestroyedEntity.cause` is normalised to one of the four canonical strings; anything
+  unrecognised becomes `"unknown"`.
+- All section parsers are defensively typed — wrong types and missing fields produce safe
+  defaults, never exceptions.
+
+Key methods:
+- `parse(raw, current_tick) → WorldState` — full parse into a fresh WorldState.
+- `parse_partial(raw, section, into) → WorldState` — merge one section into existing state.
+
+### `bridge/action_executor.py` — ActionExecutor
+
+Translates `Action` objects into RCON Lua commands. Dispatches on `action.kind` (the class
+name string) via a class-level dictionary. One RCON call per action.
+
+Failure modes:
+- Returns `False` for recoverable failures (entity out of reach, item missing, etc.) — the
+  Lua mod returns `{"ok": false, "reason": "..."}`.
+- Raises `BridgeError` when the Lua side returns non-JSON (indicates a crash or mod error).
+- Raises `NotImplementedError` for VEHICLE and COMBAT stub actions.
+
+Does not validate contextual appropriateness — that is `actions_for_context()`'s job.
+
+### `bridge/mod/control.lua` — Lua mod
+
+Runs inside Factorio. Exposes a global `fa` table callable from RCON `/c` commands.
+
+**State queries** (return JSON strings via `rcon.print()`):
+- `fa.get_state(opts)` — full snapshot, all sections, drains destruction buffer
+- `fa.get_player()`, `fa.get_entities(r)`, `fa.get_resource_map(r)` — individual sections
+- `fa.get_ground_items(r)`, `fa.get_research()`, `fa.get_logistics(r)` — individual sections
+- `fa.get_damaged_entities(r)`, `fa.drain_destruction_events()`, `fa.get_threat()` — individual sections
+- `fa.get_tick()` — current game tick as a string
+
+**Action commands** (return `{"ok":true}` or `{"ok":false,"reason":"..."}`):
+- Movement: `fa.move_to(pos, pathfind)`, `fa.stop_movement()`
+- Mining: `fa.mine_resource(pos, name, count)`, `fa.mine_entity(id)`
+- Crafting: `fa.craft_item(recipe, count)`
+- Building: `fa.place_entity(item, pos, dir)`, `fa.set_recipe(id, recipe)`,
+  `fa.set_filter(id, slot, item)`, `fa.apply_blueprint(string, pos, dir, force)`
+- Inventory: `fa.transfer_items(id, to_player, item, count)`
+- Research: `fa.set_research_queue(techs)`
+- Player: `fa.equip_armor(item)`, `fa.use_item(item, pos)`
+- Stubs: `fa.enter_vehicle`, `fa.exit_vehicle`, `fa.drive_vehicle` (vehicle)
+- Stubs: `fa.select_weapon`, `fa.shoot_at`, `fa.stop_shooting` (combat)
+
+**Notable implementation details:**
+- Entity scanning uses `unit_number` presence rather than a type whitelist. Any modded
+  building is automatically included. Player characters are excluded by type check.
+- `fa.move_to` supports all 8 compass directions including diagonals. Uses a 2:1 axis
+  ratio threshold to choose between cardinal and diagonal movement.
+- The destruction event circular buffer (512 entries) is populated by `on_entity_died`
+  and drained atomically by `fa.get_state()` or `fa.drain_destruction_events()`.
+- Power statistics use the 2.x `get_flow_count{name, category, precision_index, count}`
+  API, summing across all producer and consumer prototypes in the network.
+- Health ratios use `entity.health / entity.max_health` (2.x; `get_health_ratio()` removed).
+- Research queue management uses `force.add_research()` / `force.cancel_current_research()`
+  (2.x; direct table assignment removed).
+
+**2.x API changes from 1.x** (summary for future reference):
+- Logistic chest type names: `logistic-chest-*` → `passive-provider-chest`, etc.
+- `player.reach_distance` → `player.character.reach_distance`
+- `player.walking_state` → `player.character.walking_state`
+- `entity.get_health_ratio()` → `entity.health / entity.max_health`
+- `get_flow_count("output", true)` → `get_flow_count{name=..., category=..., ...}`
+- `force.research_queue = {...}` → `force.add_research()` / `force.cancel_current_research()`
+- `spawner.spawner_data.max_count` → `spawner.unit_count`
+- `entity.get_recipe()` returns two values in 2.x; capture only the first
+
+---
+
 ## State Machine
 
 ```
@@ -388,7 +512,8 @@ Each layer is independently testable before the next is built.
 
 1. **Core dataclasses** ✅ — `WorldState`, `Goal`, `RewardSpec`, `AuditReport`, `Priority`,
    `Action` types, `AgentState` — 128 tests passing
-2. **Bridge** — RCON client + Lua mod + state parser + action executor
+2. **Bridge** ✅ — RCON client, Lua mod, state parser, action executor — 80 tests passing
+   (unit tests against mock RCON; in-game integration tests pending live game)
 3. **World** — `ResourceRegistry`, tech tree, production tracker
 4. **Planning** — goal tree, reward evaluator, resource allocator (stub)
 5. **Primitives** — movement, crafting, building, mining
@@ -399,6 +524,33 @@ Each layer is independently testable before the next is built.
 10. **Memory** — episodic, semantic, plan library, blueprint curation
 11. **Main loop + state machine** — ties everything together
 12. **Threat module** — replaces stub when `BITERS_ENABLED=True`
+
+---
+
+## Testing Strategy
+
+### Unit tests (no Factorio required)
+
+`tests/unit/bridge/test_state_parser.py` — 80 tests covering full parse, partial parse,
+safe defaults, unknown resource registration, destroyed entity cause normalisation, TTL
+pruning, and all WorldState accessor methods.
+
+`tests/unit/bridge/test_action_executor.py` — round-trip tests asserting the correct Lua
+command string is produced for each action type; recoverable failure returns False;
+unrecoverable failure raises BridgeError; VEHICLE/COMBAT stubs raise NotImplementedError.
+
+`tests/test_core_dataclasses.py` — 128 tests for WorldState, Goal, RewardSpec, AuditReport,
+and all sub-types.
+
+### In-game integration tests (requires live Factorio + mod)
+
+`tests/integration/test_bridge_live.lua` — a Lua script loadable from the Factorio console
+that exercises each `fa.*` function against the live game and prints PASS/FAIL results.
+Tests are grouped into suites: state queries, action commands, and edge cases. Each test
+is independently runnable. See the script's header for usage instructions.
+
+The test script deliberately avoids relying on specific map state — it creates its own
+known conditions (e.g. drops an item, then checks ground_items) and cleans up after itself.
 
 ---
 
@@ -443,7 +595,9 @@ The brief template:
 - [x] Core dataclasses (`world/state.py`, `planning/goal.py`,
       `agent/examiner/audit_report.py`, `agent/state_machine.py`,
       `bridge/actions.py`) — 128 tests
-- [ ] Bridge / Lua mod
+- [x] Bridge — `bridge/rcon_client.py`, `bridge/state_parser.py`,
+      `bridge/action_executor.py`, `bridge/mod/control.lua`,
+      `bridge/mod/info.json` — 80 unit tests; in-game integration tests pending
 - [ ] World model (`entities.py` ResourceRegistry, `tech_tree.py`, `production_tracker.py`)
 - [ ] Planning layer
 - [ ] Primitives
