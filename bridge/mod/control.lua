@@ -98,7 +98,7 @@ local function get_player()
 end
 
 local function safe_json(t)
-    local ok, result = pcall(function() return game.table_to_json(t) end)
+    local ok, result = pcall(function() return helpers.table_to_json(t) end)
     if ok then
         return result
     else
@@ -563,8 +563,13 @@ function fa._threat_table()
     local attack_timers    = {}
     local evolution        = 0.0
 
-    if game.forces["enemy"] then
-        evolution = game.forces["enemy"].evolution_factor or 0.0
+    local enemy_force = game.forces["enemy"]
+    if enemy_force and player and player.valid then
+        -- 2.x: evolution is per-surface
+        local ok, val = pcall(function()
+            return enemy_force.get_evolution_factor(player.surface)
+        end)
+        if ok and val then evolution = val end
     end
 
     if player and player.valid then
@@ -609,7 +614,7 @@ local function ok_response()
 end
 
 local function err_response(reason)
-    return game.table_to_json({ok = false, reason = reason})
+    return helpers.table_to_json({ok = false, reason = reason})
 end
 
 -- 2.x: walking_state is on player.character, not the player object directly.
@@ -980,3 +985,19 @@ end
 -- Expose fa as a global
 -- ============================================================
 _G.fa = fa
+
+-- Testing: load suite and register as a remote command
+T = require("test_bridge_live")
+
+commands.add_command(
+    "agent-test",
+    "Run the factorio-agent bridge test suite. Usage: /agent-test [suite_name]",
+    function(event)
+        local arg = event.parameter
+        if arg and arg ~= "" then
+            T.run_suite(arg)
+        else
+            T.run_all()
+        end
+    end
+)

@@ -32,6 +32,13 @@
 -- Minimal test framework
 -- ============================================================
 
+local log_file = "agent-test-results.txt"
+
+local function test_print(msg)
+    game.print(msg)  -- still shows on screen
+    helpers.write_file(log_file, msg .. "\n", true)  -- also write to file (append)
+end
+
 local T = {}
 local results = {}   -- {suite, name, pass, reason}
 
@@ -81,9 +88,8 @@ local function make_assertions(suite_name, test_name)
             end
         end,
         json_ok = function(raw, msg)
-            -- Assert raw is valid JSON and return the parsed table.
             local ok, parsed = pcall(function()
-                return game.json_to_table(raw)
+                return helpers.json_to_table(raw)
             end)
             if not ok or parsed == nil then
                 fail(msg or ("invalid JSON: " .. tostring(raw):sub(1, 80)))
@@ -102,7 +108,7 @@ end
 function T.run_suite(name)
     local tests = suites[name]
     if not tests then
-        game.print("[TEST] Unknown suite: " .. tostring(name))
+        test_print("[TEST] Unknown suite: " .. tostring(name))
         return
     end
 
@@ -114,14 +120,14 @@ function T.run_suite(name)
         local ok, err = pcall(test_fn, assertions)
         if ok then
             pass_count = pass_count + 1
-            game.print("[PASS] " .. name .. " :: " .. test_name)
+            test_print("[PASS] " .. name .. " :: " .. test_name)
         else
             fail_count = fail_count + 1
-            game.print("[FAIL] " .. name .. " :: " .. test_name .. " — " .. tostring(err))
+            test_print("[FAIL] " .. name .. " :: " .. test_name .. " — " .. tostring(err))
         end
     end
 
-    game.print(
+    test_print(
         string.format("[SUITE %s] %d passed, %d failed",
                       name, pass_count, fail_count)
     )
@@ -132,12 +138,12 @@ function T.run_all()
     local total_pass = 0
     local total_fail = 0
     for name, _ in pairs(suites) do
-        game.print("─────── " .. name .. " ───────")
+        test_print("─────── " .. name .. " ───────")
         local passed = T.run_suite(name)
         -- Counts already printed per suite; tally for the final summary
         -- by re-scanning results (simple: run_suite prints its own summary)
     end
-    game.print("═══ Done. See per-suite summaries above. ═══")
+    test_print("═══ Done. See per-suite summaries above. ═══")
 end
 
 -- ============================================================
@@ -442,18 +448,17 @@ T.suite("action_commands", {
     end,
 
     craft_item_with_missing_ingredients_fails_gracefully = function(t)
-        -- Remove all iron plates from inventory temporarily.
         local player = get_player()
         local had = player.get_item_count("iron-plate")
-        player.remove_item({name = "iron-plate", count = had})
+        if had > 0 then
+            player.remove_item({name = "iron-plate", count = had})
+        end
 
         local raw = fa.craft_item("iron-gear-wheel", 1)
         local parsed = t.json_ok(raw)
-        -- Should fail with ok=false (no ingredients), not crash.
         t.ok(not parsed.ok or parsed.queued == 0,
-             "craft with no ingredients should return ok=false or queued=0")
+            "craft with no ingredients should return ok=false or queued=0")
 
-        -- Restore.
         if had > 0 then
             player.insert({name = "iron-plate", count = had})
         end
@@ -473,9 +478,10 @@ T.suite("action_commands", {
 
     place_entity_without_item_fails_gracefully = function(t)
         local player = get_player()
-        -- Ensure player has no iron chests.
         local had = player.get_item_count("iron-chest")
-        player.remove_item({name = "iron-chest", count = had})
+        if had > 0 then
+            player.remove_item({name = "iron-chest", count = had})
+        end
 
         local raw = fa.place_entity("iron-chest", player.position, 0)
         local parsed = t.json_ok(raw)
@@ -706,10 +712,8 @@ T.suite("edge_cases", {
 })
 
 -- ============================================================
--- Entry point — run all suites
+-- Entry point
 -- ============================================================
-
-T.run_all()
 
 -- Return T so callers can run individual suites after loading:
 --   /c local T = require("test_bridge_live")
