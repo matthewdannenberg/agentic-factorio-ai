@@ -111,6 +111,9 @@ def _kb_with(*tech_names: str, tmp_dir: str = None) -> tuple[KnowledgeBase, str]
     kb = KnowledgeBase(data_dir=Path(d), query_fn=qfn)
     for name in tech_names:
         kb.ensure_tech(name)
+    # Close the DB connection after loading — tech_tree tests only use the
+    # in-memory cache (no SQL query methods), so this is safe cross-platform.
+    kb.close()
     return kb, d
 
 
@@ -490,50 +493,55 @@ class TestAbsorbResearchState(unittest.TestCase):
 class TestTechTreePersistence(unittest.TestCase):
     def test_learned_tech_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            kb1 = KnowledgeBase(data_dir=Path(tmp),
-                                query_fn=_make_query_fn("automation", "logistics"))
-            TechTree(kb1).absorb_research_state(
-                _research("automation", queued=["logistics"])
-            )
-            kb2 = KnowledgeBase(data_dir=Path(tmp), query_fn=None)
-            tree2 = TechTree(kb2)
-            self.assertTrue(tree2.known("automation"))
-            self.assertTrue(tree2.known("logistics"))
+            with KnowledgeBase(data_dir=Path(tmp),
+                               query_fn=_make_query_fn("automation", "logistics")) as kb1:
+                TechTree(kb1).absorb_research_state(
+                    _research("automation", queued=["logistics"])
+                )
+            with KnowledgeBase(data_dir=Path(tmp), query_fn=None) as kb2:
+                tree2 = TechTree(kb2)
+                self.assertTrue(tree2.known("automation"))
+                self.assertTrue(tree2.known("logistics"))
 
     def test_prerequisites_survive_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            kb1 = KnowledgeBase(data_dir=Path(tmp),
-                                query_fn=_make_query_fn("automation", "logistics"))
-            kb1.ensure_tech("automation")
-            kb1.ensure_tech("logistics")
-            tree2 = TechTree(KnowledgeBase(data_dir=Path(tmp), query_fn=None))
-            self.assertEqual(tree2.prerequisites("logistics"), ["automation"])
+            with KnowledgeBase(data_dir=Path(tmp),
+                               query_fn=_make_query_fn("automation", "logistics")) as kb1:
+                kb1.ensure_tech("automation")
+                kb1.ensure_tech("logistics")
+            with KnowledgeBase(data_dir=Path(tmp), query_fn=None) as kb2:
+                tree2 = TechTree(kb2)
+                self.assertEqual(tree2.prerequisites("logistics"), ["automation"])
 
     def test_unlock_recipes_survive_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            kb1 = KnowledgeBase(data_dir=Path(tmp),
-                                query_fn=_make_query_fn("automation"))
-            kb1.ensure_tech("automation")
-            tree2 = TechTree(KnowledgeBase(data_dir=Path(tmp), query_fn=None))
-            self.assertIn("assembling-machine-1", tree2.unlocks_recipe("automation"))
+            with KnowledgeBase(data_dir=Path(tmp),
+                               query_fn=_make_query_fn("automation")) as kb1:
+                kb1.ensure_tech("automation")
+            with KnowledgeBase(data_dir=Path(tmp), query_fn=None) as kb2:
+                tree2 = TechTree(kb2)
+                self.assertIn("assembling-machine-1",
+                              tree2.unlocks_recipe("automation"))
 
     def test_is_reachable_works_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            kb1 = KnowledgeBase(data_dir=Path(tmp),
-                                query_fn=_make_query_fn("automation", "logistics"))
-            kb1.ensure_tech("automation")
-            kb1.ensure_tech("logistics")
-            tree2 = TechTree(KnowledgeBase(data_dir=Path(tmp), query_fn=None))
-            self.assertTrue(tree2.is_reachable("logistics", _research("automation")))
+            with KnowledgeBase(data_dir=Path(tmp),
+                               query_fn=_make_query_fn("automation", "logistics")) as kb1:
+                kb1.ensure_tech("automation")
+                kb1.ensure_tech("logistics")
+            with KnowledgeBase(data_dir=Path(tmp), query_fn=None) as kb2:
+                tree2 = TechTree(kb2)
+                self.assertTrue(tree2.is_reachable("logistics", _research("automation")))
 
     def test_next_researchable_works_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            kb1 = KnowledgeBase(data_dir=Path(tmp),
-                                query_fn=_make_query_fn("automation", "logistics"))
-            kb1.ensure_tech("automation")
-            kb1.ensure_tech("logistics")
-            tree2 = TechTree(KnowledgeBase(data_dir=Path(tmp), query_fn=None))
-            self.assertIn("automation", tree2.next_researchable(_research()))
+            with KnowledgeBase(data_dir=Path(tmp),
+                               query_fn=_make_query_fn("automation", "logistics")) as kb1:
+                kb1.ensure_tech("automation")
+                kb1.ensure_tech("logistics")
+            with KnowledgeBase(data_dir=Path(tmp), query_fn=None) as kb2:
+                tree2 = TechTree(kb2)
+                self.assertIn("automation", tree2.next_researchable(_research()))
 
 
 # ---------------------------------------------------------------------------

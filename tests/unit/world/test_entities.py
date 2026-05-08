@@ -51,6 +51,7 @@ class TestResourceRegistryReturnTypes(unittest.TestCase):
         self.reg = ResourceRegistry(self.kb)
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_ensure_returns_resource_record(self):
@@ -98,6 +99,7 @@ class TestResourceRegistryPlaceholderDefaults(unittest.TestCase):
         self.reg = ResourceRegistry(self.kb)
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_placeholder_is_fluid_false(self):
@@ -129,6 +131,7 @@ class TestResourceRegistryHelpers(unittest.TestCase):
         self.reg = ResourceRegistry(self.kb)
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_is_fluid_false_for_placeholder(self):
@@ -178,6 +181,7 @@ class TestResourceRegistrySafety(unittest.TestCase):
         self.reg = ResourceRegistry(self.kb)
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_ensure_does_not_raise_for_unknown_mod_resource(self):
@@ -234,6 +238,7 @@ class TestGetEntityMetadata(unittest.TestCase):
         self.kb = _make_kb(Path(self._tmp.name))
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_returns_entity_record(self):
@@ -270,6 +275,7 @@ class TestGetEntityMetadataPlaceholderDefaults(unittest.TestCase):
         self.kb = _make_kb(Path(self._tmp.name))
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_placeholder_category_is_other(self):
@@ -309,6 +315,7 @@ class TestGetEntityMetadataSafety(unittest.TestCase):
         self.kb = _make_kb(Path(self._tmp.name))
 
     def tearDown(self):
+        self.kb.close()
         self._tmp.cleanup()
 
     def test_does_not_raise_for_unknown_entity(self):
