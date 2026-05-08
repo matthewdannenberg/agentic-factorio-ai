@@ -35,7 +35,7 @@ The planning layer needs cross-domain queries that are expensive as dict scans:
 SQLite handles all of these with a single query and indexed lookups. The stdlib
 sqlite3 module requires no dependencies and stores to a single portable file.
 
-Public API (unchanged from CSV/JSON version, plus new query methods)
+Public API
 --------------------------------------------------------------------
 KnowledgeBase(data_dir, query_fn)
   .ensure_entity/resource/fluid/recipe/tech(name)  → Record
@@ -43,9 +43,9 @@ KnowledgeBase(data_dir, query_fn)
   .all_entities/resources/fluids/recipes/techs()    → dict[str, Record]
   .recipes_for_product(name)       → list[RecipeRecord]
   .recipes_for_ingredient(name)    → list[RecipeRecord]
-  .recipes_made_in(entity_name)    → list[RecipeRecord]   ← new
-  .techs_unlocking_recipe(name)    → list[TechRecord]     ← new
-  .production_chain(item)          → set[str]             ← new (recursive CTE)
+  .recipes_made_in(entity_name)    → list[RecipeRecord]   
+  .techs_unlocking_recipe(name)    → list[TechRecord]     
+  .production_chain(item)          → set[str]             
   .prerequisites(name)             → list[str]
   .all_prerequisites(name)         → set[str]
   .summary()                       → dict

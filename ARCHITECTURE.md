@@ -40,6 +40,50 @@ Nothing outside `bridge/` speaks RCON or knows about Lua. The rest of the system
 on `WorldState` objects and structured `Action` objects exclusively. This means the full
 agent stack can be tested against a mock game state without Factorio running.
 
+### The World Model Starts Empty
+
+The agent begins each fresh install knowing nothing about specific game content. There are
+no hard-coded entity lists, tech trees, or recipe tables. `KnowledgeBase` is populated
+entirely at runtime by querying Factorio's prototype API via RCON. Knowledge persists across
+runs in `data/knowledge/knowledge.db` (gitignored).
+
+This makes the system inherently mod-compatible: a mod that adds new buildings, resources,
+or technologies is handled automatically. The agent discovers them the first time they appear
+in the world, queries their prototype data, stores the results, and reasons about them
+identically to vanilla content — without any code changes.
+
+### KnowledgeBase Uses SQLite for Queryable Persistence
+
+Five knowledge domains (entities, resources, fluids, recipes, techs) are stored in eleven
+normalised tables. Recipes and techs are split into header + child tables because their
+ingredients, products, prerequisites, and unlock effects are variable-length lists that must
+be queryable by content. Scalar domains (entities, resources, fluids) use single flat tables.
+
+The planning layer needs cross-domain queries that are expensive as dict scans:
+- "All recipes that produce X" — indexed on `recipe_products(item_name)`
+- "All recipes that run in entity Y" — indexed on `recipe_made_in(entity_name)`
+- "Techs that unlock recipe X" — indexed on `tech_unlocks_recipes(recipe_name)`
+- "Full production chain for X" — recursive CTE over `recipe_ingredients`/`recipe_products`
+
+In-memory dicts act as a write-through cache so reads never hit the DB during normal
+operation. The SQLite connection is opened once per `KnowledgeBase` lifetime and must be
+explicitly closed (context manager or `.close()`) before the data directory is deleted —
+important on Windows where SQLite holds a file lock.
+
+### Placeholder / Enrichment Lifecycle
+
+When an unknown name is encountered offline (no RCON connection), a placeholder record is
+stored immediately with safe defaults and `is_placeholder=True`. Once a live connection
+becomes available, `KnowledgeBase.enrich_placeholders()` re-queries every placeholder
+across all five registries and replaces them with real data. Each `ensure_*` method also
+re-queries automatically if it encounters a placeholder and a `query_fn` is available,
+so enrichment happens opportunistically during normal operation as well as on explicit call.
+
+This means:
+- The agent never crashes or refuses to operate due to missing knowledge
+- Knowledge gaps are filled in automatically as the game runs
+- Subsequent sessions start with all previously-learned knowledge intact
+
 ### Rewards Are Self-Designed
 
 When the strategic LLM sets a goal, it simultaneously produces a `RewardSpec` — a structured
@@ -85,45 +129,6 @@ blind on resumption.
 and the rich examiner extracts reusable designs when production metrics cross a performance
 threshold. Blueprints accumulate across runs, representing genuine learned competence.
 
-The nomination/evaluation split is explicit:
-- `BlueprintCandidate` in `audit_report.py` is a **nomination** — the examiner flags a region
-- `BlueprintRecord` in `memory/blueprint_library/` is an **evaluation** — stored performance
-  data, tech tier, improvability estimate. Not yet implemented; designed when memory layer
-  is built.
-
-### Resource Types Are Strings, Not Enums
-
-Resource names are plain strings matching Factorio's internal item names (`"iron-ore"`,
-`"crude-oil"`, etc.). A `ResourceName` class provides named constants for vanilla resources
-but is not exhaustive. The `ResourceRegistry` in `world/entities.py` is the authoritative
-store of known resource metadata and is extended at runtime when the bridge parser encounters
-an unfamiliar name. This makes the system robust to Space Age and modded content without
-code changes.
-
-### WorldState Is a Belief State, Not Ground Truth
-
-`WorldState` is a cached, partially-observed snapshot. Different sections have different
-staleness characteristics. Staleness is tracked per-section via `observed_at: dict[str, int]`
-(section name → game tick of last bridge update). The `section_staleness(section, tick)`
-method returns ticks since last observation, or `None` if never observed.
-
-Sections and their typical freshness:
-- `player`, `logistics.power` — refreshed every tick cycle
-- `entities` near player — refreshed on local scan
-- `entities` far from player — may be many ticks stale
-- `resource_map` — updated only when agent physically visits a patch
-- `ground_items` — populated within local scan radius only
-- `damaged_entities` — refreshed on each bridge scan
-- `destroyed_entities` — rolling window, pruned by bridge
-- `threat` — only meaningful when `BITERS_ENABLED=True`
-
-### Structural Damage Is Cause-Agnostic
-
-`DamagedEntity` and `DestroyedEntity` live on `WorldState` directly, not inside `ThreatState`.
-They are populated regardless of cause — biter attack, vehicle collision, player error,
-deconstruction. `ThreatState` is strictly biter-specific. `DestroyedEntity.cause` is a
-string with known values: `"biter"` | `"vehicle"` | `"deconstruct"` | `"unknown"`.
-
 ### Actions Are Categorised and Context-Filtered
 
 Every `Action` subclass declares an `ActionCategory`. The function `actions_for_context(
@@ -133,28 +138,9 @@ valid on foot; `COMBAT` actions are only emitted when `BITERS_ENABLED=True`.
 
 ### Circuit Networks Are Explicitly Deferred
 
-Factorio's circuit network (wire connections, combinator logic, signal vocabularies, memory
-cells) is a full embedded programming language. It is intentionally out of scope for the
-initial implementation. The agent can play a complete game — including Space Age content and
-biter defence — without circuit networks. Adding them later means new `Action` subclasses
-and Lua mod extensions; no existing code changes.
-
-### Primitive vs Composite Actions
-
-`bridge/actions.py` contains only **primitive** actions — single atomic operations executed
-in one RCON round-trip. Multi-step sequences (walk to patch → mine N ore → return to base)
-are composed by `agent/primitives/` and `agent/execution.py`. Nothing in `actions.py`
-sequences or loops.
-
-### Entity Scanning Is Mod-Compatible by Design
-
-The Lua mod's entity scanner uses Factorio's `unit_number` property rather than a whitelist
-of entity type strings. `unit_number` is assigned by the engine to all persistent,
-player-interactable entities — assemblers, inserters, poles, chests, modded machines, turrets,
-trains — and is not assigned to trees, rocks, resources, decoratives, projectiles, or other
-cosmetic/transient objects. This means any building added by any mod is automatically visible
-to the agent without code changes. Player characters (which also have unit numbers) are
-excluded by an explicit type check.
+Factorio's circuit network is intentionally out of scope for the initial implementation.
+Adding them later means new `Action` subclasses and Lua mod extensions; no existing code
+changes.
 
 ---
 
@@ -170,13 +156,26 @@ factorio-agent/
 │   ├── action_executor.py           # Action objects → RCON commands
 │   └── mod/
 │       ├── info.json                # Factorio mod metadata (factorio_version: "2.0")
-│       └── control.lua              # Lua mod — exposes state, accepts commands
+│       └── control.lua              # Lua mod — exposes state, accepts commands,
+│                                    #   includes fa.get_entity_prototype(),
+│                                    #   fa.get_recipe_prototype(), fa.get_technology(),
+│                                    #   fa.get_fluid_prototype(), fa.get_resource_prototype()
 │
-├── world/                           # Pure data — no LLM, no RCON
+├── world/                           # Pure data and computation — no LLM, no RCON
 │   ├── state.py                     # WorldState and all sub-dataclasses
-│   ├── entities.py                  # Entity type definitions, ResourceRegistry
-│   ├── tech_tree.py                 # Research graph, unlock dependencies
-│   └── production_tracker.py        # Throughput over time — feeds reward + curation
+│   ├── knowledge.py                 # KnowledgeBase — SQLite-backed, runtime-extensible
+│   │                                #   Five registries: entities, resources, fluids,
+│   │                                #   recipes, techs. Eleven normalised tables.
+│   │                                #   Placeholder/enrichment lifecycle.
+│   │                                #   Cross-domain queries: recipes_for_product(),
+│   │                                #   recipes_for_ingredient(), recipes_made_in(),
+│   │                                #   techs_unlocking_recipe(), production_chain().
+│   ├── entities.py                  # Thin facade: ResourceRegistry, get_entity_metadata()
+│   ├── tech_tree.py                 # TechTree — KB-backed research graph
+│   │                                #   is_unlocked(), is_reachable(), path_to(),
+│   │                                #   next_researchable(), absorb_research_state()
+│   ├── production_tracker.py        # Throughput tracking over WorldState snapshots
+│   └── entities.py                  # (legacy API preserved — delegates to KnowledgeBase)
 │
 ├── agent/
 │   ├── loop.py                      # Master orchestration
@@ -189,7 +188,7 @@ factorio-agent/
 │   ├── examiner/
 │   │   ├── rich_examiner.py         # LLM-available: reflection + curation trigger
 │   │   ├── mechanical_auditor.py    # LLM-unavailable: pure-code health checks
-│   │   └── audit_report.py          # Shared dataclass — passed to LLM on resumption
+│   │   └── audit_report.py         # Shared dataclass — passed to LLM on resumption
 │   │
 │   ├── threat/
 │   │   ├── monitor.py               # Real threat detection (biters-on)
@@ -201,7 +200,7 @@ factorio-agent/
 │       ├── crafting.py
 │       ├── building.py
 │       ├── mining.py
-│       └── blueprint.py             # Apply blueprint string at location
+│       └── blueprint.py
 │
 ├── planning/
 │   ├── goal.py                      # Goal, RewardSpec, Priority enum, make_goal()
@@ -226,27 +225,34 @@ factorio-agent/
 │       ├── examination.md
 │       └── reflection.md
 │
+├── data/
+│   └── knowledge/
+│       └── knowledge.db             # SQLite — created at runtime, gitignored
+│                                    # Tables: entities, resources, fluids,
+│                                    #   recipes, recipe_ingredients, recipe_products,
+│                                    #   recipe_made_in, techs, tech_prerequisites,
+│                                    #   tech_unlocks_recipes, tech_unlocks_entities
+│
 ├── config.py                        # All tunable parameters
-│                                    # BITERS_ENABLED, LLM_CALL_BUDGET, TICK_INTERVAL
-│                                    # RCON_HOST/PORT/PASSWORD, scan radii
 │
 └── tests/
+    ├── test_core_dataclasses.py              ✅ 128 tests
     ├── unit/
-    │   └── bridge/
-    │       ├── test_rcon_client.py
-    │       ├── test_state_parser.py  # 80 tests — parser, partial updates, edge cases
-    │       └── test_action_executor.py
-    ├── mock_game_state.py            # Fake WorldState — no Factorio needed
-    ├── test_core_dataclasses.py      # 128 tests covering all core types
+    │   ├── bridge/
+    │   │   ├── test_state_parser.py          ✅ 80 tests
+    │   │   └── test_action_executor.py       ✅
+    │   └── world/
+    │       ├── test_knowledge.py             ✅ 75 tests
+    │       ├── test_entities.py              ✅ 36 tests
+    │       ├── test_tech_tree.py             ✅ 64 tests
+    │       └── test_production_tracker.py   ✅
     └── integration/
-        └── test_bridge_live.lua      # In-game console test suite (requires running game)
+        └── test_bridge_live.lua              In-game console test suite
 ```
 
 ---
 
 ## Core Dataclasses
-
-These are the interfaces everything else must satisfy. All are implemented and tested.
 
 ### WorldState (`world/state.py`)
 
@@ -263,213 +269,139 @@ Key fields:
 - `logistics`: `LogisticsState` — belt segments, power grid, inserter activity
 - `damaged_entities`: `list[DamagedEntity]` — entities below full health (any cause)
 - `destroyed_entities`: `list[DestroyedEntity]` — rolling window of destroyed entities
-- `destroyed_ttl_ticks`: pruning window for destroyed_entities (default 18 000)
 - `threat`: `ThreatState` — biter bases, pollution, attack timers (empty when biters off)
 
 Key methods: `entity_by_id()`, `entities_by_name()`, `entities_by_status()`,
 `resources_of_type()`, `inventory_count()`, `section_staleness()`, `has_damage`,
 `recent_losses`, `game_time_seconds`.
 
-Sub-types: `Position` (frozen), `Direction` (enum), `EntityStatus` (enum),
-`ResourceName` (string constants), `ResourceType = str`, `InventorySlot`, `Inventory`,
-`EntityState`, `ResourcePatch`, `GroundItem`, `ResearchState`, `BeltSegment`,
-`PowerGrid`, `LogisticsState`, `DamagedEntity`, `DestroyedEntity`, `BiterBase`,
-`ThreatState`, `PlayerState`.
+### KnowledgeBase (`world/knowledge.py`)
+
+The agent's persistent store of learned game knowledge. Backed by SQLite.
+
+**Registry methods** (all five domains follow the same pattern):
+- `ensure_*(name)` — return record, querying Factorio if unknown or if placeholder + query_fn
+- `get_*(name)` — return record or None, never queries
+- `all_*()` — return dict snapshot of in-memory cache
+
+**Cross-domain query methods**:
+- `recipes_for_product(item)` — recipes that produce a given item
+- `recipes_for_ingredient(item)` — recipes that consume a given item
+- `recipes_made_in(entity)` — recipes that can run in a given entity type
+- `techs_unlocking_recipe(recipe)` — techs whose effects unlock a given recipe
+- `production_chain(item)` — recursive ingredient closure (SQL recursive CTE)
+
+**Lifecycle methods**:
+- `enrich_placeholders()` — re-query all placeholder records; call once RCON connects
+- `close()` / context manager — must be called before deleting the data directory
+
+**query_fn injection**: `KnowledgeBase(data_dir, query_fn)` where `query_fn` is a
+`Callable[[str], str]` that sends a Lua expression and returns raw JSON. Injected by
+the main loop; `None` in tests and offline mode.
+
+### TechTree (`world/tech_tree.py`)
+
+Research dependency graph backed by KnowledgeBase. No static data — all knowledge
+is learned at runtime.
+
+Key methods:
+- `is_unlocked(tech, research)` — pure ResearchState lookup, no KB needed
+- `is_reachable(tech, research)` — True if all direct prerequisites are unlocked
+- `prerequisites(tech)` / `all_prerequisites(tech)` — direct and transitive prereqs
+- `unlocks_recipe(tech)` / `unlocks_entity(tech)` — what a tech grants
+- `path_to(tech, research)` — ordered list of techs to research; topological sort
+- `next_researchable(research)` — all techs with prerequisites met, sorted by depth
+- `absorb_research_state(research)` — ensure all mentioned techs are in KB; call
+  each tick cycle so the KB grows to match the agent's actual tech state
 
 ### Goal and RewardSpec (`planning/goal.py`)
 
-Produced by the strategic or tactical LLM. Contains its own `RewardSpec`.
-
-Goal key fields:
-- `id`: UUID4 string (auto-generated)
-- `description`: human-readable
-- `priority`: `Priority` IntEnum — BACKGROUND(0) / NORMAL(1) / URGENT(2) / EMERGENCY(3)
-- `success_condition`: evaluable expression string against WorldState
-- `failure_condition`: evaluable expression string against WorldState
-- `reward_spec`: `RewardSpec` instance
-- `parent_id`: for subgoals (str | None)
-- `status`: `GoalStatus` — PENDING / ACTIVE / SUSPENDED / COMPLETE / FAILED
-- `created_at`, `resolved_at`: game ticks
-
-Goal lifecycle: `activate(tick)` → `suspend()` → `activate(tick)` → `complete(tick)` or
-`fail(tick)`. Illegal transitions raise `RuntimeError`.
-
-RewardSpec key fields:
-- `success_reward`, `failure_penalty`: floats
-- `milestone_rewards`: `dict[str, float]` — condition expression → partial reward
-- `time_discount`: float in (0.0, 1.0] — reward decay per tick (1.0 = no decay)
-- `calibration_notes`: str — LLM's forward assessment for reflection call
-
-Factory function: `make_goal(description, success_condition, failure_condition, ...)` —
-flat constructor that handles RewardSpec nesting.
+Produced by the strategic or tactical LLM. See original ARCHITECTURE documentation.
 
 ### AuditReport (`agent/examiner/audit_report.py`)
 
-Produced by either examiner mode. Passed to LLM as context on resumption after rate
-limiting. `merge()` combines reports accumulated during blackout periods.
-
-Key fields:
-- `tick`, `mode` (RICH | MECHANICAL), `observation_ticks`
-- `starved_entities`: `list[StarvedEntity]` — machines with missing inputs
-- `idle_entities`: `list[IdleEntity]` — non-working machines
-- `power_headroom_kw`, `power_satisfaction`
-- `belt_congestion`: `list[CongestionSegment]`
-- `production_rates`: `dict[str, float]` — item → items/minute
-- `anomalies`: `list[Anomaly]` — severity-sorted (CRITICAL / WARNING / INFO)
-- `damaged_entities`: `list[DamagedEntityRecord]` — cause-agnostic, not biter-gated
-- `destroyed_entities`: `list[DestroyedEntityRecord]` — cause-agnostic, not biter-gated
-- `blueprint_candidates`: `list[BlueprintCandidate]` — rich mode only; nominations only
-- `llm_observations`: str — rich mode only
-
-`BoundingBox` (frozen): `min_x, min_y, max_x, max_y` (int tile coords). Matches Factorio's
-blueprint capture API. Properties: `width`, `height`, `area`, `center_x/y`, `contains()`.
-
-`BlueprintCandidate`: nomination only — `region_description`, `bounds: BoundingBox`,
-`performance_metric`, `rationale`. Evaluation (throughput/tile, tech tier, improvability)
-lives in `BlueprintRecord` in the memory layer (not yet implemented).
+Produced by either examiner mode. See original ARCHITECTURE documentation.
 
 ### Action types (`bridge/actions.py`)
 
-Frozen dataclasses. Every action declares an `ActionCategory`. 21 concrete types across
-10 categories.
-
-Categories and types:
-- `MOVEMENT`: `MoveTo`, `StopMovement`
-- `MINING`: `MineResource`, `MineEntity`
-- `CRAFTING`: `CraftItem`
-- `BUILDING`: `PlaceEntity`, `SetRecipe`, `SetFilter`, `ApplyBlueprint`
-- `INVENTORY`: `TransferItems`
-- `RESEARCH`: `SetResearchQueue`
-- `PLAYER`: `EquipArmor`, `UseItem` (fish, capsules, grenades — target_position optional)
-- `VEHICLE`: `EnterVehicle`, `ExitVehicle`, `DriveVehicle` (stub — unused until vehicles needed)
-- `COMBAT`: `SelectWeapon`, `ShootAt`, `StopShooting` (stub — unused until `BITERS_ENABLED`)
-- `META`: `Wait`, `NoOp`
-
-`ShootAt` validates that exactly one of `target_entity_id` or `target_position` is provided.
-
-`ACTIONS_BY_CATEGORY`: `dict[ActionCategory, tuple[type[Action], ...]]` — built at import.
-
-`actions_for_context(in_vehicle=False, biters_enabled=False)` — returns valid action types
-for the current execution context. Called by execution layer at goal-start and on context
-change (board/exit vehicle, biter config toggle).
+21 concrete types across 10 categories. See original ARCHITECTURE documentation.
 
 ### AgentState (`agent/state_machine.py`)
 
 Four states: `PLANNING`, `EXECUTING`, `EXAMINING`, `WAITING`.
-`ExamineMode`: `RICH`, `MECHANICAL`.
-`assert_valid_transition(from, to)` — raises `RuntimeError` on illegal moves.
-
-Valid transitions:
-- PLANNING → EXECUTING
-- EXECUTING → EXAMINING, PLANNING (emergency preempt)
-- EXAMINING → PLANNING, WAITING
-- WAITING → EXAMINING
 
 ---
 
 ## Bridge Layer
 
-### Overview
+### `bridge/mod/control.lua` — Prototype Query Functions
 
-The bridge layer is the only part of the system that speaks RCON or knows about Lua. It has
-three Python components and one embedded Lua component.
+In addition to the state query and action command functions documented previously,
+the Lua mod exposes five prototype query functions used by `KnowledgeBase` for discovery:
 
+- `fa.get_entity_prototype(name)` — tile dimensions, type, recipe slot, ingredient/output
+  slot counts. Used to populate `EntityRecord` on first encounter.
+- `fa.get_resource_prototype(name)` — whether the resource yields a fluid, whether it is
+  infinite, display name.
+- `fa.get_fluid_prototype(name)` — default and max temperature, fuel value in joules,
+  emissions multiplier.
+- `fa.get_recipe_prototype(name)` — ingredients, products (with amounts and probabilities),
+  crafting time, category, and which entity types can craft it (derived by scanning
+  `game.entity_prototypes` for matching crafting categories).
+- `fa.get_technology(name)` — prerequisites, effects (unlock-recipe and give-item),
+  whether it is currently researched and enabled.
+
+All five return `{"ok": false, "reason": "..."}` if the prototype does not exist.
+
+---
+
+## World Model Layer
+
+### Design principles
+
+**Starts empty, grows at runtime.** No vanilla content is hard-coded. Every entity,
+resource, fluid, recipe, and technology the agent encounters is queried from Factorio,
+stored in SQLite, and available for future reasoning. This makes the system inherently
+compatible with mods and Space Age content.
+
+**EntityCategory is agent vocabulary, not game data.** Factorio has prototype type strings
+(`"furnace"`, `"assembling-machine"`). The agent maps these to its own category enum
+(`SMELTING`, `ASSEMBLY`) for reasoning purposes. The mapping is minimal — only types where
+the category meaningfully changes what actions or reasoning apply. Unknown types fall through
+to `OTHER` safely.
+
+**Placeholders are first-class.** A placeholder record (`is_placeholder=True`) represents
+"we know this thing exists but don't yet know its properties." The agent can operate on
+placeholders — it just can't make category-specific decisions. Placeholders are enriched
+automatically when a live connection is available.
+
+**Normalisation enables planning queries.** Recipes are split into header + ingredient,
+product, and made-in child tables so the planning layer can ask "what produces X?" and
+"what can this machine make?" as indexed SQL queries rather than Python scans. The
+`production_chain()` recursive CTE computes the full ingredient closure of any item in
+a single SQL statement.
+
+### Knowledge file location
+
+`data/knowledge/knowledge.db` — single SQLite file. Add `data/` to `.gitignore`.
+Missing on first run: `KnowledgeBase.__init__` creates the directory and schema automatically.
+
+### Main loop integration points
+
+```python
+# At startup — create shared KB and inject query_fn once RCON connects
+kb = KnowledgeBase(data_dir=Path("data/knowledge"), query_fn=rcon_client.send)
+kb.enrich_placeholders()   # re-query anything learned offline in a previous session
+
+# Shared instances
+resource_registry = ResourceRegistry(kb)   # passed to StateParser
+tech_tree = TechTree(kb)
+production_tracker = ProductionTracker()
+
+# Each tick cycle — after bridge returns a new WorldState
+tech_tree.absorb_research_state(world_state.research)
+production_tracker.update(world_state)
 ```
-Python agent                          Factorio game process
-─────────────────                     ─────────────────────
-ActionExecutor  ──── RCON /c cmd ───► control.lua (fa.*)
-StateParser     ◄─── JSON string ──── control.lua (fa.*)
-RconClient          (TCP socket)
-```
-
-### `bridge/rcon_client.py` — RconClient
-
-Manages the TCP connection to Factorio's RCON server. Implements the RCON binary protocol
-(4-byte little-endian length-prefixed packets, type-3 auth, type-2 exec, type-0 response).
-Thread-safe via a single lock. Reconnects with exponential backoff on transient failures.
-
-Key methods: `connect()`, `send(command) → str`, `is_connected() → bool`, `close()`.
-Also usable as a context manager. Raises `BridgeError` on unrecoverable failures.
-
-### `bridge/state_parser.py` — StateParser
-
-Translates JSON strings from the Lua mod into `WorldState` objects. Accepts either a full
-snapshot or a single-section partial update.
-
-Key design properties:
-- Unknown resource names (e.g. mod resources) are registered in `ResourceRegistry` rather
-  than rejected. The parser is the first point where mod resources enter the Python model.
-- Every populated section stamps `WorldState.observed_at[section] = current_tick`. Absent
-  sections are not stamped, preserving staleness information for consumers.
-- `destroyed_entities` is a rolling window: new events from the Lua circular buffer are
-  merged with the existing list, then pruned to `WorldState.destroyed_ttl_ticks`.
-- `DestroyedEntity.cause` is normalised to one of the four canonical strings; anything
-  unrecognised becomes `"unknown"`.
-- All section parsers are defensively typed — wrong types and missing fields produce safe
-  defaults, never exceptions.
-
-Key methods:
-- `parse(raw, current_tick) → WorldState` — full parse into a fresh WorldState.
-- `parse_partial(raw, section, into) → WorldState` — merge one section into existing state.
-
-### `bridge/action_executor.py` — ActionExecutor
-
-Translates `Action` objects into RCON Lua commands. Dispatches on `action.kind` (the class
-name string) via a class-level dictionary. One RCON call per action.
-
-Failure modes:
-- Returns `False` for recoverable failures (entity out of reach, item missing, etc.) — the
-  Lua mod returns `{"ok": false, "reason": "..."}`.
-- Raises `BridgeError` when the Lua side returns non-JSON (indicates a crash or mod error).
-- Raises `NotImplementedError` for VEHICLE and COMBAT stub actions.
-
-Does not validate contextual appropriateness — that is `actions_for_context()`'s job.
-
-### `bridge/mod/control.lua` — Lua mod
-
-Runs inside Factorio. Exposes a global `fa` table callable from RCON `/c` commands.
-
-**State queries** (return JSON strings via `rcon.print()`):
-- `fa.get_state(opts)` — full snapshot, all sections, drains destruction buffer
-- `fa.get_player()`, `fa.get_entities(r)`, `fa.get_resource_map(r)` — individual sections
-- `fa.get_ground_items(r)`, `fa.get_research()`, `fa.get_logistics(r)` — individual sections
-- `fa.get_damaged_entities(r)`, `fa.drain_destruction_events()`, `fa.get_threat()` — individual sections
-- `fa.get_tick()` — current game tick as a string
-
-**Action commands** (return `{"ok":true}` or `{"ok":false,"reason":"..."}`):
-- Movement: `fa.move_to(pos, pathfind)`, `fa.stop_movement()`
-- Mining: `fa.mine_resource(pos, name, count)`, `fa.mine_entity(id)`
-- Crafting: `fa.craft_item(recipe, count)`
-- Building: `fa.place_entity(item, pos, dir)`, `fa.set_recipe(id, recipe)`,
-  `fa.set_filter(id, slot, item)`, `fa.apply_blueprint(string, pos, dir, force)`
-- Inventory: `fa.transfer_items(id, to_player, item, count)`
-- Research: `fa.set_research_queue(techs)`
-- Player: `fa.equip_armor(item)`, `fa.use_item(item, pos)`
-- Stubs: `fa.enter_vehicle`, `fa.exit_vehicle`, `fa.drive_vehicle` (vehicle)
-- Stubs: `fa.select_weapon`, `fa.shoot_at`, `fa.stop_shooting` (combat)
-
-**Notable implementation details:**
-- Entity scanning uses `unit_number` presence rather than a type whitelist. Any modded
-  building is automatically included. Player characters are excluded by type check.
-- `fa.move_to` supports all 8 compass directions including diagonals. Uses a 2:1 axis
-  ratio threshold to choose between cardinal and diagonal movement.
-- The destruction event circular buffer (512 entries) is populated by `on_entity_died`
-  and drained atomically by `fa.get_state()` or `fa.drain_destruction_events()`.
-- Power statistics use the 2.x `get_flow_count{name, category, precision_index, count}`
-  API, summing across all producer and consumer prototypes in the network.
-- Health ratios use `entity.health / entity.max_health` (2.x; `get_health_ratio()` removed).
-- Research queue management uses `force.add_research()` / `force.cancel_current_research()`
-  (2.x; direct table assignment removed).
-
-**2.x API changes from 1.x** (summary for future reference):
-- Logistic chest type names: `logistic-chest-*` → `passive-provider-chest`, etc.
-- `player.reach_distance` → `player.character.reach_distance`
-- `player.walking_state` → `player.character.walking_state`
-- `entity.get_health_ratio()` → `entity.health / entity.max_health`
-- `get_flow_count("output", true)` → `get_flow_count{name=..., category=..., ...}`
-- `force.research_queue = {...}` → `force.add_research()` / `force.cancel_current_research()`
-- `spawner.spawner_data.max_count` → `spawner.unit_count`
-- `entity.get_recipe()` returns two values in 2.x; capture only the first
 
 ---
 
@@ -514,7 +446,8 @@ Each layer is independently testable before the next is built.
    `Action` types, `AgentState` — 128 tests passing
 2. **Bridge** ✅ — RCON client, Lua mod, state parser, action executor — 80 tests passing
    (unit tests against mock RCON; in-game integration tests pending live game)
-3. **World** — `ResourceRegistry`, tech tree, production tracker
+3. **World model** ✅ — `KnowledgeBase` (SQLite), `ResourceRegistry`, `TechTree`,
+   `ProductionTracker` — 175+ tests passing
 4. **Planning** — goal tree, reward evaluator, resource allocator (stub)
 5. **Primitives** — movement, crafting, building, mining
 6. **Execution layer** — composes primitives against active goal
@@ -531,26 +464,34 @@ Each layer is independently testable before the next is built.
 
 ### Unit tests (no Factorio required)
 
-`tests/unit/bridge/test_state_parser.py` — 80 tests covering full parse, partial parse,
-safe defaults, unknown resource registration, destroyed entity cause normalisation, TTL
-pruning, and all WorldState accessor methods.
+`tests/unit/world/test_knowledge.py` — 75 tests covering all five registries, placeholder
+lifecycle, enrichment, persistence across simulated restarts, SQL query methods
+(`recipes_for_product`, `recipes_for_ingredient`, `recipes_made_in`,
+`techs_unlocking_recipe`, `production_chain`), and Windows SQLite file-lock safety
+(context manager usage throughout).
 
-`tests/unit/bridge/test_action_executor.py` — round-trip tests asserting the correct Lua
-command string is produced for each action type; recoverable failure returns False;
-unrecoverable failure raises BridgeError; VEHICLE/COMBAT stubs raise NotImplementedError.
+`tests/unit/world/test_entities.py` — 36 tests covering the `ResourceRegistry` facade and
+`get_entity_metadata()` delegation, placeholder defaults, safety guarantees, and correct
+passthrough of real records injected directly into the KB cache.
 
-`tests/test_core_dataclasses.py` — 128 tests for WorldState, Goal, RewardSpec, AuditReport,
-and all sub-types.
+`tests/unit/world/test_tech_tree.py` — 64 tests covering empty-KB behaviour, prerequisite
+queries, reachability, unlock queries, path planning, next-researchable, absorb lifecycle,
+persistence across restarts, and mod compatibility.
+
+`tests/unit/world/test_production_tracker.py` — throughput tracking, gap handling,
+stall detection, and summary generation.
+
+### Windows compatibility note
+
+SQLite holds a file lock for the lifetime of the connection. All tests use `KnowledgeBase`
+as a context manager (`with KnowledgeBase(...) as kb:`) or call `kb.close()` explicitly
+in `tearDown` before `TemporaryDirectory.cleanup()`. This prevents `PermissionError` on
+Windows when the temp directory is deleted while the connection is still open.
 
 ### In-game integration tests (requires live Factorio + mod)
 
-`tests/integration/test_bridge_live.lua` — a Lua script loadable from the Factorio console
-that exercises each `fa.*` function against the live game and prints PASS/FAIL results.
-Tests are grouped into suites: state queries, action commands, and edge cases. Each test
-is independently runnable. See the script's header for usage instructions.
-
-The test script deliberately avoids relying on specific map state — it creates its own
-known conditions (e.g. drops an item, then checks ground_items) and cleans up after itself.
+`tests/integration/test_bridge_live.lua` — exercises each `fa.*` function against the live
+game and prints PASS/FAIL results. See the script's header for usage instructions.
 
 ---
 
@@ -559,7 +500,7 @@ known conditions (e.g. drops an item, then checks ground_items) and cleans up af
 When opening a new conversation to implement a component, include:
 
 1. `ARCHITECTURE.md` (this file) — full or relevant sections
-2. `CONVERSATION_BRIEF.md` — the specific brief for this component (see below)
+2. `CONVERSATION_BRIEF.md` — the specific brief for this component
 3. The actual source files for all interfaces the component must satisfy or consume
 4. The test file — so the implementer can run and extend it
 
@@ -598,8 +539,9 @@ The brief template:
 - [x] Bridge — `bridge/rcon_client.py`, `bridge/state_parser.py`,
       `bridge/action_executor.py`, `bridge/mod/control.lua`,
       `bridge/mod/info.json` — 80 unit tests; in-game integration tests pending
-- [ ] World model (`entities.py` ResourceRegistry, `tech_tree.py`, `production_tracker.py`)
-- [ ] Planning layer
+- [x] World model — `world/knowledge.py`, `world/entities.py`, `world/tech_tree.py`,
+      `world/production_tracker.py` — 175+ tests
+- [ ] Planning layer (`goal_tree.py`, `reward_evaluator.py`, `resource_allocator.py`)
 - [ ] Primitives
 - [ ] Execution layer
 - [ ] Examination layer
