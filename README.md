@@ -27,13 +27,27 @@ for persistent, queryable storage of all learned game knowledge.
 [ ] Threat module (biters)
 ```
 
-### World model test breakdown
+### Unit Test Breakdown - by source file
 
 ```
-[✅] world/knowledge.py        75 tests — SQLite-backed KnowledgeBase
-[✅] world/entities.py         36 tests — ResourceRegistry and entity metadata facade
-[✅] world/tech_tree.py        64 tests — KnowledgeBase-backed TechTree
-[✅] world/production_tracker.py  (existing tests passing)
+[✅] agent/examiner/              25 tests — AuditReport
+[✅] agent/state_machine.py       9 tests  — StateMachine
+[✅] bridge/action_executor.py    28 tests — ActionExecutor
+[✅] bridge/actions.py            40 tests — Action, ActionCategory, and actions_for_context
+[✅] bridge/rcon_client.py        5 tests  — RconClient
+[✅] bridge/state_parser.py       38 tests — StateParser
+[✅] planning/goal.py             20 tests — Goal, Priority, RewardSpec
+[✅] world/entities.py            36 tests — ResourceRegistry and entity metadata facade
+[✅] world/knowledge.py           75 tests — SQLite-backed KnowledgeBase
+[✅] world/production_tracker.py  25 tests — ProductionSummary, ProductionTracker
+[✅] world/state.py               34 tests — Inventory, Position, WorldState
+[✅] world/tech_tree.py           64 tests — KnowledgeBase-backed TechTree
+```
+
+### Integration Test Breakdown - by test file in tests/integration/
+
+```
+[✅] test_StateParser_WorldState  9 tests  — StateParser with WorldState
 ```
 
 ## Architecture
