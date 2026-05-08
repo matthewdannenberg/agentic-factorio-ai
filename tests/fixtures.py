@@ -2,6 +2,8 @@
     Support fixtures necessary for multiple test files.
 """
 
+import json 
+
 class MockRconClient:
     """Fake RCON client that records commands sent and returns canned responses."""
 

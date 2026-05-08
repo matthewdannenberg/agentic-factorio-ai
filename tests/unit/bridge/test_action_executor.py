@@ -1,9 +1,9 @@
 """
-tests/unit/bridge/action_executor.py
+tests/unit/bridge/test_action_executor.py
 
 Tests for bridge/actions.py and bridge/action_executor.py
 
-Run with:  python tests/unit/bridge/action_executor.py
+Run with:  python tests/unit/bridge/test_action_executor.py
 """
 
 from __future__ import annotations

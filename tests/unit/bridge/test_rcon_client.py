@@ -1,9 +1,9 @@
 """
-tests/unit/bridge/rcon_client.py
+tests/unit/bridge/test_rcon_client.py
 
 Tests for bridge/rcon_client.py
 
-Run with:  python tests/unit/bridge/rcon_client.py
+Run with:  python tests/unit/bridge/test_rcon_client.py
 """
 
 from __future__ import annotations

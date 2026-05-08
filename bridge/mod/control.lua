@@ -606,6 +606,243 @@ function fa._threat_table()
 end
 
 -- ============================================================
+-- Prototype query functions
+-- Called by KnowledgeBase when an unknown entity/resource/fluid/
+-- recipe/technology is first encountered at runtime.
+-- Each returns a JSON object with the prototype's key properties,
+-- or {"ok":false,"reason":"..."} if the prototype doesn't exist.
+-- ============================================================
+
+-- Returns physical + crafting metadata for a placed entity prototype.
+-- Used to populate EntityRecord on first encounter.
+function fa.get_entity_prototype(entity_name)
+    local proto = game.entity_prototypes[entity_name]
+    if not proto then
+        return err_response("unknown_entity_prototype: " .. tostring(entity_name))
+    end
+
+    -- Ingredient slot count: only assembling-machine types expose this.
+    local ingredient_slots = 0
+    local ok_ing, n_ing = pcall(function()
+        return proto.ingredient_count or 0
+    end)
+    if ok_ing and n_ing then ingredient_slots = n_ing end
+
+    -- has_recipe_slot: true if the entity has a crafting_categories table.
+    local has_recipe_slot = false
+    local ok_cc, cc = pcall(function() return proto.crafting_categories end)
+    if ok_cc and cc and next(cc) ~= nil then has_recipe_slot = true end
+
+    -- output_slots: approximated from the result inventory size.
+    local output_slots = 0
+    local ok_oi, oi = pcall(function()
+        return proto.get_inventory_size(defines.inventory.assembling_machine_output)
+            or proto.get_inventory_size(defines.inventory.furnace_result)
+            or 0
+    end)
+    if ok_oi and oi then output_slots = oi end
+
+    return safe_json({
+        name             = proto.name,
+        type             = proto.type,
+        tile_width       = proto.tile_width  or 1,
+        tile_height      = proto.tile_height or 1,
+        has_recipe_slot  = has_recipe_slot,
+        ingredient_slots = ingredient_slots,
+        output_slots     = output_slots,
+    })
+end
+
+-- Returns fluid prototype properties.
+-- The temperature argument is informational only (used as a label by Python);
+-- the prototype data is the same regardless of temperature variant.
+function fa.get_fluid_prototype(fluid_name)
+    local proto = game.fluid_prototypes[fluid_name]
+    if not proto then
+        return err_response("unknown_fluid_prototype: " .. tostring(fluid_name))
+    end
+
+    -- fuel_value is in joules (J); Python converts to MJ.
+    local fuel_value = 0.0
+    local ok_fv, fv = pcall(function() return proto.fuel_value or 0.0 end)
+    if ok_fv and fv then fuel_value = fv end
+
+    return safe_json({
+        name                  = proto.name,
+        default_temperature   = proto.default_temperature or 15,
+        max_temperature       = proto.max_temperature or proto.default_temperature or 15,
+        fuel_value            = fuel_value,
+        emissions_multiplier  = proto.emissions_multiplier or 1.0,
+        is_hidden             = proto.hidden or false,
+    })
+end
+
+-- Returns resource patch prototype properties (mineable resources).
+function fa.get_resource_prototype(resource_name)
+    local proto = game.entity_prototypes[resource_name]
+    if not proto or proto.type ~= "resource" then
+        return err_response("unknown_resource_prototype: " .. tostring(resource_name))
+    end
+
+    -- Determine if the resource yields a fluid.
+    local is_fluid = false
+    local is_infinite = false
+    local ok_mp, mp = pcall(function() return proto.mineable_properties end)
+    if ok_mp and mp then
+        is_infinite = mp.infinite or false
+        for _, product in ipairs(mp.products or {}) do
+            if product.type == "fluid" then
+                is_fluid = true
+                break
+            end
+        end
+    end
+
+    -- Build a display name from the localised name if available, else the raw name.
+    local display_name = resource_name
+    local ok_ln, ln = pcall(function()
+        return proto.localised_name and helpers.localise_string(proto.localised_name)
+    end)
+    if ok_ln and ln then display_name = ln end
+
+    return safe_json({
+        name         = proto.name,
+        is_fluid     = is_fluid,
+        is_infinite  = is_infinite,
+        display_name = display_name,
+    })
+end
+
+-- Returns recipe prototype: ingredients, products, crafting time, category.
+-- Called when KnowledgeBase.ensure_recipe() encounters an unknown recipe.
+function fa.get_recipe_prototype(recipe_name)
+    -- Recipes are force-specific in 2.x; use the player force.
+    local force = game.forces["player"]
+    local recipe = force and force.recipes[recipe_name]
+
+    -- Fall back to the raw prototype if the force recipe isn't available
+    -- (e.g. during early game before the recipe is enabled).
+    if not recipe then
+        local proto = game.recipe_prototypes[recipe_name]
+        if not proto then
+            return err_response("unknown_recipe: " .. tostring(recipe_name))
+        end
+
+        local ingredients = {}
+        for _, ing in ipairs(proto.ingredients or {}) do
+            table.insert(ingredients, {
+                name        = ing.name,
+                amount      = ing.amount or 1,
+                type        = ing.type or "item",
+                temperature = ing.temperature,
+            })
+        end
+        local products = {}
+        for _, prod in ipairs(proto.products or {}) do
+            table.insert(products, {
+                name        = prod.name,
+                amount      = prod.amount or prod.amount_min or 1,
+                probability = prod.probability or 1.0,
+                type        = prod.type or "item",
+                temperature = prod.temperature,
+            })
+        end
+
+        -- Determine which entity types can craft this recipe category.
+        local made_in = {}
+        for proto_name, ep in pairs(game.entity_prototypes) do
+            local ok, cc = pcall(function() return ep.crafting_categories end)
+            if ok and cc and cc[proto.category] then
+                table.insert(made_in, proto_name)
+            end
+        end
+
+        return safe_json({
+            name             = proto.name,
+            category         = proto.category or "crafting",
+            energy_required  = proto.energy_required or 0.5,
+            ingredients      = ingredients,
+            products         = products,
+            made_in          = made_in,
+            enabled          = proto.enabled,
+        })
+    end
+
+    -- Use the force recipe (has live enabled state).
+    local ingredients = {}
+    for _, ing in ipairs(recipe.ingredients or {}) do
+        table.insert(ingredients, {
+            name        = ing.name,
+            amount      = ing.amount or 1,
+            type        = ing.type or "item",
+            temperature = ing.temperature,
+        })
+    end
+    local products = {}
+    for _, prod in ipairs(recipe.products or {}) do
+        table.insert(products, {
+            name        = prod.name,
+            amount      = prod.amount or prod.amount_min or 1,
+            probability = prod.probability or 1.0,
+            type        = prod.type or "item",
+            temperature = prod.temperature,
+        })
+    end
+
+    local made_in = {}
+    for proto_name, ep in pairs(game.entity_prototypes) do
+        local ok, cc = pcall(function() return ep.crafting_categories end)
+        if ok and cc and cc[recipe.category] then
+            table.insert(made_in, proto_name)
+        end
+    end
+
+    return safe_json({
+        name             = recipe.name,
+        category         = recipe.category or "crafting",
+        energy_required  = recipe.energy,
+        ingredients      = ingredients,
+        products         = products,
+        made_in          = made_in,
+        enabled          = recipe.enabled,
+    })
+end
+
+-- Returns technology node: prerequisites and unlock effects.
+-- Called when KnowledgeBase.ensure_tech() encounters an unknown tech.
+function fa.get_technology(tech_name)
+    local force = game.forces["player"]
+    if not force then return err_response("no_player_force") end
+
+    local tech = force.technologies[tech_name]
+    if not tech then
+        return err_response("unknown_technology: " .. tostring(tech_name))
+    end
+
+    local prerequisites = {}
+    for name, _ in pairs(tech.prerequisites or {}) do
+        table.insert(prerequisites, name)
+    end
+
+    local effects = {}
+    for _, effect in ipairs(tech.effects or {}) do
+        table.insert(effects, {
+            type   = effect.type,
+            recipe = effect.recipe,
+            item   = effect.item,
+        })
+    end
+
+    return safe_json({
+        name          = tech.name,
+        prerequisites = prerequisites,
+        effects       = effects,
+        researched    = tech.researched,
+        enabled       = tech.enabled,
+    })
+end
+
+-- ============================================================
 -- Action command functions
 -- ============================================================
 
