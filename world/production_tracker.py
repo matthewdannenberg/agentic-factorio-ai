@@ -13,15 +13,44 @@ Rules:
   player manually moving items).
 - Handles gaps gracefully — missing ticks are not fabricated.
 - Nothing in this module imports from bridge/, agent/, planning/, llm/, or memory/.
+
+Condition scope:
+  production_rate() is a PROXIMAL condition — it only reflects entities within
+  the current LOCAL_SCAN_RADIUS.  See CONDITION_SCOPE.md for the full
+  discussion of what this means for goal evaluation and how to write conditions
+  that handle it correctly.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 from world.state import EntityStatus, WorldState
+
+
+# ---------------------------------------------------------------------------
+# Protocol — the interface the RewardEvaluator depends on
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class ProductionTrackerProtocol(Protocol):
+    """
+    Minimum interface the RewardEvaluator requires from a production tracker.
+
+    Concrete implementations (ProductionTracker) may expose additional methods
+    (rates_all, is_stalled, summary, etc.) but the evaluator only calls rate().
+    Any object satisfying this protocol can be injected as a tracker.
+    """
+
+    def rate(self, item: str, window_ticks: int = 3600) -> float:
+        """
+        Return the smoothed production rate for *item* in items per minute.
+        Returns 0.0 if insufficient history or item has never been tracked.
+        Never raises.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +106,14 @@ class ProductionTracker:
     Fallback signal (inventory delta):
       When inserter activity is sparse (early game, no logistic data), the tracker
       diffs output inventory contents of chest entities across snapshots.
+
+    IMPORTANT — scan-radius limitation (PROXIMAL condition):
+      Only entities within the bridge's current LOCAL_SCAN_RADIUS contribute to
+      rate measurements each tick.  An assembler that is off-screen is invisible
+      to the tracker while the player is away.  Conditions written using
+      production_rate() are therefore PROXIMAL — they only reflect the factory
+      segment the player is currently standing near.
+      See CONDITION_SCOPE.md for the full discussion and mitigation strategies.
     """
 
     # Maximum snapshots to retain — ~10 minutes at 1 snapshot/second

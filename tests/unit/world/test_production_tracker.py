@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import unittest
 
-from world.entities import EntityCategory
 from world.production_tracker import ProductionSummary, ProductionTracker
 from world.state import (
     EntityState,

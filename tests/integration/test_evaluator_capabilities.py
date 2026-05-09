@@ -25,6 +25,9 @@ Category codes used in test names:
     DM  damage / destruction records
     CN  connectivity (inserter-to-entity relationships)
     GI  ground items
+    PT  production_rate() -- PROXIMAL throughput via ProductionTracker
+    ST  staleness() -- evidence-freshness guards for proximal conditions
+    SC  scope -- proximal vs non-proximal boundary tests
 
 Run with:  python tests/integration/test_evaluator_capabilities.py
 """
@@ -35,6 +38,7 @@ import unittest
 
 from planning.goal import RewardSpec, make_goal, Priority
 from planning.reward_evaluator import RewardEvaluator
+from world.production_tracker import ProductionTracker
 from world.state import (
     BeltLane, BeltSegment, DamagedEntity, DestroyedEntity,
     EntityState, EntityStatus,
@@ -54,6 +58,20 @@ def _ev(success="False", failure="False", state=None, tick=0, start_tick=0):
     Uses default RewardSpec (success_reward=1.0, no time pressure).
     """
     ev = RewardEvaluator()
+    return ev.evaluate_conditions(
+        success_condition=success,
+        failure_condition=failure,
+        spec=RewardSpec(),
+        state=state or WorldState(),
+        tick=tick,
+        start_tick=start_tick,
+    )
+
+
+
+def _ev_with_tracker(tracker, success="False", failure="False",
+                    state=None, tick=0, start_tick=0):
+    ev = RewardEvaluator(tracker=tracker)
     return ev.evaluate_conditions(
         success_condition=success,
         failure_condition=failure,
@@ -736,6 +754,287 @@ class TestXC_CompoundConditions(unittest.TestCase):
         )
         self.assertTrue(r.success)
 
+
+
+
+# ===========================================================================
+# PT — production_rate() via ProductionTracker  [PROXIMAL]
+# ===========================================================================
+
+class TestPT_ProductionRate(unittest.TestCase):
+    """
+    production_rate(item) is PROXIMAL — it only reflects entities within the
+    current scan radius, aggregated over the tracker window.
+    See CONDITION_SCOPE.md for the full discussion.
+    """
+
+    def _tracker_with_history(self, item, count_start, count_end,
+                               tick_start=0, tick_end=3600):
+        """
+        Build a tracker that has seen *item* grow from count_start to count_end
+        over the given tick range, using the real tracker's entity-inventory
+        delta signal.
+        """
+        tracker = ProductionTracker()
+        e_start = EntityState(
+            entity_id=1, name="assembling-machine-1",
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot(item, count_start)]),
+        )
+        e_end = EntityState(
+            entity_id=1, name="assembling-machine-1",
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot(item, count_end)]),
+        )
+        tracker.update(WorldState(tick=tick_start, entities=[e_start]))
+        tracker.update(WorldState(tick=tick_end, entities=[e_end]))
+        return tracker
+
+    def test_PT_001_rate_above_threshold(self):
+        # 60 items over 60 seconds = 60/min
+        tracker = self._tracker_with_history(
+            "iron-plate", count_start=0, count_end=60,
+            tick_start=0, tick_end=3600,
+        )
+        ws = WorldState(tick=3600)
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0",
+                             state=ws, tick=3600)
+        self.assertTrue(r.success)
+
+    def test_PT_002_rate_below_threshold(self):
+        tracker = self._tracker_with_history(
+            "iron-plate", count_start=0, count_end=30,
+            tick_start=0, tick_end=3600,
+        )
+        ws = WorldState(tick=3600)
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0",
+                             state=ws, tick=3600)
+        self.assertFalse(r.success)
+
+    def test_PT_003_unseen_item_returns_zero(self):
+        tracker = ProductionTracker()
+        r = _ev_with_tracker(tracker, "production_rate('steel-plate') == 0.0")
+        self.assertTrue(r.success)
+
+    def test_PT_004_no_tracker_returns_zero_not_raises(self):
+        r = _ev("production_rate('iron-plate') == 0.0")
+        self.assertTrue(r.success)
+
+    def test_PT_005_rate_as_failure_condition(self):
+        tracker = self._tracker_with_history(
+            "iron-plate", count_start=0, count_end=10,
+            tick_start=0, tick_end=3600,
+        )
+        ws = WorldState(tick=3600)
+        r = _ev_with_tracker(tracker,
+                             failure="production_rate('iron-plate') < 30.0",
+                             state=ws, tick=3600)
+        self.assertTrue(r.failure)
+
+    def test_PT_006_rate_used_as_milestone(self):
+        tracker = self._tracker_with_history(
+            "copper-plate", count_start=0, count_end=120,
+            tick_start=0, tick_end=3600,
+        )
+        spec = RewardSpec(milestone_rewards={
+            "production_rate('copper-plate') >= 100.0": 0.3
+        })
+        ev = RewardEvaluator(tracker=tracker)
+        ws = WorldState(tick=3600)
+        result = ev.evaluate_conditions(
+            success_condition="False",
+            failure_condition="False",
+            spec=spec,
+            state=ws,
+            tick=3600,
+            start_tick=0,
+        )
+        self.assertIn("production_rate('copper-plate') >= 100.0",
+                      result.milestones_hit)
+        self.assertAlmostEqual(result.reward, 0.3)
+
+    def test_PT_007_single_snapshot_returns_zero(self):
+        """A tracker with only one snapshot cannot compute a rate."""
+        tracker = ProductionTracker()
+        e = EntityState(
+            entity_id=1, name="assembling-machine-1",
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot("iron-plate", 50)]),
+        )
+        ws = WorldState(tick=60, entities=[e])
+        tracker.update(ws)
+        # Only one snapshot — rate() requires at least two.
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') == 0.0",
+                             state=ws, tick=60)
+        self.assertTrue(r.success)
+
+
+# ===========================================================================
+# ST — staleness() freshness guards  [META]
+# ===========================================================================
+
+class TestST_Staleness(unittest.TestCase):
+    """
+    staleness(section) exposes WorldState.section_staleness() in the eval
+    namespace so conditions can guard themselves against stale data.
+    See CONDITION_SCOPE.md for usage guidance.
+    """
+
+    def test_ST_001_fresh_section_staleness_zero(self):
+        ws = WorldState(tick=1000, observed_at={"entities": 1000})
+        r = _ev("staleness('entities') == 0", state=ws, tick=1000)
+        self.assertTrue(r.success)
+
+    def test_ST_002_stale_section_returns_ticks_elapsed(self):
+        ws = WorldState(tick=1000, observed_at={"entities": 700})
+        r = _ev("staleness('entities') == 300", state=ws, tick=1000)
+        self.assertTrue(r.success)
+
+    def test_ST_003_never_observed_section_returns_none(self):
+        ws = WorldState(tick=1000)
+        r = _ev("staleness('entities') is None", state=ws, tick=1000)
+        self.assertTrue(r.success)
+
+    def test_ST_004_guard_blocks_stale_proximal_condition(self):
+        # Entities section is 10 minutes stale — guard prevents evaluation.
+        ws = WorldState(
+            tick=36000,
+            observed_at={"entities": 0},
+            entities=[],
+        )
+        r = _ev(
+            "staleness('entities') is not None "
+            "and staleness('entities') < 300 "
+            "and len(entities('assembling-machine-1')) >= 3",
+            state=ws, tick=36000,
+        )
+        # Guard short-circuits; result is False but for the right reason.
+        self.assertFalse(r.success)
+
+    def test_ST_005_guard_passes_when_fresh(self):
+        ws = WorldState(
+            tick=1000,
+            observed_at={"entities": 950},
+            entities=[
+                EntityState(1, "assembling-machine-1", Position(0, 0),
+                            status=EntityStatus.WORKING),
+                EntityState(2, "assembling-machine-1", Position(5, 0),
+                            status=EntityStatus.WORKING),
+                EntityState(3, "assembling-machine-1", Position(10, 0),
+                            status=EntityStatus.WORKING),
+            ],
+        )
+        r = _ev(
+            "staleness('entities') is not None "
+            "and staleness('entities') < 300 "
+            "and len(entities('assembling-machine-1')) >= 3",
+            state=ws, tick=1000,
+        )
+        self.assertTrue(r.success)
+
+    def test_ST_006_staleness_in_failure_condition(self):
+        # Stale data: guard prevents false failure firing.
+        ws = WorldState(
+            tick=10000,
+            observed_at={"entities": 0},
+            entities=[],
+        )
+        r = _ev(
+            failure="staleness('entities') is not None "
+                    "and staleness('entities') < 600 "
+                    "and len(entities('stone-furnace')) == 0",
+            state=ws, tick=10000,
+        )
+        self.assertFalse(r.failure)
+
+    def test_ST_007_staleness_distinguishes_never_seen_from_stale(self):
+        ws_never = WorldState(tick=1000, observed_at={})
+        ws_stale = WorldState(tick=1000, observed_at={"entities": 0})
+        r_never = _ev("staleness('entities') is None",
+                      state=ws_never, tick=1000)
+        r_stale = _ev("staleness('entities') == 1000",
+                      state=ws_stale, tick=1000)
+        self.assertTrue(r_never.success)
+        self.assertTrue(r_stale.success)
+
+
+# ===========================================================================
+# SC — scope boundary tests (proximal vs non-proximal)
+# ===========================================================================
+
+class TestSC_Scope(unittest.TestCase):
+    """
+    Verifies that the proximal/non-proximal distinction holds as documented
+    in CONDITION_SCOPE.md.  These are semantic correctness tests, not just
+    capability tests.
+    """
+
+    def test_SC_001_inventory_unaffected_by_empty_entity_scan(self):
+        ws = WorldState(
+            player=PlayerState(
+                position=Position(0, 0),
+                inventory=Inventory(slots=[InventorySlot("iron-plate", 100)]),
+            ),
+            entities=[],
+            observed_at={},
+        )
+        self.assertTrue(_ev("inventory('iron-plate') >= 100", state=ws).success)
+
+    def test_SC_002_tech_unlocked_unaffected_by_empty_entity_scan(self):
+        ws = WorldState(
+            research=ResearchState(unlocked=["automation"]),
+            entities=[],
+            observed_at={},
+        )
+        self.assertTrue(_ev("tech_unlocked('automation')", state=ws).success)
+
+    def test_SC_003_resource_map_accumulates_across_visits(self):
+        ws = WorldState(resource_map=[
+            ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
+            ResourcePatch("iron-ore", Position(500, 500), 40000, 25),
+            ResourcePatch("iron-ore", Position(900, 900), 30000, 20),
+            ResourcePatch("iron-ore", Position(1300, 100), 60000, 35),
+        ])
+        r = _ev("len(resources_of_type('iron-ore')) >= 4", state=ws)
+        self.assertTrue(r.success)
+
+    def test_SC_004_entities_reflects_scan_radius_only(self):
+        # Factory has moved offscreen — entities list is now empty.
+        ws = WorldState(entities=[], observed_at={"entities": 100})
+        r = _ev("len(entities('assembling-machine-1')) >= 1", state=ws)
+        self.assertFalse(r.success)
+
+    def test_SC_005_production_rate_zero_when_offscreen(self):
+        tracker = ProductionTracker()
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') == 0.0")
+        self.assertTrue(r.success)
+
+    def test_SC_006_non_proximal_plus_proximal_guarded(self):
+        # Correct pattern: non-proximal goal with guarded proximal milestone.
+        ws = WorldState(
+            tick=3600,
+            observed_at={"entities": 3500},
+            player=PlayerState(
+                position=Position(0, 0),
+                inventory=Inventory(slots=[InventorySlot("iron-gear-wheel", 200)]),
+            ),
+            entities=[
+                EntityState(1, "assembling-machine-1", Position(0, 0),
+                            status=EntityStatus.WORKING, recipe="iron-gear-wheel"),
+            ],
+            research=ResearchState(unlocked=["automation"]),
+        )
+        # Non-proximal top-level success
+        r_success = _ev("inventory('iron-gear-wheel') >= 200", state=ws, tick=3600)
+        self.assertTrue(r_success.success)
+        # Guarded proximal milestone
+        r_milestone = _ev(
+            "staleness('entities') is not None "
+            "and staleness('entities') < 300 "
+            "and any(e.recipe == 'iron-gear-wheel' for e in state.entities)",
+            state=ws, tick=3600,
+        )
+        self.assertTrue(r_milestone.success)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

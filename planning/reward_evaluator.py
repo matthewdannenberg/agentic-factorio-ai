@@ -18,15 +18,32 @@ Design note:
   RewardSpec holds the *numeric* reward shape. The evaluator accepts the full
   Goal so it can read both. A lower-level evaluate_conditions() helper accepts
   raw strings directly (useful for tests and introspection).
+
+Condition scope:
+  Not all conditions have the same evidence quality. See CONDITION_SCOPE.md
+  for the authoritative breakdown of PROXIMAL vs NON-PROXIMAL conditions and
+  the staleness helpers available in the eval namespace.
+
+  Short version:
+    - production_rate(item)  — PROXIMAL. Only reflects entities in scan radius.
+    - entities(name)         — PROXIMAL. Only entities in scan radius.
+    - staleness(section)     — use to guard proximal conditions explicitly.
+    - inventory(item)        — NON-PROXIMAL. Player carries inventory everywhere.
+    - tech_unlocked(tech)    — NON-PROXIMAL. Research state is global.
+    - resources_of_type(t)   — NON-PROXIMAL. Accumulated across all visits.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Optional, TYPE_CHECKING
 
 from planning.goal import Goal, RewardSpec
 from world.state import WorldState
+
+if TYPE_CHECKING:
+    from world.production_tracker import ProductionTrackerProtocol
 
 log = logging.getLogger(__name__)
 
@@ -62,12 +79,23 @@ class RewardEvaluator:
         result = evaluator.evaluate_conditions(
             success_condition, failure_condition, spec, state, tick, start_tick
         )
+
+    Parameters
+    ----------
+    tracker : ProductionTrackerProtocol, optional
+        A ProductionTracker (or compatible object) that provides
+        production_rate(item) -> float.  When provided, the eval namespace
+        gains a production_rate() shorthand.  When None, production_rate()
+        always returns 0.0 and logs a warning on first use.
     """
 
     _BLOCKED_NAMES = frozenset({
         "os", "sys", "subprocess", "importlib", "builtins",
         "open", "exec", "compile", "__import__",
     })
+
+    def __init__(self, tracker: Optional["ProductionTrackerProtocol"] = None) -> None:
+        self._tracker = tracker
 
     def evaluate(
         self,
@@ -122,29 +150,54 @@ class RewardEvaluator:
         )
 
     def _build_namespace(self, state: WorldState, tick: int) -> dict:
+        # production_rate: use tracker if available, else a safe zero-returning stub
+        # that warns once so the LLM prompt designer notices the gap.
+        if self._tracker is not None:
+            production_rate = self._tracker.rate
+        else:
+            def production_rate(item: str) -> float:  # type: ignore[misc]
+                log.warning(
+                    "production_rate(%r) called but no ProductionTracker is "
+                    "attached to this RewardEvaluator — returning 0.0. "
+                    "Pass tracker= when constructing RewardEvaluator in the "
+                    "main loop. See CONDITION_SCOPE.md.", item
+                )
+                return 0.0
+
+        # staleness(section) -> int | None
+        # Exposes WorldState.section_staleness() as a first-class namespace
+        # function so conditions can guard themselves:
+        #   staleness('entities') is not None and staleness('entities') < 300
+        def staleness(section: str) -> Optional[int]:
+            return state.section_staleness(section, tick)
+
         ns: dict = {
             # Top-level state
             "state":     state,
             "tick":      tick,
-            # Inventory
+            # Inventory — NON-PROXIMAL (travels with player)
             "inventory": state.inventory_count,
-            # Entities
+            # Entities — PROXIMAL (scan radius only)
             "entities":  state.entities_by_name,
             "entity_by_id": state.entity_by_id,
             "entities_by_status": state.entities_by_status,
-            # Research
+            # Research — NON-PROXIMAL (global)
             "research":  state.research,
             "tech_unlocked": state.research.is_unlocked,
-            # Logistics sub-objects
+            # Production rates — PROXIMAL (scan radius only, tracker-backed)
+            "production_rate": production_rate,
+            # Staleness guard — use to make proximal conditions self-defending
+            "staleness": staleness,
+            # Logistics sub-objects — PROXIMAL
             "logistics": state.logistics,
             "power":     state.logistics.power,
             "threat":    state.threat,
-            # Connectivity queries
+            # Connectivity queries — PROXIMAL
             "inserters_from":      state.inserters_taking_from,
             "inserters_to":        state.inserters_delivering_to,
             "inserters_from_type": state.inserters_taking_from_type,
             "inserters_to_type":   state.inserters_delivering_to_type,
-            # Resource patches
+            # Resource patches — NON-PROXIMAL (accumulated across all visits)
             "resources_of_type": state.resources_of_type,
         }
         # Strip dangerous builtins
