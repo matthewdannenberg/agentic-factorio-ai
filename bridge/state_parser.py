@@ -38,6 +38,7 @@ import logging
 from typing import Any, Optional
 
 from world.state import (
+    BeltLane,
     BeltSegment,
     BiterBase,
     DamagedEntity,
@@ -48,6 +49,7 @@ from world.state import (
     GroundItem,
     Inventory,
     InventorySlot,
+    InserterState,
     LogisticsState,
     PlayerState,
     Position,
@@ -346,8 +348,8 @@ class StateParser:
                 belts.append(BeltSegment(
                     segment_id=int(seg["segment_id"]),
                     positions=positions,
-                    congested=bool(seg.get("congested", False)),
-                    item=seg.get("item") or None,
+                    lane1=self._parse_belt_lane(seg.get("lane1", {})),
+                    lane2=self._parse_belt_lane(seg.get("lane2", {})),
                 ))
             except (KeyError, ValueError, TypeError) as exc:
                 logger.debug("Skipping malformed belt segment: %s — %s", seg, exc)
@@ -360,14 +362,42 @@ class StateParser:
             satisfaction=float(power_raw.get("satisfaction", 1.0)),
         )
 
+        inserters: dict[int, InserterState] = {}
         inserter_activity: dict[int, int] = {}
         for k, v in d.get("inserter_activity", {}).items():
             try:
-                inserter_activity[int(k)] = int(v)
+                entity_id = int(k)
+                if isinstance(v, dict):
+                    # New format: {active, pickup_position, drop_position}
+                    active = bool(v.get("active", False))
+                    pickup_position = self._parse_optional_position(
+                        v.get("pickup_position")
+                    )
+                    drop_position = self._parse_optional_position(
+                        v.get("drop_position")
+                    )
+                    ins = InserterState(
+                        entity_id=entity_id,
+                        position=Position(0.0, 0.0),  # not in logistics payload
+                        active=active,
+                        pickup_position=pickup_position,
+                        drop_position=drop_position,
+                    )
+                    inserters[entity_id] = ins
+                    inserter_activity[entity_id] = 1 if active else 0
+                else:
+                    # Legacy format: bare 0/1 integer
+                    activity = int(v)
+                    inserter_activity[entity_id] = activity
             except (ValueError, TypeError):
                 pass
 
-        return LogisticsState(belts=belts, power=power, inserter_activity=inserter_activity)
+        return LogisticsState(
+            belts=belts,
+            power=power,
+            inserters=inserters,
+            inserter_activity=inserter_activity,
+        )
 
     def _parse_damaged_entities(self, lst: Any, tick: int) -> list[DamagedEntity]:
         if not isinstance(lst, list):
@@ -453,6 +483,30 @@ class StateParser:
     # ------------------------------------------------------------------
     # Primitive helpers
     # ------------------------------------------------------------------
+
+    def _parse_belt_lane(self, d: Any) -> BeltLane:
+        """Parse a single belt transport line lane from Lua output."""
+        if not isinstance(d, dict):
+            return BeltLane()
+        congested = bool(d.get("congested", False))
+        raw_items = d.get("items", {})
+        items: dict[str, int] = {}
+        if isinstance(raw_items, dict):
+            for name, count in raw_items.items():
+                try:
+                    items[str(name)] = int(count)
+                except (ValueError, TypeError):
+                    pass
+        return BeltLane(congested=congested, items=items)
+
+    def _parse_optional_position(self, d: Any) -> Optional[Position]:
+        """Parse a position dict, returning None if absent or malformed."""
+        if not isinstance(d, dict):
+            return None
+        try:
+            return Position(x=float(d.get("x", 0.0)), y=float(d.get("y", 0.0)))
+        except (ValueError, TypeError):
+            return None
 
     def _parse_position(self, d: Any) -> Position:
         if isinstance(d, dict):

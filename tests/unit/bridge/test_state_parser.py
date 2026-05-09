@@ -14,10 +14,13 @@ import json
 
 from bridge.state_parser import StateParser
 from world.state import (
+    BeltLane,
     Direction,
     EntityStatus,
+    InserterState,
+    Position,
     ResourceName,
-    WorldState
+    WorldState,
 )
 
 class TestStateParserFullParse(unittest.TestCase):
@@ -226,25 +229,170 @@ class TestStateParserFullParse(unittest.TestCase):
         state = self._parse(data)
         self.assertTrue(state.logistics.power.is_brownout)
 
-    def test_belt_segment(self):
+    def test_belt_segment_lane1_congested(self):
         data = {"tick": 100, "logistics": {"belts": [{
             "segment_id": 1,
             "positions": [{"x": 0, "y": 0}, {"x": 1, "y": 0}],
-            "congested": True,
-            "item": "iron-plate",
+            "lane1": {"congested": True,  "items": {"iron-plate": 8}},
+            "lane2": {"congested": False, "items": {}},
         }]}}
         state = self._parse(data)
         self.assertEqual(len(state.logistics.belts), 1)
         seg = state.logistics.belts[0]
-        self.assertTrue(seg.congested)
-        self.assertEqual(seg.item, "iron-plate")
+        self.assertTrue(seg.lane1.congested)
+        self.assertFalse(seg.lane2.congested)
+        self.assertTrue(seg.congested)          # .congested spans both lanes
+        self.assertTrue(seg.lane1.carries("iron-plate"))
 
-    def test_inserter_activity(self):
+    def test_belt_segment_lane2_congested_only(self):
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {"copper-plate": 2}},
+            "lane2": {"congested": True,  "items": {"copper-plate": 8}},
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertFalse(seg.lane1.congested)
+        self.assertTrue(seg.lane2.congested)
+        self.assertTrue(seg.congested)
+
+    def test_belt_segment_no_congestion(self):
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {}},
+            "lane2": {"congested": False, "items": {}},
+        }]}}
+        self.assertFalse(self._parse(data).logistics.belts[0].congested)
+
+    def test_belt_segment_different_items_per_lane(self):
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {"iron-plate": 4}},
+            "lane2": {"congested": False, "items": {"copper-plate": 4}},
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertTrue(seg.lane1.carries("iron-plate"))
+        self.assertFalse(seg.lane1.carries("copper-plate"))
+        self.assertTrue(seg.lane2.carries("copper-plate"))
+        self.assertFalse(seg.lane2.carries("iron-plate"))
+
+    def test_belt_segment_mixed_items_same_lane(self):
+        """A splitter input tile can have multiple item types on one lane."""
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {"iron-plate": 3, "copper-plate": 2}},
+            "lane2": {"congested": False, "items": {}},
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertTrue(seg.lane1.carries("iron-plate"))
+        self.assertTrue(seg.lane1.carries("copper-plate"))
+        self.assertEqual(seg.lane1.total_items(), 5)
+
+    def test_belt_segment_items_property_sums_across_lanes(self):
+        """Same item on both lanes: .items should return summed count."""
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {"iron-plate": 4}},
+            "lane2": {"congested": False, "items": {"iron-plate": 2}},
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertEqual(seg.items["iron-plate"], 6)
+
+    def test_belt_segment_carries_spans_both_lanes(self):
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+            "lane1": {"congested": False, "items": {}},
+            "lane2": {"congested": False, "items": {"steel-plate": 1}},
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertTrue(seg.carries("steel-plate"))      # found via lane2
+        self.assertFalse(seg.lane1.carries("steel-plate"))
+
+    def test_belt_segment_missing_lane_keys_default_to_empty(self):
+        """A segment with no lane1/lane2 keys at all should not crash."""
+        data = {"tick": 100, "logistics": {"belts": [{
+            "segment_id": 1,
+            "positions": [{"x": 0, "y": 0}],
+        }]}}
+        seg = self._parse(data).logistics.belts[0]
+        self.assertTrue(seg.lane1.is_empty())
+        self.assertTrue(seg.lane2.is_empty())
+        self.assertFalse(seg.congested)
+
+    def test_inserter_activity_new_format_active(self):
         data = {"tick": 100, "logistics": {
-            "inserter_activity": {"101": 5, "102": 0}
+            "inserter_activity": {"42": {
+                "active": True,
+                "pickup_position": {"x": 5.0, "y": 6.0},
+                "drop_position":   {"x": 5.0, "y": 4.0},
+            }}
         }}
         state = self._parse(data)
-        self.assertEqual(state.logistics.inserter_activity[101], 5)
+        ins = state.logistics.inserters[42]
+        self.assertTrue(ins.active)
+        self.assertEqual(ins.pickup_position, Position(5.0, 6.0))
+        self.assertEqual(ins.drop_position,   Position(5.0, 4.0))
+
+    def test_inserter_activity_new_format_inactive(self):
+        data = {"tick": 100, "logistics": {
+            "inserter_activity": {"10": {
+                "active": False,
+                "pickup_position": {"x": 1.0, "y": 2.0},
+                "drop_position":   {"x": 1.0, "y": 0.0},
+            }}
+        }}
+        state = self._parse(data)
+        self.assertFalse(state.logistics.inserters[10].active)
+
+    def test_inserter_null_drop_position_is_none(self):
+        data = {"tick": 100, "logistics": {
+            "inserter_activity": {"7": {
+                "active": False,
+                "pickup_position": {"x": 3.0, "y": 3.0},
+                "drop_position": None,
+            }}
+        }}
+        state = self._parse(data)
+        self.assertIsNone(state.logistics.inserters[7].drop_position)
+
+    def test_inserter_missing_positions_are_none(self):
+        data = {"tick": 100, "logistics": {
+            "inserter_activity": {"9": {"active": False}}
+        }}
+        state = self._parse(data)
+        ins = state.logistics.inserters[9]
+        self.assertIsNone(ins.pickup_position)
+        self.assertIsNone(ins.drop_position)
+
+    def test_inserter_legacy_activity_dict_kept_in_sync(self):
+        """inserter_activity (legacy int dict) stays populated alongside inserters."""
+        data = {"tick": 100, "logistics": {
+            "inserter_activity": {
+                "5": {"active": True,  "pickup_position": None, "drop_position": None},
+                "6": {"active": False, "pickup_position": None, "drop_position": None},
+            }
+        }}
+        state = self._parse(data)
+        self.assertEqual(state.logistics.inserter_activity[5], 1)
+        self.assertEqual(state.logistics.inserter_activity[6], 0)
+
+    def test_inserter_entity_id_coerced_to_int(self):
+        """JSON object keys are strings; parser must convert to int."""
+        data = {"tick": 100, "logistics": {
+            "inserter_activity": {"99": {
+                "active": True,
+                "pickup_position": {"x": 0, "y": 0},
+                "drop_position": {"x": 0, "y": 0},
+            }}
+        }}
+        state = self._parse(data)
+        self.assertIn(99, state.logistics.inserters)
+        self.assertNotIn("99", state.logistics.inserters)
 
     # --- damaged_entities -----------------------------------------------------
 
