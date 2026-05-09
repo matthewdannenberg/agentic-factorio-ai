@@ -123,13 +123,29 @@ class RewardEvaluator:
 
     def _build_namespace(self, state: WorldState, tick: int) -> dict:
         ns: dict = {
+            # Top-level state
             "state":     state,
-            "inventory": state.inventory_count,
-            "entities":  state.entities_by_name,
             "tick":      tick,
+            # Inventory
+            "inventory": state.inventory_count,
+            # Entities
+            "entities":  state.entities_by_name,
+            "entity_by_id": state.entity_by_id,
+            "entities_by_status": state.entities_by_status,
+            # Research
             "research":  state.research,
+            "tech_unlocked": state.research.is_unlocked,
+            # Logistics sub-objects
             "logistics": state.logistics,
+            "power":     state.logistics.power,
             "threat":    state.threat,
+            # Connectivity queries
+            "inserters_from":      state.inserters_taking_from,
+            "inserters_to":        state.inserters_delivering_to,
+            "inserters_from_type": state.inserters_taking_from_type,
+            "inserters_to_type":   state.inserters_delivering_to_type,
+            # Resource patches
+            "resources_of_type": state.resources_of_type,
         }
         # Strip dangerous builtins
         raw_builtins = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)  # type: ignore

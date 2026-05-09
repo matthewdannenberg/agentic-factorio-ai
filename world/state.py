@@ -17,7 +17,7 @@ Rules:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum
 from typing import Optional
 
 
@@ -34,12 +34,6 @@ class EntityStatus(Enum):
     UNKNOWN    = "unknown"
 
 
-# Resource names are plain strings matching Factorio's internal item/fluid names,
-# e.g. "iron-ore", "crude-oil", "se-cryonite" (Space Age), any mod resource.
-# String constants below cover vanilla and avoid magic strings in core code —
-# they are not exhaustive. The ResourceRegistry (world/entities.py) is the
-# authoritative store of known resource metadata and is extended at runtime
-# when the bridge parser encounters an unfamiliar resource name.
 class ResourceName:
     IRON_ORE    = "iron-ore"
     COPPER_ORE  = "copper-ore"
@@ -50,7 +44,6 @@ class ResourceName:
     WATER       = "water"
     WOOD        = "wood"
 
-# Type alias — resource types are plain strings throughout the codebase.
 ResourceType = str
 
 
@@ -73,16 +66,6 @@ class Position:
     def distance_to(self, other: "Position") -> float:
         return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
 
-    @property
-    def has_damage(self) -> bool:
-        """True if any placed entity is currently below full health."""
-        return bool(self.damaged_entities)
-
-    @property
-    def recent_losses(self) -> list[DestroyedEntity]:
-        """All destroyed entities within the TTL window (pruning done by bridge)."""
-        return self.destroyed_entities
-
     def __repr__(self) -> str:
         return f"({self.x:.1f}, {self.y:.1f})"
 
@@ -93,7 +76,7 @@ class Position:
 
 @dataclass
 class InventorySlot:
-    item: str          # Factorio internal item name, e.g. "iron-plate"
+    item: str
     count: int
 
 
@@ -103,11 +86,9 @@ class Inventory:
     slots: list[InventorySlot] = field(default_factory=list)
 
     def count(self, item: str) -> int:
-        """Return total count of a named item across all slots."""
         return sum(s.count for s in self.slots if s.item == item)
 
     def as_dict(self) -> dict[str, int]:
-        """Flatten to {item_name: total_count}."""
         result: dict[str, int] = {}
         for slot in self.slots:
             result[slot.item] = result.get(slot.item, 0) + slot.count
@@ -124,14 +105,14 @@ class Inventory:
 @dataclass
 class EntityState:
     """A single placed entity on the map."""
-    entity_id: int              # Factorio unit_number
-    name: str                   # Factorio internal name, e.g. "assembling-machine-2"
+    entity_id: int
+    name: str
     position: Position
     direction: Direction = Direction.NORTH
     status: EntityStatus = EntityStatus.UNKNOWN
-    recipe: Optional[str] = None          # Currently-set recipe (assemblers, furnaces)
-    inventory: Optional[Inventory] = None # Input/output buffer, if exposed
-    energy: float = 0.0                   # Current energy consumption in kW
+    recipe: Optional[str] = None
+    inventory: Optional[Inventory] = None
+    energy: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -143,29 +124,17 @@ class ResourcePatch:
     """
     Coarse strategic record of a resource deposit.
 
-    This is intentionally low-resolution — it tells the planner "there is
-    iron to the northeast, roughly 200k units remaining." It does NOT store
-    individual tile positions; those are obtained by the bridge doing a local
-    scan when the agent is physically at the patch (see bridge/state_parser.py).
-
-    Fields
-    ------
     resource_type   : Factorio internal resource name string, e.g. "iron-ore".
-                      May be an unrecognised mod resource — consumers should
-                      not assume it is a ResourceName constant.
     position        : Approximate centre of the patch bounding box.
-    amount          : Remaining resource units. Updated on local scan; may be
-                      stale between visits.
-    size            : Approximate tile count (patch footprint, not yield).
-    observed_at     : Game tick when this record was last updated by the bridge.
-                      Consumers can compute staleness as (current_tick - observed_at).
+    amount          : Remaining resource units (stale between visits).
+    size            : Approximate tile count.
+    observed_at     : Game tick when this record was last updated.
     """
-    resource_type: ResourceType       # str — Factorio internal name
-    position: Position                # Approximate centre
-    amount: int                       # Remaining units (stale between visits)
-    size: int                         # Approximate tile count
-    observed_at: int = 0              # Tick of last bridge update
-
+    resource_type: ResourceType
+    position: Position
+    amount: int
+    size: int
+    observed_at: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -174,27 +143,13 @@ class ResourcePatch:
 
 @dataclass
 class GroundItem:
-    """
-    An item stack lying on the ground (dropped from destroyed buildings,
-    inventory overflow, player deaths, manually thrown items, etc.).
-
-    Populated only within the bridge's local scan radius — the full map is
-    never searched. Stale outside that radius.
-
-    Fields
-    ------
-    item        : Factorio internal item name, e.g. "iron-plate".
-    position    : Tile position of the item entity.
-    count       : Stack size on the ground.
-    observed_at : Game tick when this record was last seen by the bridge.
-    age_ticks   : How many ticks the item has been on the ground (Factorio
-                  tracks this; items despawn after a configurable duration).
-    """
+    """An item stack lying on the ground within the local scan radius."""
     item: str
     position: Position
     count: int
     observed_at: int = 0
     age_ticks: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Research
@@ -202,10 +157,10 @@ class GroundItem:
 
 @dataclass
 class ResearchState:
-    unlocked: list[str] = field(default_factory=list)   # Technology names
-    in_progress: Optional[str] = None                    # Currently researching
-    queued: list[str] = field(default_factory=list)      # Ordered queue
-    science_per_minute: dict[str, float] = field(default_factory=dict)  # pack → rate
+    unlocked: list[str] = field(default_factory=list)
+    in_progress: Optional[str] = None
+    queued: list[str] = field(default_factory=list)
+    science_per_minute: dict[str, float] = field(default_factory=dict)
 
     def is_unlocked(self, tech: str) -> bool:
         return tech in self.unlocked
@@ -216,19 +171,78 @@ class ResearchState:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class BeltLane:
+    """
+    Contents of one transport line lane on a belt tile.
+
+    Factorio belts have two independent lanes (left = line index 1,
+    right = line index 2). Each lane can carry items of any type; a single
+    tile can have multiple item types on the same lane (e.g. mixed inputs
+    arriving at a splitter). Represented as a dict so the planner can ask
+    "does lane 1 carry iron-plate?" in O(1) without iterating a list.
+
+    congested : True if this lane is backed-up (at or above line_length).
+    items     : {item_name: count} — empty dict when the lane is empty.
+    """
+    congested: bool = False
+    items: dict[str, int] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        return not self.items
+
+    def carries(self, item: str) -> bool:
+        return self.items.get(item, 0) > 0
+
+    def total_items(self) -> int:
+        return sum(self.items.values())
+
+
+@dataclass
 class BeltSegment:
+    """
+    One belt tile (transport-belt, underground-belt, or splitter) within
+    the scan radius.
+
+    lane1 : Left transport line  (Factorio get_transport_line(1)).
+    lane2 : Right transport line (Factorio get_transport_line(2)).
+
+    Queried per-tile rather than per-path because the Lua mod iterates
+    individual belt entities; path-level aggregation is left to the planning
+    layer.
+
+    Convenience properties mirror the old single-item interface so existing
+    code that checks `b.congested` keeps working:
+      congested : True if either lane is congested.
+      items     : Combined {item: count} across both lanes.
+    """
     segment_id: int
     positions: list[Position]
-    congested: bool = False   # True if belt is backed-up / not moving
-    item: Optional[str] = None  # Item currently on belt (if uniform)
+    lane1: BeltLane = field(default_factory=BeltLane)
+    lane2: BeltLane = field(default_factory=BeltLane)
+
+    @property
+    def congested(self) -> bool:
+        return self.lane1.congested or self.lane2.congested
+
+    @property
+    def items(self) -> dict[str, int]:
+        """Combined item counts across both lanes."""
+        merged: dict[str, int] = dict(self.lane1.items)
+        for item, count in self.lane2.items.items():
+            merged[item] = merged.get(item, 0) + count
+        return merged
+
+    def carries(self, item: str) -> bool:
+        """True if either lane carries the named item."""
+        return self.lane1.carries(item) or self.lane2.carries(item)
 
 
 @dataclass
 class PowerGrid:
     produced_kw: float = 0.0
     consumed_kw: float = 0.0
-    accumulated_kj: float = 0.0    # Battery / accumulator charge
-    satisfaction: float = 1.0      # 1.0 = fully powered, <1.0 = brownout
+    accumulated_kj: float = 0.0
+    satisfaction: float = 1.0
 
     @property
     def headroom_kw(self) -> float:
@@ -240,41 +254,59 @@ class PowerGrid:
 
 
 @dataclass
+class InserterState:
+    """
+    A single inserter's current activity and reach positions.
+
+    active          : True if the inserter is currently holding an item
+                      (i.e. mid-swing with something in its hand).
+    pickup_position : World coordinates where the arm picks items up from.
+    drop_position   : World coordinates where the arm places items down.
+
+    These positions are fixed by the entity's direction and prototype offsets —
+    they do not change while the inserter is stationary.  The WorldState
+    connectivity queries use them to determine which entity each inserter is
+    taking from or delivering to via bounding-box containment, without any
+    additional RCON calls.
+
+    Either position may be None if the Lua mod was unable to read it (pcall
+    guard in control.lua) — consumers must handle None gracefully.
+    """
+    entity_id: int
+    position: Position
+    active: bool = False
+    pickup_position: Optional[Position] = None
+    drop_position: Optional[Position] = None
+
+
+@dataclass
 class LogisticsState:
     belts: list[BeltSegment] = field(default_factory=list)
     power: PowerGrid = field(default_factory=PowerGrid)
-    # Inserter activity: entity_id → items moved last N ticks (for throughput heuristics)
+    # Full inserter records — replaces the old activity-only dict.
+    # Keyed by entity_id for O(1) lookup.
+    inserters: dict[int, InserterState] = field(default_factory=dict)
+    # Legacy activity shorthand: entity_id → 1 (active) or 0 (idle).
+    # Populated from inserters for backwards-compatibility; prefer inserters.
     inserter_activity: dict[int, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Structural damage
-# (cause-agnostic: biters, vehicles, player error, deconstruction, etc.)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class DamagedEntity:
     """
-    A placed entity that has taken damage and is currently below full health.
+    A placed entity below full health.
 
-    Populated whenever damage is detected regardless of cause — biter attack,
-    vehicle collision, player error, or anything else. Always a world-level
-    observation; not tied to biter activity.
-
-    Fields
-    ------
-    entity_id       : Factorio unit_number.
-    name            : Factorio internal entity name.
-    position        : Map position.
-    health_fraction : Current health as a fraction of maximum. In the range
-                      (0.0, 1.0) — never exactly 1.0 (undamaged entities are
-                      excluded) and never 0.0 (that would be destroyed).
+    health_fraction : (0.0, 1.0) exclusive — never exactly 1.0 or 0.0.
     observed_at     : Game tick when this reading was taken.
     """
     entity_id: int
     name: str
     position: Position
-    health_fraction: float   # (0.0, 1.0) exclusive on both ends
+    health_fraction: float
     observed_at: int = 0
 
 
@@ -283,52 +315,35 @@ class DestroyedEntity:
     """
     A record of an entity destroyed during the current run.
 
-    Kept in a rolling window (see WorldState.destroyed_ttl_ticks) so the agent
-    can plan recovery without the list growing unboundedly.  The bridge prunes
-    records older than destroyed_ttl_ticks on each update.
-
-    cause is best-effort — the Lua mod may not always be able to determine why
-    an entity was destroyed.
-
-    Fields
-    ------
-    name         : Factorio internal entity name (unit_number is gone at destruction).
-    position     : Last known map position.
-    destroyed_at : Game tick of destruction.
-    cause        : "biter" | "vehicle" | "deconstruct" | "unknown"
+    cause : "biter" | "vehicle" | "deconstruct" | "unknown"
     """
     name: str
     position: Position
     destroyed_at: int
-    cause: str = "unknown"   # "biter" | "vehicle" | "deconstruct" | "unknown"
+    cause: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
-# Threat (biter-specific — empty when BITERS_ENABLED=False)
+# Threat (biter-specific)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class BiterBase:
     base_id: int
     position: Position
-    size: int        # Approximate unit count
-    evolution: float # 0.0–1.0
+    size: int
+    evolution: float
 
 
 @dataclass
 class ThreatState:
     """
     Biter-specific threat information.
-
-    All fields are empty / zero when BITERS_ENABLED=False. The bridge stub
-    populates nothing here; consumers should check is_empty before acting.
-
-    Structural damage (DamagedEntity, DestroyedEntity) lives on WorldState
-    directly — it is cause-agnostic and present regardless of biter config.
+    All fields are empty / zero when BITERS_ENABLED=False.
+    Structural damage lives on WorldState directly — it is cause-agnostic.
     """
     biter_bases: list[BiterBase] = field(default_factory=list)
-    pollution_cloud: list[Position] = field(default_factory=list)  # Sparse sample
-    # Game ticks until next predicted attack per structure (entity_id → ticks)
+    pollution_cloud: list[Position] = field(default_factory=list)
     attack_timers: dict[int, float] = field(default_factory=dict)
     evolution_factor: float = 0.0
 
@@ -346,7 +361,6 @@ class PlayerState:
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
     health: float = 100.0
     inventory: Inventory = field(default_factory=Inventory)
-    # Reached entities (within interaction range) — entity_ids
     reachable: list[int] = field(default_factory=list)
 
 
@@ -359,42 +373,19 @@ class WorldState:
     """
     The agent's current belief state about the game world.
 
-    This is NOT ground truth. It is a cached, partially-observed snapshot
-    assembled by bridge/state_parser.py from whatever the Lua mod could see
-    at query time. Different sections have different staleness:
-
-      - player, logistics.power  — refreshed every tick cycle (fresh)
-      - entities near player     — refreshed on local scan (moderately fresh)
-      - entities far from player — may be many ticks stale
-      - resource_map             — updated only when agent visits a patch (very stale)
-      - ground_items             — populated within local scan radius only; empty outside it
-      - damaged_entities         — refreshed on each bridge scan; empty when nothing is damaged
-      - destroyed_entities       — rolling window (destroyed_ttl_ticks); pruned by bridge
-      - threat                   — only meaningful when biters are enabled and
-                                   the scanner is actively polling biter territory
-
-    Staleness is tracked per section via `observed_at`, a dict mapping section
-    names to the game tick of their last bridge update. Consumers that care about
-    freshness should check `observed_at.get("resource_map", 0)` etc.
-
-    All sub-fields default to safe empty values so consumers never need to
-    guard against None — only check .is_empty / .count / etc. as appropriate.
+    This is NOT ground truth — it is a cached, partially-observed snapshot
+    assembled by bridge/state_parser.py. Different sections have different
+    staleness; consumers should check observed_at when freshness matters.
 
     Section names used in observed_at
     ----------------------------------
-    "player", "entities", "resource_map", "ground_items", "research", "logistics",
-    "damaged_entities", "destroyed_entities", "threat"
+    "player", "entities", "resource_map", "ground_items", "research",
+    "logistics", "damaged_entities", "destroyed_entities", "threat"
     """
 
-    # Game clock — tick of the most recent bridge poll
-    tick: int = 0   # Factorio game tick (60 ticks = 1 second)
-
-    # Per-section staleness tracking.
-    # Key: section name (see docstring). Value: tick of last bridge update.
-    # Missing key means the section has never been observed this run.
+    tick: int = 0
     observed_at: dict[str, int] = field(default_factory=dict)
 
-    # Top-level state sections
     player: PlayerState = field(default_factory=PlayerState)
     entities: list[EntityState] = field(default_factory=list)
     resource_map: list[ResourcePatch] = field(default_factory=list)
@@ -403,15 +394,13 @@ class WorldState:
     logistics: LogisticsState = field(default_factory=LogisticsState)
     threat: ThreatState = field(default_factory=ThreatState)
 
-    # Structural damage — cause-agnostic, always active regardless of biter config.
-    # Populated by the bridge whenever damage or destruction is observed; not
-    # gated on BITERS_ENABLED.
     damaged_entities: list[DamagedEntity] = field(default_factory=list)
     destroyed_entities: list[DestroyedEntity] = field(default_factory=list)
-    # Bridge prunes destroyed_entities older than this many ticks on each update.
-    destroyed_ttl_ticks: int = 18_000   # ~5 min at 60 tps
+    destroyed_ttl_ticks: int = 18_000
 
-    # Convenience accessors ------------------------------------------------
+    # ------------------------------------------------------------------
+    # Standard accessors
+    # ------------------------------------------------------------------
 
     def entity_by_id(self, entity_id: int) -> Optional[EntityState]:
         for e in self.entities:
@@ -426,21 +415,15 @@ class WorldState:
         return [e for e in self.entities if e.status == status]
 
     def resources_of_type(self, resource_type: ResourceType) -> list[ResourcePatch]:
-        """Return all patches of a given resource type (string name)."""
         return [r for r in self.resource_map if r.resource_type == resource_type]
 
     def section_staleness(self, section: str, current_tick: int) -> Optional[int]:
-        """
-        Ticks since a named section was last observed, or None if never observed.
-        Useful for planning layer to decide whether to request a fresh scan.
-        """
         last = self.observed_at.get(section)
         if last is None:
             return None
         return max(0, current_tick - last)
 
     def inventory_count(self, item: str) -> int:
-        """Player inventory count for a named item."""
         return self.player.inventory.count(item)
 
     @property
@@ -449,13 +432,130 @@ class WorldState:
 
     @property
     def has_damage(self) -> bool:
-        """True if any placed entity is currently below full health."""
         return bool(self.damaged_entities)
 
     @property
     def recent_losses(self) -> list[DestroyedEntity]:
-        """All destroyed entities within the TTL window (pruning done by bridge)."""
         return self.destroyed_entities
+
+    # ------------------------------------------------------------------
+    # Connectivity queries
+    # ------------------------------------------------------------------
+
+    def _entity_contains_position(
+        self, entity: EntityState, pos: Position,
+        tile_width: int = 1, tile_height: int = 1,
+    ) -> bool:
+        """
+        Return True if world-coordinate pos falls within the bounding box of
+        entity, given its tile dimensions.
+
+        Factorio entities are centred on their position; a 1×1 entity at
+        (5, 5) occupies [4.5, 5.5) × [4.5, 5.5).  We add a small epsilon
+        (0.1 tile) on each edge so that inserter reach positions that land
+        exactly on an entity edge are still matched.
+        """
+        eps = 0.1
+        half_w = tile_width  / 2.0 + eps
+        half_h = tile_height / 2.0 + eps
+        return (
+            abs(pos.x - entity.position.x) <= half_w and
+            abs(pos.y - entity.position.y) <= half_h
+        )
+
+    def inserters_taking_from(
+        self,
+        entity_id: int,
+        tile_width: int = 1,
+        tile_height: int = 1,
+    ) -> list[InserterState]:
+        """
+        Return all inserters whose pickup_position falls within the bounding
+        box of the entity with the given entity_id.
+
+        tile_width / tile_height should come from KnowledgeBase.get_entity()
+        for non-1×1 entities (assemblers, furnaces, etc.).  Defaults of 1×1
+        work correctly for chests, accumulators, and other small entities.
+
+        Returns an empty list if the entity is not found or no inserters are
+        taking from it.
+        """
+        target = self.entity_by_id(entity_id)
+        if target is None:
+            return []
+        return [
+            ins for ins in self.logistics.inserters.values()
+            if ins.pickup_position is not None
+            and self._entity_contains_position(
+                target, ins.pickup_position, tile_width, tile_height
+            )
+        ]
+
+    def inserters_delivering_to(
+        self,
+        entity_id: int,
+        tile_width: int = 1,
+        tile_height: int = 1,
+    ) -> list[InserterState]:
+        """
+        Return all inserters whose drop_position falls within the bounding
+        box of the entity with the given entity_id.
+
+        tile_width / tile_height should come from KnowledgeBase.get_entity()
+        for non-1×1 entities.  Defaults of 1×1 work correctly for chests and
+        other small entities.
+
+        Returns an empty list if the entity is not found or no inserters are
+        delivering to it.
+        """
+        target = self.entity_by_id(entity_id)
+        if target is None:
+            return []
+        return [
+            ins for ins in self.logistics.inserters.values()
+            if ins.drop_position is not None
+            and self._entity_contains_position(
+                target, ins.drop_position, tile_width, tile_height
+            )
+        ]
+
+    def inserters_taking_from_type(self, entity_name: str) -> list[InserterState]:
+        """
+        Return all inserters taking from any entity of the given type.
+        Useful when the exact entity_id is not known in advance.
+        Assumes 1×1 tile footprint — use inserters_taking_from() with explicit
+        tile dimensions for larger entities.
+        """
+        targets = {e.entity_id: e for e in self.entities_by_name(entity_name)}
+        if not targets:
+            return []
+        result = []
+        for ins in self.logistics.inserters.values():
+            if ins.pickup_position is None:
+                continue
+            for entity in targets.values():
+                if self._entity_contains_position(entity, ins.pickup_position):
+                    result.append(ins)
+                    break
+        return result
+
+    def inserters_delivering_to_type(self, entity_name: str) -> list[InserterState]:
+        """
+        Return all inserters delivering to any entity of the given type.
+        Assumes 1×1 tile footprint.
+        """
+        targets = {e.entity_id: e for e in self.entities_by_name(entity_name)}
+        if not targets:
+            return []
+        result = []
+        for ins in self.logistics.inserters.values():
+            if ins.drop_position is None:
+                continue
+            for entity in targets.values():
+                if self._entity_contains_position(entity, ins.drop_position):
+                    result.append(ins)
+                    break
+        return result
 
     def __repr__(self) -> str:
         return (
