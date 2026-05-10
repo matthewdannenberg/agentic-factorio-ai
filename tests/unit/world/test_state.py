@@ -5,7 +5,7 @@ Tests for world/state.py
 
 Organised in two sections:
   1. Core dataclass tests  — Position, Inventory, WorldState basics, BeltLane,
-                             BeltSegment
+                             BeltSegment, ExplorationState
   2. Connectivity tests    — InserterState, inserters_taking_from/delivering_to,
                              bounding-box helper
 
@@ -21,7 +21,7 @@ import unittest
 
 from world.state import (
     BeltLane, BeltSegment, BiterBase, DamagedEntity, DestroyedEntity,
-    Direction, EntityState, EntityStatus,
+    Direction, EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
     ResourceName, ResourcePatch, ResearchState,
@@ -140,6 +140,7 @@ class TestWorldStateBasics(unittest.TestCase):
         r = repr(self._ws())
         self.assertIn("tick=3600", r)
         self.assertIn("entities=2", r)
+        self.assertIn("charted_chunks=0", r)
 
     def test_resource_patch_accepts_mod_string(self):
         patch = ResourcePatch("se-cryonite", Position(100, 200), 50000, 40, 3600)
@@ -216,6 +217,65 @@ class TestWorldStateBasics(unittest.TestCase):
         )
         self.assertTrue(ws.threat.is_empty)
         self.assertTrue(ws.has_damage)
+
+
+class TestExplorationState(unittest.TestCase):
+
+    def test_defaults_zero(self):
+        e = ExplorationState()
+        self.assertEqual(e.charted_chunks, 0)
+        self.assertEqual(e.charted_tiles, 0)
+        self.assertAlmostEqual(e.charted_area_km2, 0.0)
+
+    def test_charted_tiles_is_chunks_times_1024(self):
+        # 32 * 32 = 1024 tiles per chunk
+        e = ExplorationState(charted_chunks=10)
+        self.assertEqual(e.charted_tiles, 10240)
+
+    def test_charted_area_km2(self):
+        # 1000 chunks * 1024 tiles = 1,024,000 tiles = 1.024 km²
+        e = ExplorationState(charted_chunks=1000)
+        self.assertAlmostEqual(e.charted_area_km2, 1.024)
+
+    def test_charted_area_single_chunk(self):
+        e = ExplorationState(charted_chunks=1)
+        self.assertAlmostEqual(e.charted_area_km2, 0.001024)
+
+    def test_large_exploration(self):
+        e = ExplorationState(charted_chunks=10000)
+        self.assertAlmostEqual(e.charted_area_km2, 10.24)
+
+
+class TestWorldStateExploration(unittest.TestCase):
+
+    def test_charted_chunks_shorthand(self):
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            exploration=ExplorationState(charted_chunks=75),
+        ))
+        self.assertEqual(ws.charted_chunks, 75)
+
+    def test_charted_chunks_default_zero(self):
+        self.assertEqual(WorldState().charted_chunks, 0)
+
+    def test_exploration_on_player_state(self):
+        p = PlayerState(exploration=ExplorationState(charted_chunks=42))
+        self.assertEqual(p.exploration.charted_chunks, 42)
+
+    def test_default_player_has_zero_exploration(self):
+        self.assertEqual(PlayerState().exploration.charted_chunks, 0)
+
+    def test_exploration_independent_of_entity_scan(self):
+        # charted_chunks is NON-PROXIMAL — unaffected by what's in scan radius
+        ws = WorldState(
+            player=PlayerState(
+                position=Position(0, 0),
+                exploration=ExplorationState(charted_chunks=100),
+            ),
+            entities=[],       # nothing in scan radius
+            observed_at={},    # nothing ever scanned
+        )
+        self.assertEqual(ws.charted_chunks, 100)
 
 
 # ===========================================================================

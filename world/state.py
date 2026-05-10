@@ -292,6 +292,43 @@ class LogisticsState:
 
 
 # ---------------------------------------------------------------------------
+# Exploration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExplorationState:
+    """
+    Force-level map exploration statistics.
+
+    NON-PROXIMAL — the charted area is a global force property that accumulates
+    as the player moves and reveals new chunks.  Safe to evaluate at any time
+    regardless of where the player is standing.  See CONDITION_SCOPE.md.
+
+    Fields
+    ------
+    charted_chunks : Number of 32×32-tile chunks revealed by this force.
+                     Grows monotonically — never decreases during a run.
+                     Sourced from LuaForce::get_chart_size(surface).
+    """
+    charted_chunks: int = 0
+
+    @property
+    def charted_tiles(self) -> int:
+        """Total revealed tiles (charted_chunks × 32²)."""
+        return self.charted_chunks * 1024   # 32 * 32
+
+    @property
+    def charted_area_km2(self) -> float:
+        """
+        Revealed area in km².
+
+        Factorio tiles are 1m × 1m in lore, so 1,000,000 tiles = 1 km².
+        Convenient human-readable scale for large-scale exploration goals.
+        """
+        return self.charted_tiles / 1_000_000.0
+
+
+# ---------------------------------------------------------------------------
 # Structural damage
 # ---------------------------------------------------------------------------
 
@@ -362,6 +399,7 @@ class PlayerState:
     health: float = 100.0
     inventory: Inventory = field(default_factory=Inventory)
     reachable: list[int] = field(default_factory=list)
+    exploration: ExplorationState = field(default_factory=ExplorationState)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +475,15 @@ class WorldState:
     @property
     def recent_losses(self) -> list[DestroyedEntity]:
         return self.destroyed_entities
+
+    # ------------------------------------------------------------------
+    # Exploration convenience
+    # ------------------------------------------------------------------
+
+    @property
+    def charted_chunks(self) -> int:
+        """Shorthand for player.exploration.charted_chunks. NON-PROXIMAL."""
+        return self.player.exploration.charted_chunks
 
     # ------------------------------------------------------------------
     # Connectivity queries
@@ -562,5 +609,6 @@ class WorldState:
             f"WorldState(tick={self.tick}, "
             f"entities={len(self.entities)}, "
             f"resources={len(self.resource_map)}, "
+            f"charted_chunks={self.charted_chunks}, "
             f"power_headroom={self.logistics.power.headroom_kw:.1f}kW)"
         )

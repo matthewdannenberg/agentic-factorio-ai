@@ -46,6 +46,7 @@ from world.state import (
     Direction,
     EntityState,
     EntityStatus,
+    ExplorationState,
     GroundItem,
     Inventory,
     InventorySlot,
@@ -231,11 +232,13 @@ class StateParser:
         health = float(d.get("health", 100.0))
         inventory = self._parse_inventory(d.get("inventory", []))
         reachable = [int(x) for x in d.get("reachable", [])]
+        charted_chunks = int(d.get("charted_chunks", 0))
         return PlayerState(
             position=pos,
             health=health,
             inventory=inventory,
             reachable=reachable,
+            exploration=ExplorationState(charted_chunks=charted_chunks),
         )
 
     def _parse_entities(self, lst: Any) -> list[EntityState]:
@@ -368,27 +371,22 @@ class StateParser:
             try:
                 entity_id = int(k)
                 if isinstance(v, dict):
-                    # New format: {active, pickup_position, drop_position}
                     active = bool(v.get("active", False))
-                    pickup_position = self._parse_optional_position(
-                        v.get("pickup_position")
-                    )
-                    drop_position = self._parse_optional_position(
-                        v.get("drop_position")
-                    )
                     ins = InserterState(
                         entity_id=entity_id,
-                        position=Position(0.0, 0.0),  # not in logistics payload
+                        position=Position(0.0, 0.0),
                         active=active,
-                        pickup_position=pickup_position,
-                        drop_position=drop_position,
+                        pickup_position=self._parse_optional_position(
+                            v.get("pickup_position")
+                        ),
+                        drop_position=self._parse_optional_position(
+                            v.get("drop_position")
+                        ),
                     )
                     inserters[entity_id] = ins
                     inserter_activity[entity_id] = 1 if active else 0
                 else:
-                    # Legacy format: bare 0/1 integer
-                    activity = int(v)
-                    inserter_activity[entity_id] = activity
+                    inserter_activity[entity_id] = int(v)
             except (ValueError, TypeError):
                 pass
 
@@ -398,6 +396,28 @@ class StateParser:
             inserters=inserters,
             inserter_activity=inserter_activity,
         )
+
+    def _parse_belt_lane(self, d: Any) -> BeltLane:
+        if not isinstance(d, dict):
+            return BeltLane()
+        congested = bool(d.get("congested", False))
+        raw_items = d.get("items", {})
+        items: dict[str, int] = {}
+        if isinstance(raw_items, dict):
+            for name, count in raw_items.items():
+                try:
+                    items[str(name)] = int(count)
+                except (ValueError, TypeError):
+                    pass
+        return BeltLane(congested=congested, items=items)
+
+    def _parse_optional_position(self, d: Any) -> Optional[Position]:
+        if not isinstance(d, dict):
+            return None
+        try:
+            return Position(x=float(d.get("x", 0.0)), y=float(d.get("y", 0.0)))
+        except (ValueError, TypeError):
+            return None
 
     def _parse_damaged_entities(self, lst: Any, tick: int) -> list[DamagedEntity]:
         if not isinstance(lst, list):
@@ -483,30 +503,6 @@ class StateParser:
     # ------------------------------------------------------------------
     # Primitive helpers
     # ------------------------------------------------------------------
-
-    def _parse_belt_lane(self, d: Any) -> BeltLane:
-        """Parse a single belt transport line lane from Lua output."""
-        if not isinstance(d, dict):
-            return BeltLane()
-        congested = bool(d.get("congested", False))
-        raw_items = d.get("items", {})
-        items: dict[str, int] = {}
-        if isinstance(raw_items, dict):
-            for name, count in raw_items.items():
-                try:
-                    items[str(name)] = int(count)
-                except (ValueError, TypeError):
-                    pass
-        return BeltLane(congested=congested, items=items)
-
-    def _parse_optional_position(self, d: Any) -> Optional[Position]:
-        """Parse a position dict, returning None if absent or malformed."""
-        if not isinstance(d, dict):
-            return None
-        try:
-            return Position(x=float(d.get("x", 0.0)), y=float(d.get("y", 0.0)))
-        except (ValueError, TypeError):
-            return None
 
     def _parse_position(self, d: Any) -> Position:
         if isinstance(d, dict):

@@ -25,12 +25,21 @@ Condition scope:
   the staleness helpers available in the eval namespace.
 
   Short version:
-    - production_rate(item)  — PROXIMAL. Only reflects entities in scan radius.
-    - entities(name)         — PROXIMAL. Only entities in scan radius.
-    - staleness(section)     — use to guard proximal conditions explicitly.
-    - inventory(item)        — NON-PROXIMAL. Player carries inventory everywhere.
-    - tech_unlocked(tech)    — NON-PROXIMAL. Research state is global.
-    - resources_of_type(t)   — NON-PROXIMAL. Accumulated across all visits.
+    NON-PROXIMAL (safe anywhere):
+      inventory(item)        player carries inventory everywhere
+      tech_unlocked(tech)    research state is global
+      resources_of_type(t)   accumulated across all visits
+      charted_chunks         force chart size, global and monotonic
+      charted_tiles          charted_chunks x 1024
+      charted_area_km2       charted_tiles / 1,000,000
+      tick / game_time_seconds  always current
+
+    PROXIMAL (requires player proximity):
+      production_rate(item)  scan radius only, tracker-backed
+      entities(name)         scan radius only
+      staleness(section)     use to guard proximal conditions explicitly
+      logistics / power      scan radius only
+      inserters_from/to      scan radius only
 """
 
 from __future__ import annotations
@@ -177,6 +186,10 @@ class RewardEvaluator:
             "tick":      tick,
             # Inventory — NON-PROXIMAL (travels with player)
             "inventory": state.inventory_count,
+            # Exploration — NON-PROXIMAL (global force chart, monotonically increasing)
+            "charted_chunks":   state.player.exploration.charted_chunks,
+            "charted_tiles":    state.player.exploration.charted_tiles,
+            "charted_area_km2": state.player.exploration.charted_area_km2,
             # Entities — PROXIMAL (scan radius only)
             "entities":  state.entities_by_name,
             "entity_by_id": state.entity_by_id,

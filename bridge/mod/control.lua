@@ -258,17 +258,46 @@ function fa.get_tick()
     return tostring(game.tick)
 end
 
+-- Returns current exploration statistics without a full state query.
+-- Useful for partial refreshes when only charted area is needed.
+-- charted_chunks is NON-PROXIMAL: reflects the force's global chart,
+-- not the current scan radius.
+function fa.get_exploration()
+    local player = get_player()
+    if not player or not player.valid then
+        return err_response("no_player")
+    end
+    local charted_chunks = 0
+    local ok, val = pcall(function()
+        return player.force.get_chart_size(player.surface)
+    end)
+    if ok and val then charted_chunks = val end
+    return safe_json({
+        tick           = game.tick,
+        charted_chunks = charted_chunks,
+    })
+end
+
 -- ============================================================
 -- Internal section builders
 -- ============================================================
 
 function fa._player_table(player)
     local inv = player.get_inventory(defines.inventory.character_main)
+    -- charted_chunks: total 32x32 chunks the force has revealed on this surface.
+    -- Global to the force -- not scan-radius scoped. Grows monotonically.
+    -- Sourced from LuaForce::get_chart_size(surface).
+    local charted_chunks = 0
+    local ok_cc, cc = pcall(function()
+        return player.force.get_chart_size(player.surface)
+    end)
+    if ok_cc and cc then charted_chunks = cc end
     return {
-        position  = {x = player.position.x, y = player.position.y},
-        health    = player.character and player.character.health or 100.0,
-        inventory = inventory_to_list(inv),
-        reachable = fa._reachable_ids(player),
+        position       = {x = player.position.x, y = player.position.y},
+        health         = player.character and player.character.health or 100.0,
+        inventory      = inventory_to_list(inv),
+        reachable      = fa._reachable_ids(player),
+        charted_chunks = charted_chunks,
     }
 end
 
@@ -473,60 +502,41 @@ function fa._logistics_table(player, radius)
     end
 
     -- ---- Belt segments ----
-    -- Each belt tile exposes two independent transport lines (lanes).
-    -- lane1 = get_transport_line(1) = left lane
-    -- lane2 = get_transport_line(2) = right lane
-    -- Each lane is read in full: we accumulate item counts across every stack
-    -- on the line rather than sampling only the first stack.  Congestion is
-    -- tracked per-lane (backed up when item count >= line_length capacity).
     local belts_data    = {}
     local belt_entities = surface.find_entities_filtered({
         position = center,
         radius   = radius,
         type     = {"transport-belt", "underground-belt", "splitter"},
     })
-
-    local function read_lane(belt, line_index)
-        -- Returns {congested=bool, items={[name]=count, ...}}
-        local result = {congested = false, items = {}}
-        if not belt.get_transport_line then return result end
-        local ok, line = pcall(function() return belt.get_transport_line(line_index) end)
-        if not ok or not line then return result end
-        local ll = line.line_length or 0
-        local count = #line
-        result.congested = ll > 0 and (count >= ll)
-        for i = 1, count do
-            local stack = line[i]
-            if stack and stack.valid_for_read then
-                local n = stack.name
-                result.items[n] = (result.items[n] or 0) + stack.count
-            end
-        end
-        return result
-    end
-
     local seg_id = 1
     for _, belt in ipairs(belt_entities) do
         if belt.valid then
+            local congested = false
+            local item_name = nil
+            if belt.get_transport_line then
+                local ok, line1 = pcall(function() return belt.get_transport_line(1) end)
+                if ok and line1 then
+                    local ll = line1.line_length or 0
+                    congested = ll > 0 and (#line1 >= ll)
+                    if #line1 > 0 then
+                        local stack = line1[1]
+                        if stack and stack.valid_for_read then
+                            item_name = stack.name
+                        end
+                    end
+                end
+            end
             table.insert(belts_data, {
                 segment_id = seg_id,
                 positions  = {{x = belt.position.x, y = belt.position.y}},
-                lane1      = read_lane(belt, 1),
-                lane2      = read_lane(belt, 2),
+                congested  = congested,
+                item       = item_name,
             })
             seg_id = seg_id + 1
         end
     end
 
     -- ---- Inserter activity ----
-    -- Each inserter record carries:
-    --   active          : 1 if currently holding an item, 0 otherwise
-    --   pickup_position : world coordinates the arm reaches to pick up from
-    --   drop_position   : world coordinates the arm reaches to place into
-    -- These two positions are fixed by entity direction and prototype offsets —
-    -- they do not change while the inserter is stationary.  The Python layer
-    -- uses them to determine which entity the inserter is taking from / placing
-    -- into via bounding-box containment (no additional RCON calls required).
     local inserter_activity = {}
     local inserters = surface.find_entities_filtered({
         position = center,
@@ -536,21 +546,7 @@ function fa._logistics_table(player, radius)
     for _, ins in ipairs(inserters) do
         if ins.valid and ins.unit_number then
             local active = (ins.held_stack and ins.held_stack.valid_for_read) and 1 or 0
-            local pickup_pos = nil
-            local drop_pos   = nil
-            local ok_pu, pu = pcall(function() return ins.pickup_position end)
-            if ok_pu and pu then
-                pickup_pos = {x = pu.x, y = pu.y}
-            end
-            local ok_dp, dp = pcall(function() return ins.drop_position end)
-            if ok_dp and dp then
-                drop_pos = {x = dp.x, y = dp.y}
-            end
-            inserter_activity[tostring(ins.unit_number)] = {
-                active          = active,
-                pickup_position = pickup_pos,
-                drop_position   = drop_pos,
-            }
+            inserter_activity[tostring(ins.unit_number)] = active
         end
     end
 
