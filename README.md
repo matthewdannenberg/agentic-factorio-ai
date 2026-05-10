@@ -8,15 +8,17 @@ Target game version: **Factorio 2.x (Space Age)**.
 
 ## Status
 
-**Phase 3 complete — world model.** The knowledge base, tech tree, production tracker,
-and entity/resource facades are implemented and tested. The knowledge base uses SQLite
-for persistent, queryable storage of all learned game knowledge.
+**Phase 4 complete — planning layer.** The goal tree, reward evaluator, and resource
+allocator are implemented and tested. The evaluator exposes a rich condition namespace
+covering inventory, exploration, production rates, connectivity, research, logistics, and
+more. See `REWARD_NAMESPACE.md` for the complete reference and `CONDITION_SCOPE.md` for
+the critical proximal/non-proximal distinction that governs how goals must be written.
 
 ```
 [✅] Core dataclasses     128 tests passing
-[✅] Bridge / Lua mod      80 unit tests passing; in-game testing pending
-[✅] World model          see breakdown below
-[ ] Planning layer
+[✅] Bridge / Lua mod      80+ unit tests passing; basic in-game testing passed
+[✅] World model          200+ tests
+[✅] Planning layer        ~80 unit tests + ~90 integration tests passing
 [ ] Primitives
 [ ] Execution layer
 [ ] Examination
@@ -31,16 +33,20 @@ for persistent, queryable storage of all learned game knowledge.
 
 ```
 [✅] agent/examiner/              25 tests — AuditReport
-[✅] agent/state_machine.py       9 tests  — StateMachine
+[✅] agent/state_machine.py        9 tests — StateMachine
 [✅] bridge/action_executor.py    28 tests — ActionExecutor
 [✅] bridge/actions.py            40 tests — Action, ActionCategory, and actions_for_context
-[✅] bridge/rcon_client.py        5 tests  — RconClient
-[✅] bridge/state_parser.py       38 tests — StateParser
+[✅] bridge/rcon_client.py         5 tests — RconClient
+[✅] bridge/state_parser.py       50 tests — two-lane belts, inserter objects, charted_chunks
 [✅] planning/goal.py             20 tests — Goal, Priority, RewardSpec
+[✅] planning/goal_tree.py        40 tests — GoalTree, LIFO preemption, subgoal completion
+[✅] planning/resource_allocator  10 tests — pass-through interface
+[✅] planning/reward_evaluator    30 tests — conditions, discounting, milestones, safety
 [✅] world/entities.py            36 tests — ResourceRegistry and entity metadata facade
 [✅] world/knowledge.py           75 tests — SQLite-backed KnowledgeBase
 [✅] world/production_tracker.py  25 tests — ProductionSummary, ProductionTracker
-[✅] world/state.py               34 tests — Inventory, Position, WorldState
+[✅] world/state.py               87 tests — BeltLane/BeltSegment, InserterState,
+                                             ExplorationState, connectivity queries
 [✅] world/tech_tree.py           64 tests — KnowledgeBase-backed TechTree
 ```
 
@@ -48,18 +54,35 @@ for persistent, queryable storage of all learned game knowledge.
 
 ```
 [✅] test_StateParser_WorldState  9 tests  — StateParser with WorldState
+[✅] test_evaluator_capabilities  ~90 tests — capability matrix across 14 categories:
+                                   IV (inventory), EN (entity placement),
+                                   PR (production/logistics, two-lane belts),
+                                   RS (research), RM (resource map), TM (time),
+                                   DM (damage), CN (connectivity), GI (ground items),
+                                   EX (exploration / charted_chunks — NON-PROXIMAL),
+                                   PT (production_rate — PROXIMAL),
+                                   ST (staleness guards), SC (scope boundary),
+                                   XC (compound conditions)
 ```
 
 ## Architecture
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation including:
 - Key design decisions and their rationale
-- All dataclass interfaces (WorldState, Goal, AuditReport, Action types)
-- Bridge layer component contracts and 2.x API notes
+- All dataclass interfaces (WorldState, Goal, AuditReport, Action types, GoalTree,
+  RewardEvaluator, ExplorationState, BeltLane/BeltSegment, InserterState)
+- Bridge layer: two-lane belt reading, inserter positions, charted_chunks, fa.get_exploration
 - World model: KnowledgeBase schema, discovery flow, enrichment lifecycle
+- Planning layer: GoalTree, RewardEvaluator namespace, ResourceAllocator
 - State machine transitions
 - Build order and testing strategy
 - Component conversation brief template for handoff between conversations
+
+See [`CONDITION_SCOPE.md`](CONDITION_SCOPE.md) for the critical PROXIMAL vs NON-PROXIMAL
+condition distinction — required reading before implementing any LLM layer.
+
+See [`REWARD_NAMESPACE.md`](REWARD_NAMESPACE.md) for the complete eval namespace reference
+covering every name available in goal condition expressions.
 
 ## Project Structure
 
@@ -68,20 +91,30 @@ factorio-agent/
 ├── bridge/
 │   ├── actions.py              ✅ 21 action types, ActionCategory, actions_for_context()
 │   ├── rcon_client.py          ✅ RCON TCP connection, reconnect, thread-safe
-│   ├── state_parser.py         ✅ JSON from Lua mod → WorldState (full + partial)
+│   ├── state_parser.py         ✅ JSON from Lua mod → WorldState; two-lane belts,
+│   │                                inserter objects, charted_chunks
 │   ├── action_executor.py      ✅ Action objects → RCON commands
 │   └── mod/
 │       ├── info.json           ✅ Factorio mod metadata (factorio_version: "2.0")
-│       └── control.lua         ✅ Lua mod — exposes state, accepts commands,
-│                                    includes prototype query functions
+│       └── control.lua         ✅ Lua mod — two-lane belt reading, inserter pickup/drop
+│                                    positions, charted_chunks via get_chart_size,
+│                                    fa.get_exploration(), prototype query functions
 ├── world/
-│   ├── state.py                ✅ WorldState and all sub-dataclasses
+│   ├── state.py                ✅ WorldState; BeltLane/BeltSegment (two-lane),
+│   │                                InserterState (pickup/drop positions),
+│   │                                ExplorationState (charted_chunks),
+│   │                                connectivity query methods
 │   ├── knowledge.py            ✅ KnowledgeBase — SQLite-backed, runtime-extensible
 │   ├── entities.py             ✅ Facade: ResourceRegistry, get_entity_metadata()
 │   ├── tech_tree.py            ✅ TechTree — KB-backed research graph queries
-│   └── production_tracker.py  ✅ Throughput tracking over successive WorldState snapshots
+│   └── production_tracker.py  ✅ ProductionTrackerProtocol + ProductionTracker
+│                                    PROXIMAL — scan-radius scoped
 ├── planning/
-│   └── goal.py                 ✅ Goal, RewardSpec, Priority, GoalStatus, make_goal()
+│   ├── goal.py                 ✅ Goal, RewardSpec, Priority, GoalStatus, make_goal()
+│   ├── goal_tree.py            ✅ GoalTree — LIFO preemption, subgoal auto-completion
+│   ├── reward_evaluator.py     ✅ RewardEvaluator — full condition namespace,
+│   │                                ProductionTracker integration, staleness guards
+│   └── resource_allocator.py  ✅ ResourceAllocator — pass-through (biters pending)
 ├── agent/
 │   ├── state_machine.py        ✅ AgentState, ExamineMode, assert_valid_transition()
 │   └── examiner/
@@ -90,17 +123,25 @@ factorio-agent/
 │   └── knowledge/
 │       └── knowledge.db        (created at runtime — gitignored)
 ├── config.py                   ✅ All tunable parameters
+├── CONDITION_SCOPE.md          ✅ PROXIMAL/NON-PROXIMAL reference — include in LLM convos
+├── REWARD_NAMESPACE.md         ✅ Complete eval namespace reference
 └── tests/
     ├── test_core_dataclasses.py             ✅ 128 tests
     ├── unit/bridge/
-    │   ├── test_state_parser.py             ✅ 80 tests
+    │   ├── test_state_parser.py             ✅ ~50 tests
     │   └── test_action_executor.py          ✅
     ├── unit/world/
+    │   ├── test_state.py                    ✅ ~87 tests
     │   ├── test_knowledge.py                ✅ 75 tests
     │   ├── test_entities.py                 ✅ 36 tests
     │   ├── test_tech_tree.py                ✅ 64 tests
-    │   └── test_production_tracker.py       ✅
+    │   └── test_production_tracker.py       ✅ ~25 tests
+    ├── unit/planning/
+    │   ├── test_goal_tree.py                ✅ ~40 tests
+    │   ├── test_reward_evaluator.py         ✅ ~30 tests
+    │   └── test_resource_allocator.py       ✅ ~10 tests
     └── integration/
+        ├── test_evaluator_capabilities.py  ✅ ~90 tests — capability matrix
         └── test_bridge_live.lua             In-game test suite (requires running game)
 ```
 
@@ -117,10 +158,26 @@ python -m unittest tests.unit.bridge.test_state_parser
 python -m unittest tests.unit.bridge.test_action_executor
 
 # World model
+python -m unittest tests.unit.world.test_state
 python -m unittest tests.unit.world.test_knowledge
 python -m unittest tests.unit.world.test_entities
 python -m unittest tests.unit.world.test_tech_tree
 python -m unittest tests.unit.world.test_production_tracker
+
+# Planning layer
+python -m unittest tests.unit.planning.test_goal_tree
+python -m unittest tests.unit.planning.test_reward_evaluator
+python -m unittest tests.unit.planning.test_resource_allocator
+
+# Everything at once
+python -m unittest discover -s tests -v
+```
+
+### Integration tests — no Factorio required
+
+```bash
+# Capability matrix — evaluator × WorldState
+python -m unittest tests.integration.test_evaluator_capabilities
 ```
 
 ### In-game integration tests
@@ -211,16 +268,27 @@ code. The LLM is called for strategic goal-setting, tactical decomposition, and 
 by the bridge. Different sections have different staleness. The `observed_at` dict tracks
 per-section freshness. Consumers must not treat it as ground truth.
 
-**Knowledge is queryable, not just retrievable.** The SQLite backing store supports
-cross-domain queries the planning layer will need: all recipes that produce X, all recipes
-that run in entity Y, techs that unlock a given recipe, recursive production chain closure.
-These are indexed SQL queries, not O(n) Python scans.
+**Condition scope matters.** Proximal conditions (entities, logistics, production rates,
+connectivity) are only reliable when the player is within scan radius. Non-proximal
+conditions (inventory, research, exploration, time, resource patches) are globally accurate.
+Write strategic goals using non-proximal conditions. See `CONDITION_SCOPE.md`.
 
-**Placeholders degrade gracefully.** When the agent encounters an unknown name offline
-(no RCON connection), a placeholder record is stored immediately. Once a connection is
-available, `KnowledgeBase.enrich_placeholders()` re-queries all placeholders and replaces
-them with real data. Enriched records persist to the DB so subsequent runs start fully
-informed.
+**Belt lanes are independent.** Each belt tile has two transport lines. `BeltSegment` models
+both via `BeltLane` objects with per-lane item dicts and congestion flags.
+
+**Inserter connectivity is spatial.** `WorldState.inserters_taking_from(entity_id)` and
+`inserters_delivering_to(entity_id)` use pickup/drop world coordinates for bounding-box
+containment checks, enabling connectivity queries without additional RCON calls.
+
+**Exploration is non-proximal.** `charted_chunks` reflects the force's global chart —
+monotonically increasing, accurate anywhere. Use it in goals to incentivise exploration.
+
+**Knowledge is queryable, not just retrievable.** The SQLite backing store supports
+cross-domain queries the planning layer needs: recipes producing X, recipes running in
+entity Y, techs unlocking a given recipe, recursive production chain closure.
+
+**Placeholders degrade gracefully.** Unknown names encountered offline are stored as
+placeholders and enriched automatically when a live connection becomes available.
 
 **Actions are primitive and categorised.** `bridge/actions.py` contains only single-RCON-
 call operations. Composition is the execution layer's job. Every action declares an
@@ -235,15 +303,18 @@ structural changes elsewhere.
 When implementing the next component:
 
 1. Include `ARCHITECTURE.md` — the full design and all interface specifications
-2. Include the actual source files for everything the new component consumes or produces
-3. Include the relevant test file(s) — the implementer should run them to verify changes
+2. Include `CONDITION_SCOPE.md` — if the component generates or evaluates goal conditions
+3. Include `REWARD_NAMESPACE.md` — if the component writes condition strings
+4. Include the actual source files for everything the new component consumes or produces
+5. Include the relevant test file(s) — the implementer should run them to verify changes
    don't break existing contracts
-4. Write a component brief using the template in `ARCHITECTURE.md`
+6. Write a component brief using the template in `ARCHITECTURE.md`
 
-For the planning layer (next phase), the files to include are:
+For the **primitives and execution layer** (next phase), the files to include are:
 - `ARCHITECTURE.md`
-- `world/knowledge.py` — the planning layer queries the KB directly
-- `world/tech_tree.py` — goal-setting uses TechTree.path_to() and next_researchable()
-- `world/state.py` — RewardSpec is evaluated against WorldState
-- `planning/goal.py` — Goal, RewardSpec, Priority (already implemented, extend here)
-- `tests/unit/world/test_knowledge.py` — must still pass
+- `bridge/actions.py` — the Action types primitives must produce
+- `world/state.py` — WorldState the execution layer reads
+- `planning/goal.py` — Goal the execution layer pursues
+- `agent/state_machine.py` — execution runs within EXECUTING state
+- `world/knowledge.py` — KnowledgeBase the execution layer queries
+- `EXECUTION_BRIEF.md` — the component brief for this phase
