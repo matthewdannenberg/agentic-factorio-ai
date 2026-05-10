@@ -65,6 +65,12 @@ the critical proximal/non-proximal distinction that governs how goals must be wr
                                    XC (compound conditions)
 ```
 
+### In Game Test Breakdown
+
+```
+[✅] test_bridge_live.lua         ~35 tests - basic in-game functionality of state reading
+```
+
 ## Architecture
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation including:
@@ -88,6 +94,10 @@ covering every name available in goal condition expressions.
 
 ```
 factorio-agent/
+├── agent/
+│   ├── state_machine.py        ✅ AgentState, ExamineMode, assert_valid_transition()
+│   └── examiner/
+│       └── audit_report.py     ✅ AuditReport, BoundingBox, BlueprintCandidate
 ├── bridge/
 │   ├── actions.py              ✅ 21 action types, ActionCategory, actions_for_context()
 │   ├── rcon_client.py          ✅ RCON TCP connection, reconnect, thread-safe
@@ -96,9 +106,16 @@ factorio-agent/
 │   ├── action_executor.py      ✅ Action objects → RCON commands
 │   └── mod/
 │       ├── info.json           ✅ Factorio mod metadata (factorio_version: "2.0")
-│       └── control.lua         ✅ Lua mod — two-lane belt reading, inserter pickup/drop
-│                                    positions, charted_chunks via get_chart_size,
-│                                    fa.get_exploration(), prototype query functions
+│       ├── control.lua         ✅ Lua mod — two-lane belt reading, inserter pickup/drop
+│       │                             positions, charted_chunks via get_chart_size,
+│       │                             fa.get_exploration(), prototype query functions
+│       └── test_bridge_live.lua✅ In-game test suite (requires running game)
+├── planning/
+│   ├── goal.py                 ✅ Goal, RewardSpec, Priority, GoalStatus, make_goal()
+│   ├── goal_tree.py            ✅ GoalTree — LIFO preemption, subgoal auto-completion
+│   ├── reward_evaluator.py     ✅ RewardEvaluator — full condition namespace,
+│   │                                ProductionTracker integration, staleness guards
+│   └── resource_allocator.py   ✅ ResourceAllocator — pass-through (biters pending)
 ├── world/
 │   ├── state.py                ✅ WorldState; BeltLane/BeltSegment (two-lane),
 │   │                                InserterState (pickup/drop positions),
@@ -107,18 +124,8 @@ factorio-agent/
 │   ├── knowledge.py            ✅ KnowledgeBase — SQLite-backed, runtime-extensible
 │   ├── entities.py             ✅ Facade: ResourceRegistry, get_entity_metadata()
 │   ├── tech_tree.py            ✅ TechTree — KB-backed research graph queries
-│   └── production_tracker.py  ✅ ProductionTrackerProtocol + ProductionTracker
+│   └── production_tracker.py   ✅ ProductionTrackerProtocol + ProductionTracker
 │                                    PROXIMAL — scan-radius scoped
-├── planning/
-│   ├── goal.py                 ✅ Goal, RewardSpec, Priority, GoalStatus, make_goal()
-│   ├── goal_tree.py            ✅ GoalTree — LIFO preemption, subgoal auto-completion
-│   ├── reward_evaluator.py     ✅ RewardEvaluator — full condition namespace,
-│   │                                ProductionTracker integration, staleness guards
-│   └── resource_allocator.py  ✅ ResourceAllocator — pass-through (biters pending)
-├── agent/
-│   ├── state_machine.py        ✅ AgentState, ExamineMode, assert_valid_transition()
-│   └── examiner/
-│       └── audit_report.py     ✅ AuditReport, BoundingBox, BlueprintCandidate
 ├── data/
 │   └── knowledge/
 │       └── knowledge.db        (created at runtime — gitignored)
@@ -126,23 +133,27 @@ factorio-agent/
 ├── CONDITION_SCOPE.md          ✅ PROXIMAL/NON-PROXIMAL reference — include in LLM convos
 ├── REWARD_NAMESPACE.md         ✅ Complete eval namespace reference
 └── tests/
-    ├── test_core_dataclasses.py             ✅ 128 tests
+    ├── unit/agent/
+    │   ├── test_examiner.py                 ✅ 25 tests
+    │   └── test_state_machine.py            ✅ 9 tests
     ├── unit/bridge/
-    │   ├── test_state_parser.py             ✅ ~50 tests
-    │   └── test_action_executor.py          ✅
+    │   ├── test_action_executor.py          ✅ 28 tests
+    │   ├── test_actions.py                  ✅ 40 tests
+    │   ├── test_rcon_client.py              ✅ 5 tests
+    │   └── test_state_parser.py             ✅ ~50 tests
+    ├── unit/planning/
+    │   ├── test_goal_tree.py                ✅ ~40 tests
+    │   ├── test_reward_evaluator.py         ✅ ~30 tests
+    │   └── test_resource_allocator.py       ✅ ~10 tests
     ├── unit/world/
     │   ├── test_state.py                    ✅ ~87 tests
     │   ├── test_knowledge.py                ✅ 75 tests
     │   ├── test_entities.py                 ✅ 36 tests
     │   ├── test_tech_tree.py                ✅ 64 tests
     │   └── test_production_tracker.py       ✅ ~25 tests
-    ├── unit/planning/
-    │   ├── test_goal_tree.py                ✅ ~40 tests
-    │   ├── test_reward_evaluator.py         ✅ ~30 tests
-    │   └── test_resource_allocator.py       ✅ ~10 tests
     └── integration/
-        ├── test_evaluator_capabilities.py  ✅ ~90 tests — capability matrix
-        └── test_bridge_live.lua             In-game test suite (requires running game)
+        ├── test_evaluator_capabilities.py   ✅ ~90 tests — capability matrix
+        └── test_StateParser_WorldState.py   ✅ 9 tests
 ```
 
 ## Running the Tests
