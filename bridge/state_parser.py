@@ -221,6 +221,13 @@ class StateParser:
             state.threat = self._parse_threat(data["threat"])
             state.observed_at["threat"] = tick
 
+        # Rebuild internal indices so that WorldQuery lookups are correct
+        # on the snapshot WorldState produced by parse() / parse_partial().
+        # This is the one legitimate place that mutates WorldState fields
+        # directly without going through WorldWriter.
+        state._rebuild_entity_indices()
+        state._rebuild_inserter_indices()
+
     # ------------------------------------------------------------------
     # Section parsers
     # ------------------------------------------------------------------

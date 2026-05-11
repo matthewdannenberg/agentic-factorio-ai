@@ -2,7 +2,7 @@
 planning/reward_evaluator.py
 
 RewardEvaluator — mechanically evaluates a Goal's conditions and RewardSpec
-against a WorldState.
+against a WorldQuery.
 
 Rules:
 - Pure computation. No LLM calls. No RCON. No side effects.
@@ -19,10 +19,15 @@ Design note:
   Goal so it can read both. A lower-level evaluate_conditions() helper accepts
   raw strings directly (useful for tests and introspection).
 
+  The evaluator now receives a WorldQuery rather than a WorldState directly.
+  This enforces the access boundary: the evaluator never touches WorldState
+  fields directly; it uses only the WorldQuery interface.  WorldQuery.state
+  is exposed as a namespace name so that existing condition strings like
+  "state.game_time_seconds" and "state.ground_items" continue to work.
+
 Condition scope:
-  Not all conditions have the same evidence quality. See CONDITION_SCOPE.md
-  for the authoritative breakdown of PROXIMAL vs NON-PROXIMAL conditions and
-  the staleness helpers available in the eval namespace.
+  See CONDITION_SCOPE.md for the authoritative PROXIMAL vs NON-PROXIMAL
+  breakdown and staleness helpers.
 
   Short version:
     NON-PROXIMAL (safe anywhere):
@@ -49,9 +54,9 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from planning.goal import Goal, RewardSpec
-from world.state import WorldState
 
 if TYPE_CHECKING:
+    from world.query import WorldQuery
     from world.production_tracker import ProductionTrackerProtocol
 
 log = logging.getLogger(__name__)
@@ -60,7 +65,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class EvaluationResult:
     """
-    The result of evaluating a Goal against a WorldState snapshot.
+    The result of evaluating a Goal against a WorldQuery snapshot.
 
     Fields
     ------
@@ -79,22 +84,20 @@ class EvaluationResult:
 
 class RewardEvaluator:
     """
-    Evaluates a Goal's conditions and RewardSpec against a live WorldState snapshot.
+    Evaluates a Goal's conditions and RewardSpec against a live WorldQuery.
 
     Primary API:
-        result = evaluator.evaluate(goal, state, tick=3600, start_tick=3000)
+        result = evaluator.evaluate(goal, wq, tick=3600, start_tick=3000)
 
     Lower-level API (raw condition strings):
         result = evaluator.evaluate_conditions(
-            success_condition, failure_condition, spec, state, tick, start_tick
+            success_condition, failure_condition, spec, wq, tick, start_tick
         )
 
     Parameters
     ----------
     tracker : ProductionTrackerProtocol, optional
-        A ProductionTracker (or compatible object) that provides
-        production_rate(item) -> float.  When provided, the eval namespace
-        gains a production_rate() shorthand.  When None, production_rate()
+        Provides production_rate(item) -> float.  When None, production_rate()
         always returns 0.0 and logs a warning on first use.
     """
 
@@ -109,7 +112,7 @@ class RewardEvaluator:
     def evaluate(
         self,
         goal: Goal,
-        state: WorldState,
+        wq: "WorldQuery",
         tick: int,
         start_tick: int,
     ) -> EvaluationResult:
@@ -117,7 +120,7 @@ class RewardEvaluator:
             success_condition=goal.success_condition,
             failure_condition=goal.failure_condition,
             spec=goal.reward_spec,
-            state=state,
+            wq=wq,
             tick=tick,
             start_tick=start_tick,
         )
@@ -127,12 +130,12 @@ class RewardEvaluator:
         success_condition: str,
         failure_condition: str,
         spec: RewardSpec,
-        state: WorldState,
+        wq: "WorldQuery",
         tick: int,
         start_tick: int,
     ) -> EvaluationResult:
         elapsed = max(0, tick - start_tick)
-        ns = self._build_namespace(state, tick)
+        ns = self._build_namespace(wq, tick)
 
         success = self._eval_bool(success_condition, ns, "success_condition")
         failure = self._eval_bool(failure_condition, ns, "failure_condition")
@@ -158,9 +161,7 @@ class RewardEvaluator:
             elapsed_ticks=elapsed,
         )
 
-    def _build_namespace(self, state: WorldState, tick: int) -> dict:
-        # production_rate: use tracker if available, else a safe zero-returning stub
-        # that warns once so the LLM prompt designer notices the gap.
+    def _build_namespace(self, wq: "WorldQuery", tick: int) -> dict:
         if self._tracker is not None:
             production_rate = self._tracker.rate
         else:
@@ -173,47 +174,47 @@ class RewardEvaluator:
                 )
                 return 0.0
 
-        # staleness(section) -> int | None
-        # Exposes WorldState.section_staleness() as a first-class namespace
-        # function so conditions can guard themselves:
-        #   staleness('entities') is not None and staleness('entities') < 300
         def staleness(section: str) -> Optional[int]:
-            return state.section_staleness(section, tick)
+            return wq.section_staleness(section, tick)
 
         ns: dict = {
-            # Top-level state
-            "state":     state,
+            # The underlying WorldState, exposed for condition strings that
+            # reference state.game_time_seconds, state.ground_items, etc.
+            # Consumers should prefer the named namespace names below, but
+            # "state.X" forms remain valid for backwards compatibility.
+            "state":     wq.state,
             "tick":      tick,
-            # Inventory — NON-PROXIMAL (travels with player)
-            "inventory": state.inventory_count,
-            # Exploration — NON-PROXIMAL (global force chart, monotonically increasing)
-            "charted_chunks":   state.player.exploration.charted_chunks,
-            "charted_tiles":    state.player.exploration.charted_tiles,
-            "charted_area_km2": state.player.exploration.charted_area_km2,
+            # WorldQuery itself, for composable query use in conditions.
+            "wq":        wq,
+            # Inventory — NON-PROXIMAL
+            "inventory": wq.inventory_count,
+            # Exploration — NON-PROXIMAL
+            "charted_chunks":   wq.charted_chunks,
+            "charted_tiles":    wq.charted_tiles,
+            "charted_area_km2": wq.charted_area_km2,
             # Entities — PROXIMAL (scan radius only)
-            "entities":  state.entities_by_name,
-            "entity_by_id": state.entity_by_id,
-            "entities_by_status": state.entities_by_status,
-            # Research — NON-PROXIMAL (global)
-            "research":  state.research,
-            "tech_unlocked": state.research.is_unlocked,
-            # Production rates — PROXIMAL (scan radius only, tracker-backed)
+            "entities":           wq.entities_by_name,
+            "entity_by_id":       wq.entity_by_id,
+            "entities_by_status": wq.entities_by_status,
+            # Research — NON-PROXIMAL
+            "research":      wq.research,
+            "tech_unlocked": wq.tech_unlocked,
+            # Production rates — PROXIMAL (scan radius + tracker window)
             "production_rate": production_rate,
-            # Staleness guard — use to make proximal conditions self-defending
+            # Staleness guard — META
             "staleness": staleness,
             # Logistics sub-objects — PROXIMAL
-            "logistics": state.logistics,
-            "power":     state.logistics.power,
-            "threat":    state.threat,
+            "logistics": wq.logistics,
+            "power":     wq.power,
+            "threat":    wq.threat,
             # Connectivity queries — PROXIMAL
-            "inserters_from":      state.inserters_taking_from,
-            "inserters_to":        state.inserters_delivering_to,
-            "inserters_from_type": state.inserters_taking_from_type,
-            "inserters_to_type":   state.inserters_delivering_to_type,
-            # Resource patches — NON-PROXIMAL (accumulated across all visits)
-            "resources_of_type": state.resources_of_type,
+            "inserters_from":      wq.inserters_taking_from,
+            "inserters_to":        wq.inserters_delivering_to,
+            "inserters_from_type": wq.inserters_taking_from_type,
+            "inserters_to_type":   wq.inserters_delivering_to_type,
+            # Resource patches — NON-PROXIMAL
+            "resources_of_type": wq.resources_of_type,
         }
-        # Strip dangerous builtins
         raw_builtins = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)  # type: ignore
         ns["__builtins__"] = {
             k: v for k, v in raw_builtins.items()

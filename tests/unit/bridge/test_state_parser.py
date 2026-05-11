@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import json
 
 from bridge.state_parser import StateParser
+from world.query import WorldQuery
 from world.state import (
     BeltLane,
     Direction,
@@ -584,17 +585,17 @@ class TestStateParserFullParse(unittest.TestCase):
 
     def test_section_staleness_never_observed(self):
         state = WorldState(tick=100)
-        self.assertIsNone(state.section_staleness("resource_map", 100))
+        self.assertIsNone(WorldQuery(state).section_staleness("resource_map", 100))
 
     def test_section_staleness_fresh(self):
         data = {"tick": 1000, "player": {"position": {"x": 0, "y": 0}, "inventory": []}}
         state = self.parser.parse(json.dumps(data), current_tick=1000)
-        self.assertEqual(state.section_staleness("player", 1000), 0)
+        self.assertEqual(WorldQuery(state).section_staleness("player", 1000), 0)
 
     def test_section_staleness_stale(self):
         data = {"tick": 1000, "player": {"position": {"x": 0, "y": 0}, "inventory": []}}
         state = self.parser.parse(json.dumps(data), current_tick=1000)
-        self.assertEqual(state.section_staleness("player", 2000), 1000)
+        self.assertEqual(WorldQuery(state).section_staleness("player", 2000), 1000)
 
     # --- inventory_count / game_time helpers ---------------------------------
 
@@ -606,8 +607,8 @@ class TestStateParserFullParse(unittest.TestCase):
             "reachable": [],
         }}
         state = self._parse(data)
-        self.assertEqual(state.inventory_count("iron-plate"), 42)
-        self.assertEqual(state.inventory_count("copper-plate"), 0)
+        self.assertEqual(WorldQuery(state).inventory_count("iron-plate"), 42)
+        self.assertEqual(WorldQuery(state).inventory_count("copper-plate"), 0)
 
     def test_game_time_seconds(self):
         state = WorldState(tick=3600)

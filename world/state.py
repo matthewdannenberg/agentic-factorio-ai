@@ -1,17 +1,28 @@
 """
 world/state.py
 
-WorldState — the complete agent-readable snapshot of the game at a point in time.
+WorldState — the agent's belief-state snapshot of the game at a point in time.
 
-Produced by:  bridge/state_parser.py
-Consumed by:  planning, execution, and examination layers
+Produced by:  bridge/state_parser.py  (constructs fresh snapshots)
+Mutated by:   world/writer.py         (WorldWriter — the ONLY permitted mutation path)
+Read by:      world/query.py          (WorldQuery — the ONLY permitted read path)
 
 Rules:
 - Pure data. No LLM calls. No RCON. No side effects.
-- All fields have safe defaults so partial state (early game, biters off) never
-  requires special-casing in consumers.
-- Nested types are also plain dataclasses or simple Python primitives so the
-  whole tree is trivially serialisable to/from JSON (for logging and replay).
+- All fields have safe defaults so partial state never requires special-casing.
+- The nested dataclass tree is trivially serialisable to/from JSON.
+- __post_init__ builds internal indices for O(1) / O(k) lookups; these are
+  maintained by WorldWriter on every mutation.
+
+IMPORTANT — access discipline
+------------------------------
+No file outside world/ may import WorldState directly. All reads go through
+WorldQuery; all writes go through WorldWriter. This boundary allows the
+backing implementation to be swapped without touching any consumer.
+
+  world/__init__.py exports: WorldQuery, WorldWriter, and the dataclass types
+  (EntityState, Position, etc.) needed in method signatures.
+  WorldState itself is NOT exported from world/__init__.py.
 """
 
 from __future__ import annotations
@@ -30,7 +41,7 @@ class EntityStatus(Enum):
     IDLE       = "idle"
     NO_INPUT   = "no_input"
     NO_POWER   = "no_power"
-    FULL_OUT   = "full_output"   # output chest / belt saturated
+    FULL_OUT   = "full_output"
     UNKNOWN    = "unknown"
 
 
@@ -82,7 +93,6 @@ class InventorySlot:
 
 @dataclass
 class Inventory:
-    """Represents the contents of the player's inventory or a storage entity."""
     slots: list[InventorySlot] = field(default_factory=list)
 
     def count(self, item: str) -> int:
@@ -104,7 +114,6 @@ class Inventory:
 
 @dataclass
 class EntityState:
-    """A single placed entity on the map."""
     entity_id: int
     name: str
     position: Position
@@ -121,15 +130,6 @@ class EntityState:
 
 @dataclass
 class ResourcePatch:
-    """
-    Coarse strategic record of a resource deposit.
-
-    resource_type   : Factorio internal resource name string, e.g. "iron-ore".
-    position        : Approximate centre of the patch bounding box.
-    amount          : Remaining resource units (stale between visits).
-    size            : Approximate tile count.
-    observed_at     : Game tick when this record was last updated.
-    """
     resource_type: ResourceType
     position: Position
     amount: int
@@ -143,7 +143,6 @@ class ResourcePatch:
 
 @dataclass
 class GroundItem:
-    """An item stack lying on the ground within the local scan radius."""
     item: str
     position: Position
     count: int
@@ -175,14 +174,8 @@ class BeltLane:
     """
     Contents of one transport line lane on a belt tile.
 
-    Factorio belts have two independent lanes (left = line index 1,
-    right = line index 2). Each lane can carry items of any type; a single
-    tile can have multiple item types on the same lane (e.g. mixed inputs
-    arriving at a splitter). Represented as a dict so the planner can ask
-    "does lane 1 carry iron-plate?" in O(1) without iterating a list.
-
-    congested : True if this lane is backed-up (at or above line_length).
-    items     : {item_name: count} — empty dict when the lane is empty.
+    congested : True if this lane is backed-up.
+    items     : {item_name: count}
     """
     congested: bool = False
     items: dict[str, int] = field(default_factory=dict)
@@ -200,20 +193,10 @@ class BeltLane:
 @dataclass
 class BeltSegment:
     """
-    One belt tile (transport-belt, underground-belt, or splitter) within
-    the scan radius.
+    One belt tile with two independent transport lanes.
 
     lane1 : Left transport line  (Factorio get_transport_line(1)).
     lane2 : Right transport line (Factorio get_transport_line(2)).
-
-    Queried per-tile rather than per-path because the Lua mod iterates
-    individual belt entities; path-level aggregation is left to the planning
-    layer.
-
-    Convenience properties mirror the old single-item interface so existing
-    code that checks `b.congested` keeps working:
-      congested : True if either lane is congested.
-      items     : Combined {item: count} across both lanes.
     """
     segment_id: int
     positions: list[Position]
@@ -226,14 +209,12 @@ class BeltSegment:
 
     @property
     def items(self) -> dict[str, int]:
-        """Combined item counts across both lanes."""
         merged: dict[str, int] = dict(self.lane1.items)
         for item, count in self.lane2.items.items():
             merged[item] = merged.get(item, 0) + count
         return merged
 
     def carries(self, item: str) -> bool:
-        """True if either lane carries the named item."""
         return self.lane1.carries(item) or self.lane2.carries(item)
 
 
@@ -258,19 +239,10 @@ class InserterState:
     """
     A single inserter's current activity and reach positions.
 
-    active          : True if the inserter is currently holding an item
-                      (i.e. mid-swing with something in its hand).
     pickup_position : World coordinates where the arm picks items up from.
     drop_position   : World coordinates where the arm places items down.
 
-    These positions are fixed by the entity's direction and prototype offsets —
-    they do not change while the inserter is stationary.  The WorldState
-    connectivity queries use them to determine which entity each inserter is
-    taking from or delivering to via bounding-box containment, without any
-    additional RCON calls.
-
-    Either position may be None if the Lua mod was unable to read it (pcall
-    guard in control.lua) — consumers must handle None gracefully.
+    Either position may be None (pcall-guarded in Lua).
     """
     entity_id: int
     position: Position
@@ -283,11 +255,8 @@ class InserterState:
 class LogisticsState:
     belts: list[BeltSegment] = field(default_factory=list)
     power: PowerGrid = field(default_factory=PowerGrid)
-    # Full inserter records — replaces the old activity-only dict.
-    # Keyed by entity_id for O(1) lookup.
     inserters: dict[int, InserterState] = field(default_factory=dict)
     # Legacy activity shorthand: entity_id → 1 (active) or 0 (idle).
-    # Populated from inserters for backwards-compatibility; prefer inserters.
     inserter_activity: dict[int, int] = field(default_factory=dict)
 
 
@@ -298,33 +267,19 @@ class LogisticsState:
 @dataclass
 class ExplorationState:
     """
-    Force-level map exploration statistics.
+    Force-level map exploration statistics. NON-PROXIMAL.
 
-    NON-PROXIMAL — the charted area is a global force property that accumulates
-    as the player moves and reveals new chunks.  Safe to evaluate at any time
-    regardless of where the player is standing.  See CONDITION_SCOPE.md.
-
-    Fields
-    ------
-    charted_chunks : Number of 32×32-tile chunks revealed by this force.
-                     Grows monotonically — never decreases during a run.
+    charted_chunks : Chunks revealed by this force. Monotonically increasing.
                      Sourced from LuaForce::get_chart_size(surface).
     """
     charted_chunks: int = 0
 
     @property
     def charted_tiles(self) -> int:
-        """Total revealed tiles (charted_chunks × 32²)."""
-        return self.charted_chunks * 1024   # 32 * 32
+        return self.charted_chunks * 1024
 
     @property
     def charted_area_km2(self) -> float:
-        """
-        Revealed area in km².
-
-        Factorio tiles are 1m × 1m in lore, so 1,000,000 tiles = 1 km².
-        Convenient human-readable scale for large-scale exploration goals.
-        """
         return self.charted_tiles / 1_000_000.0
 
 
@@ -334,12 +289,6 @@ class ExplorationState:
 
 @dataclass
 class DamagedEntity:
-    """
-    A placed entity below full health.
-
-    health_fraction : (0.0, 1.0) exclusive — never exactly 1.0 or 0.0.
-    observed_at     : Game tick when this reading was taken.
-    """
     entity_id: int
     name: str
     position: Position
@@ -349,11 +298,6 @@ class DamagedEntity:
 
 @dataclass
 class DestroyedEntity:
-    """
-    A record of an entity destroyed during the current run.
-
-    cause : "biter" | "vehicle" | "deconstruct" | "unknown"
-    """
     name: str
     position: Position
     destroyed_at: int
@@ -374,11 +318,6 @@ class BiterBase:
 
 @dataclass
 class ThreatState:
-    """
-    Biter-specific threat information.
-    All fields are empty / zero when BITERS_ENABLED=False.
-    Structural damage lives on WorldState directly — it is cause-agnostic.
-    """
     biter_bases: list[BiterBase] = field(default_factory=list)
     pollution_cloud: list[Position] = field(default_factory=list)
     attack_timers: dict[int, float] = field(default_factory=dict)
@@ -411,9 +350,21 @@ class WorldState:
     """
     The agent's current belief state about the game world.
 
-    This is NOT ground truth — it is a cached, partially-observed snapshot
-    assembled by bridge/state_parser.py. Different sections have different
-    staleness; consumers should check observed_at when freshness matters.
+    NOT ground truth — a cached, partially-observed snapshot assembled by
+    bridge/state_parser.py. Different sections have different staleness;
+    consumers should check observed_at via WorldQuery.staleness().
+
+    Access discipline
+    -----------------
+    All reads must go through WorldQuery.
+    All mutations must go through WorldWriter.
+    Neither class is imported here; WorldState is a pure data container.
+
+    Internal indices
+    ----------------
+    __post_init__ builds lookup dicts from the initial field values.
+    WorldWriter is responsible for keeping these indices consistent after
+    any mutation. Never mutate the index dicts directly.
 
     Section names used in observed_at
     ----------------------------------
@@ -437,32 +388,99 @@ class WorldState:
     destroyed_ttl_ticks: int = 18_000
 
     # ------------------------------------------------------------------
-    # Standard accessors
+    # Internal indices — built by __post_init__, maintained by WorldWriter.
+    # Named with leading underscore to signal "do not touch from outside".
+    # ------------------------------------------------------------------
+    _by_id:     dict[int, EntityState] = field(default_factory=dict, init=False, repr=False)
+    _by_name:   dict[str, list[EntityState]] = field(default_factory=dict, init=False, repr=False)
+    _by_recipe: dict[str, list[EntityState]] = field(default_factory=dict, init=False, repr=False)
+    _by_status: dict[EntityStatus, list[EntityState]] = field(default_factory=dict, init=False, repr=False)
+
+    # Spatial inserter indices — keyed by entity_id of the source/target entity.
+    # Built lazily by WorldWriter after entities + inserters are both populated.
+    # None signals "not yet built"; WorldQuery rebuilds on demand if None.
+    _inserters_from: Optional[dict[int, list[InserterState]]] = field(
+        default=None, init=False, repr=False
+    )
+    _inserters_to: Optional[dict[int, list[InserterState]]] = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self._rebuild_entity_indices()
+        # Spatial inserter indices are not built here because the inserters
+        # and entities lists may not both be populated at construction time
+        # (e.g. snapshot WorldStates from StateParser).  WorldWriter rebuilds
+        # them after integrate_snapshot(); WorldQuery falls back to a scan if
+        # they are None.
+
+    # ------------------------------------------------------------------
+    # Index management — called by WorldWriter, not by external consumers
     # ------------------------------------------------------------------
 
-    def entity_by_id(self, entity_id: int) -> Optional[EntityState]:
+    def _rebuild_entity_indices(self) -> None:
+        """Rebuild all entity lookup dicts from self.entities."""
+        by_id: dict[int, EntityState] = {}
+        by_name: dict[str, list[EntityState]] = {}
+        by_recipe: dict[str, list[EntityState]] = {}
+        by_status: dict[EntityStatus, list[EntityState]] = {}
+
         for e in self.entities:
-            if e.entity_id == entity_id:
-                return e
-        return None
+            by_id[e.entity_id] = e
 
-    def entities_by_name(self, name: str) -> list[EntityState]:
-        return [e for e in self.entities if e.name == name]
+            by_name.setdefault(e.name, []).append(e)
 
-    def entities_by_status(self, status: EntityStatus) -> list[EntityState]:
-        return [e for e in self.entities if e.status == status]
+            if e.recipe is not None:
+                by_recipe.setdefault(e.recipe, []).append(e)
 
-    def resources_of_type(self, resource_type: ResourceType) -> list[ResourcePatch]:
-        return [r for r in self.resource_map if r.resource_type == resource_type]
+            by_status.setdefault(e.status, []).append(e)
 
-    def section_staleness(self, section: str, current_tick: int) -> Optional[int]:
-        last = self.observed_at.get(section)
-        if last is None:
-            return None
-        return max(0, current_tick - last)
+        self._by_id = by_id
+        self._by_name = by_name
+        self._by_recipe = by_recipe
+        self._by_status = by_status
+        # Invalidate spatial indices — must be rebuilt after entity changes.
+        self._inserters_from = None
+        self._inserters_to = None
 
-    def inventory_count(self, item: str) -> int:
-        return self.player.inventory.count(item)
+    def _rebuild_inserter_indices(self, eps: float = 0.1) -> None:
+        """
+        Rebuild spatial inserter indices.
+
+        For each inserter, we find which entity (if any) its pickup_position
+        falls within (→ _inserters_from) and which entity its drop_position
+        falls within (→ _inserters_to).
+
+        This is O(n_inserters × n_entities) but runs only when WorldWriter
+        calls it after a mutation, not on every query.
+
+        tile_width / tile_height are not available here (they live in
+        KnowledgeBase, which WorldState does not import).  We use a 1×1
+        bounding box for the index, which is correct for chests and other
+        small entities.  WorldQuery corrects for large entities (assemblers,
+        furnaces) when it detects a mismatch via the KB.
+        """
+        from_map: dict[int, list[InserterState]] = {e.entity_id: [] for e in self.entities}
+        to_map:   dict[int, list[InserterState]] = {e.entity_id: [] for e in self.entities}
+
+        for ins in self.logistics.inserters.values():
+            for entity in self.entities:
+                half = 0.5 + eps
+                if ins.pickup_position is not None:
+                    if (abs(ins.pickup_position.x - entity.position.x) <= half and
+                            abs(ins.pickup_position.y - entity.position.y) <= half):
+                        from_map[entity.entity_id].append(ins)
+                if ins.drop_position is not None:
+                    if (abs(ins.drop_position.x - entity.position.x) <= half and
+                            abs(ins.drop_position.y - entity.position.y) <= half):
+                        to_map[entity.entity_id].append(ins)
+
+        self._inserters_from = from_map
+        self._inserters_to = to_map
+
+    # ------------------------------------------------------------------
+    # Simple computed properties (no query logic — kept here for repr)
+    # ------------------------------------------------------------------
 
     @property
     def game_time_seconds(self) -> float:
@@ -476,133 +494,10 @@ class WorldState:
     def recent_losses(self) -> list[DestroyedEntity]:
         return self.destroyed_entities
 
-    # ------------------------------------------------------------------
-    # Exploration convenience
-    # ------------------------------------------------------------------
-
     @property
     def charted_chunks(self) -> int:
-        """Shorthand for player.exploration.charted_chunks. NON-PROXIMAL."""
+        """NON-PROXIMAL shorthand for player.exploration.charted_chunks."""
         return self.player.exploration.charted_chunks
-
-    # ------------------------------------------------------------------
-    # Connectivity queries
-    # ------------------------------------------------------------------
-
-    def _entity_contains_position(
-        self, entity: EntityState, pos: Position,
-        tile_width: int = 1, tile_height: int = 1,
-    ) -> bool:
-        """
-        Return True if world-coordinate pos falls within the bounding box of
-        entity, given its tile dimensions.
-
-        Factorio entities are centred on their position; a 1×1 entity at
-        (5, 5) occupies [4.5, 5.5) × [4.5, 5.5).  We add a small epsilon
-        (0.1 tile) on each edge so that inserter reach positions that land
-        exactly on an entity edge are still matched.
-        """
-        eps = 0.1
-        half_w = tile_width  / 2.0 + eps
-        half_h = tile_height / 2.0 + eps
-        return (
-            abs(pos.x - entity.position.x) <= half_w and
-            abs(pos.y - entity.position.y) <= half_h
-        )
-
-    def inserters_taking_from(
-        self,
-        entity_id: int,
-        tile_width: int = 1,
-        tile_height: int = 1,
-    ) -> list[InserterState]:
-        """
-        Return all inserters whose pickup_position falls within the bounding
-        box of the entity with the given entity_id.
-
-        tile_width / tile_height should come from KnowledgeBase.get_entity()
-        for non-1×1 entities (assemblers, furnaces, etc.).  Defaults of 1×1
-        work correctly for chests, accumulators, and other small entities.
-
-        Returns an empty list if the entity is not found or no inserters are
-        taking from it.
-        """
-        target = self.entity_by_id(entity_id)
-        if target is None:
-            return []
-        return [
-            ins for ins in self.logistics.inserters.values()
-            if ins.pickup_position is not None
-            and self._entity_contains_position(
-                target, ins.pickup_position, tile_width, tile_height
-            )
-        ]
-
-    def inserters_delivering_to(
-        self,
-        entity_id: int,
-        tile_width: int = 1,
-        tile_height: int = 1,
-    ) -> list[InserterState]:
-        """
-        Return all inserters whose drop_position falls within the bounding
-        box of the entity with the given entity_id.
-
-        tile_width / tile_height should come from KnowledgeBase.get_entity()
-        for non-1×1 entities.  Defaults of 1×1 work correctly for chests and
-        other small entities.
-
-        Returns an empty list if the entity is not found or no inserters are
-        delivering to it.
-        """
-        target = self.entity_by_id(entity_id)
-        if target is None:
-            return []
-        return [
-            ins for ins in self.logistics.inserters.values()
-            if ins.drop_position is not None
-            and self._entity_contains_position(
-                target, ins.drop_position, tile_width, tile_height
-            )
-        ]
-
-    def inserters_taking_from_type(self, entity_name: str) -> list[InserterState]:
-        """
-        Return all inserters taking from any entity of the given type.
-        Useful when the exact entity_id is not known in advance.
-        Assumes 1×1 tile footprint — use inserters_taking_from() with explicit
-        tile dimensions for larger entities.
-        """
-        targets = {e.entity_id: e for e in self.entities_by_name(entity_name)}
-        if not targets:
-            return []
-        result = []
-        for ins in self.logistics.inserters.values():
-            if ins.pickup_position is None:
-                continue
-            for entity in targets.values():
-                if self._entity_contains_position(entity, ins.pickup_position):
-                    result.append(ins)
-                    break
-        return result
-
-    def inserters_delivering_to_type(self, entity_name: str) -> list[InserterState]:
-        """
-        Return all inserters delivering to any entity of the given type.
-        Assumes 1×1 tile footprint.
-        """
-        targets = {e.entity_id: e for e in self.entities_by_name(entity_name)}
-        if not targets:
-            return []
-        result = []
-        for ins in self.logistics.inserters.values():
-            if ins.drop_position is None:
-                continue
-            for entity in targets.values():
-                if self._entity_contains_position(entity, ins.drop_position):
-                    result.append(ins)
-                    break
-        return result
 
     def __repr__(self) -> str:
         return (

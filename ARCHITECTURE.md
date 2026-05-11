@@ -37,8 +37,79 @@ to mechanical examination mode rather than halting.
 ### The Bridge Is a Hard Interface Boundary
 
 Nothing outside `bridge/` speaks RCON or knows about Lua. The rest of the system operates
-on `WorldState` objects and structured `Action` objects exclusively. This means the full
-agent stack can be tested against a mock game state without Factorio running.
+on `WorldState` objects (accessed via `WorldQuery`) and structured `Action` objects
+exclusively. This means the full agent stack can be tested against a mock game state
+without Factorio running.
+
+### WorldState Is Accessed Only Through WorldQuery and WorldWriter
+
+`WorldState` is a pure data container with internal lookup indices. No file outside
+`world/` may access `WorldState` fields directly. All reads go through `WorldQuery`;
+all mutations go through `WorldWriter`. This boundary means:
+
+- The backing store can be changed (e.g. from Python dicts to an in-memory database)
+  without touching any consumer file.
+- The evaluator, execution layer, and examiner all receive `WorldQuery`; they cannot
+  accidentally mutate game state.
+- The bridge and execution layer receive `WorldWriter`; they are the only legitimate
+  mutation paths.
+
+`world/__init__.py` exports `WorldQuery` and `WorldWriter` (plus the dataclass types
+needed in signatures). `WorldState` itself is not exported from `world/`.
+
+### WorldQuery Provides Both Named Lookups and Composable Filtering
+
+`WorldQuery` exposes named convenience methods for the most common patterns
+(`entity_by_id`, `entities_by_name`, `entities_by_status`, `entities_by_recipe`,
+`inserters_taking_from`, `inserters_delivering_to`, `resources_of_type`,
+`inventory_count`, `section_staleness`) and a composable `EntityQuery` builder for
+multi-predicate joins:
+
+```python
+wq.entities()
+  .with_name("assembling-machine-1")
+  .with_recipe("electronic-circuit")
+  .with_inserter_input()
+  .with_inserter_output()
+  .count()
+```
+
+The builder is also exposed in the reward evaluator namespace as `wq`, so condition
+strings can use it directly:
+
+```python
+success_condition = (
+    "wq.entities()"
+    "   .with_recipe('electronic-circuit')"
+    "   .with_inserter_input()"
+    "   .with_inserter_output()"
+    "   .count() >= 4"
+)
+```
+
+### WorldWriter Handles Both Bulk and Fine-Grained Mutations
+
+Two mutation categories:
+
+- **Section replacement** (`integrate_snapshot`, `replace_entities`, `replace_logistics`,
+  etc.): the bridge use case. `WorldWriter.integrate_snapshot(snapshot)` merges a
+  `StateParser`-produced snapshot into the live global state, section by section, with
+  staleness guards and index rebuilds.
+- **Fine-grained mutation** (`add_entity`, `remove_entity`, `update_entity_status`,
+  `update_entity_recipe`, `update_player_inventory`, etc.): the execution layer use case.
+  Each method updates only the affected indices rather than rebuilding everything.
+
+### StateParser Produces Snapshots; WorldWriter Integrates Them
+
+`StateParser.parse()` constructs a fresh `WorldState` snapshot from raw Lua/JSON output.
+This is the one legitimate place that builds `WorldState` via its dataclass constructor
+directly. After populating all sections, `_populate_all` calls
+`state._rebuild_entity_indices()` and `state._rebuild_inserter_indices()` so the snapshot
+has valid indices immediately.
+
+The main loop then calls `world_writer.integrate_snapshot(snapshot)` to merge the snapshot
+into the live global state. Consumers never receive the raw `WorldState` — they receive a
+`WorldQuery` wrapping it.
 
 ### The World Model Starts Empty
 
@@ -79,17 +150,12 @@ across all five registries and replaces them with real data. Each `ensure_*` met
 re-queries automatically if it encounters a placeholder and a `query_fn` is available,
 so enrichment happens opportunistically during normal operation as well as on explicit call.
 
-This means:
-- The agent never crashes or refuses to operate due to missing knowledge
-- Knowledge gaps are filled in automatically as the game runs
-- Subsequent sessions start with all previously-learned knowledge intact
-
 ### Rewards Are Self-Designed
 
 When the strategic LLM sets a goal, it simultaneously produces a `RewardSpec` — a structured
 definition of success conditions, failure conditions, milestone rewards, and time discounting.
-The `RewardSpec` is evaluated mechanically by `planning/reward_evaluator.py` against live
-game state. No LLM is involved in reward evaluation during execution.
+The `RewardSpec` is evaluated mechanically by `planning/reward_evaluator.py` against a live
+`WorldQuery`. No LLM is involved in reward evaluation during execution.
 
 After goal resolution, a reflection call reviews whether the reward spec was well-calibrated.
 That reflection is stored in memory and informs future goal-setting.
@@ -124,9 +190,12 @@ flag. The Lua mod reads both lanes fully via `get_transport_line(1)` and
 ### Inserters Carry Spatial Context
 
 `InserterState` records `pickup_position` and `drop_position` as world coordinates.
-`WorldState` exposes connectivity queries — `inserters_taking_from(entity_id)` and
+`WorldQuery` exposes connectivity queries — `inserters_taking_from(entity_id)` and
 `inserters_delivering_to(entity_id)` — that determine which inserters are connected to
-which entities via bounding-box containment, without additional RCON calls.
+which entities via bounding-box containment, without additional RCON calls. `WorldState`
+maintains pre-built spatial inserter indices (keyed by entity_id) for O(1) lookup on 1×1
+entities; `WorldQuery` falls back to a bounding-box scan for larger entities using
+tile dimensions from `KnowledgeBase`.
 
 ### Exploration Is Tracked as a Non-Proximal Accumulator
 
@@ -190,7 +259,8 @@ factorio-agent/
 ├── bridge/                          # Hard interface boundary — nothing outside speaks RCON
 │   ├── actions.py                   # Action dataclasses — primitive commands to the bridge
 │   ├── rcon_client.py               # RCON connection, reconnection logic
-│   ├── state_parser.py              # Raw Lua output → WorldState
+│   ├── state_parser.py              # Raw Lua output → WorldState snapshot;
+│   │                                #   rebuilds entity + inserter indices after parse
 │   ├── action_executor.py           # Action objects → RCON commands
 │   └── mod/
 │       ├── info.json                # Factorio mod metadata (factorio_version: "2.0")
@@ -200,14 +270,46 @@ factorio-agent/
 │                                    #   fa.get_exploration(), prototype query functions
 │
 ├── world/                           # Pure data and computation — no LLM, no RCON
-│   ├── state.py                     # WorldState and all sub-dataclasses.
+│   ├── state.py                     # WorldState — pure data container.
+│   │                                #   Internal indices: _by_id, _by_name, _by_recipe,
+│   │                                #   _by_status (built by __post_init__);
+│   │                                #   _inserters_from, _inserters_to (built by
+│   │                                #   WorldWriter after logistics section is populated).
 │   │                                #   BeltLane + BeltSegment (two independent lanes),
 │   │                                #   InserterState (pickup/drop world positions),
 │   │                                #   ExplorationState (charted_chunks),
 │   │                                #   LogisticsState, PlayerState.
-│   │                                #   WorldState connectivity query methods:
+│   │                                #   NOT exported from world/__init__.py.
+│   ├── query.py                     # WorldQuery — sole read interface.
+│   │                                #   Named lookups: entity_by_id(), entities_by_name(),
+│   │                                #   entities_by_status(), entities_by_recipe(),
 │   │                                #   inserters_taking_from(), inserters_delivering_to(),
-│   │                                #   inserters_taking_from_type(), inserters_delivering_to_type()
+│   │                                #   inserters_taking_from_type(),
+│   │                                #   inserters_delivering_to_type(),
+│   │                                #   resources_of_type(), inventory_count(),
+│   │                                #   section_staleness(), fully_connected_entities().
+│   │                                #   Composable builder: entities().with_name()
+│   │                                #     .with_recipe().with_status()
+│   │                                #     .with_inserter_input().with_inserter_output()
+│   │                                #     .with_predicate().get()/.count()/.first()
+│   │                                #   Properties: charted_chunks, charted_tiles,
+│   │                                #     charted_area_km2, tick, game_time_seconds,
+│   │                                #     research, logistics, power, threat,
+│   │                                #     has_damage, damaged_entities, recent_losses,
+│   │                                #     ground_items.
+│   │                                #   .state property: escape hatch to raw WorldState
+│   │                                #     (for reward evaluator namespace compatibility).
+│   ├── writer.py                    # WorldWriter — sole write interface.
+│   │                                #   integrate_snapshot(snapshot): bridge use case;
+│   │                                #     merges StateParser snapshot into live state
+│   │                                #     with staleness guards and index rebuild.
+│   │                                #   Section replacement: replace_entities(),
+│   │                                #     replace_logistics(), replace_research(), etc.
+│   │                                #   Fine-grained mutation: add_entity(),
+│   │                                #     remove_entity(), update_entity_status(),
+│   │                                #     update_entity_recipe(), update_entity_inventory(),
+│   │                                #     update_player_position(), update_player_inventory(),
+│   │                                #     update_player_health(), update_exploration().
 │   ├── knowledge.py                 # KnowledgeBase — SQLite-backed, runtime-extensible
 │   │                                #   Five registries: entities, resources, fluids,
 │   │                                #   recipes, techs. Eleven normalised tables.
@@ -219,8 +321,8 @@ factorio-agent/
 │   ├── tech_tree.py                 # TechTree — KB-backed research graph
 │   │                                #   is_unlocked(), is_reachable(), path_to(),
 │   │                                #   next_researchable(), absorb_research_state()
-│   ├── production_tracker.py        # Throughput tracking over WorldState snapshots
-│   └── entities.py                  # (legacy API preserved — delegates to KnowledgeBase)
+│   └── production_tracker.py        # Throughput tracking — update() takes WorldQuery
+│                                    #   (PROXIMAL — scan-radius scoped)
 │
 ├── agent/
 │   ├── loop.py                      # Master orchestration
@@ -250,8 +352,11 @@ factorio-agent/
 ├── planning/
 │   ├── goal.py                      # Goal, RewardSpec, Priority enum, make_goal()
 │   ├── goal_tree.py                 # ✅ GoalTree — LIFO preemption, subgoal completion
-│   ├── reward_evaluator.py          # ✅ RewardEvaluator — eval() against controlled namespace
-│   │                                #   See REWARD_NAMESPACE.md for full namespace reference
+│   ├── reward_evaluator.py          # ✅ RewardEvaluator — eval() against WorldQuery;
+│   │                                #   namespace includes wq (composable builder),
+│   │                                #   state (WorldState escape hatch for compatibility),
+│   │                                #   and all named condition helpers.
+│   │                                #   See REWARD_NAMESPACE.md for full reference.
 │   └── resource_allocator.py        # ✅ ResourceAllocator — pass-through until biters
 │
 ├── memory/
@@ -274,37 +379,43 @@ factorio-agent/
 ├── data/
 │   └── knowledge/
 │       └── knowledge.db             # SQLite — created at runtime, gitignored
-│                                    # Tables: entities, resources, fluids,
-│                                    #   recipes, recipe_ingredients, recipe_products,
-│                                    #   recipe_made_in, techs, tech_prerequisites,
-│                                    #   tech_unlocks_recipes, tech_unlocks_entities
 │
 ├── config.py                        # All tunable parameters
 │
 └── tests/
+    ├── fixtures.py                           # Shared: MockRconClient,
+    │                                         #   make_world_state(), make_world_query(),
+    │                                         #   make_inventory_entity()
     ├── test_core_dataclasses.py              ✅ 128 tests
     ├── unit/
     │   ├── bridge/
     │   │   ├── test_state_parser.py          ✅ ~50 tests (two-lane belts, inserter objects,
-    │   │   │                                              charted_chunks)
+    │   │   │                                              charted_chunks; WorldQuery for
+    │   │   │                                              staleness/inventory helpers)
     │   │   └── test_action_executor.py       ✅
     │   ├── world/
+    │   │   ├── test_state.py                 ✅ ~120 tests
+    │   │   │   # Section 1: core dataclass tests (Position, Inventory, WorldState,
+    │   │   │   #   BeltLane/BeltSegment, ExplorationState, InserterState)
+    │   │   │   # Section 2: WorldState index tests (direct internal field inspection)
+    │   │   │   # Section 3: WorldQuery tests (all named lookups, connectivity,
+    │   │   │   #   EntityQuery builder, fully_connected_entities)
+    │   │   │   # Section 4: WorldWriter tests (section replacement, fine-grained
+    │   │   │   #   mutation, integrate_snapshot)
     │   │   ├── test_knowledge.py             ✅ 75 tests
     │   │   ├── test_entities.py              ✅ 36 tests
     │   │   ├── test_tech_tree.py             ✅ 64 tests
-    │   │   ├── test_state.py                 ✅ ~87 tests (BeltLane/BeltSegment,
-    │   │   │                                              InserterState, ExplorationState,
-    │   │   │                                              connectivity queries)
-    │   │   └── test_production_tracker.py   ✅ ~25 tests
+    │   │   └── test_production_tracker.py   ✅ ~25 tests (uses make_world_query fixture)
     │   └── planning/
     │       ├── test_goal_tree.py             ✅ ~40 tests
-    │       ├── test_reward_evaluator.py      ✅ ~30 tests
+    │       ├── test_reward_evaluator.py      ✅ ~30 tests (uses make_world_query fixture)
     │       └── test_resource_allocator.py   ✅ ~10 tests
     └── integration/
-        ├── test_evaluator_capabilities.py   ✅ ~90 tests — capability matrix across
+        ├── test_evaluator_capabilities.py   ✅ ~91 tests — capability matrix across
         │                                        14 condition categories (IV, EN, PR, RS,
         │                                        RM, TM, DM, CN, GI, EX, PT, ST, SC, XC)
-        └── test_bridge_live.lua              In-game console test suite
+        │                                        XC now includes wq builder compound query
+        └── test_StateParser_WorldState.py   ✅ 9 tests (WorldQuery interface)
 ```
 
 ---
@@ -314,6 +425,7 @@ factorio-agent/
 ### WorldState (`world/state.py`)
 
 A belief state snapshot of the game, not ground truth. Produced by `bridge/state_parser.py`.
+**Not exported from `world/`; consumed only through `WorldQuery` and `WorldWriter`.**
 
 Key fields:
 - `tick`: game tick (60 ticks = 1 second)
@@ -330,13 +442,108 @@ Key fields:
 - `destroyed_entities`: `list[DestroyedEntity]` — rolling window of destroyed entities
 - `threat`: `ThreatState` — biter bases, pollution, attack timers (empty when biters off)
 
-Key methods: `entity_by_id()`, `entities_by_name()`, `entities_by_status()`,
-`resources_of_type()`, `inventory_count()`, `section_staleness()`, `has_damage`,
-`recent_losses`, `game_time_seconds`, **`charted_chunks`** (shorthand property),
-**`inserters_taking_from(entity_id, tile_width, tile_height)`**,
-**`inserters_delivering_to(entity_id, tile_width, tile_height)`**,
-**`inserters_taking_from_type(entity_name)`**,
-**`inserters_delivering_to_type(entity_name)`**.
+Internal indices (built by `__post_init__`, maintained by `WorldWriter`):
+- `_by_id: dict[int, EntityState]`
+- `_by_name: dict[str, list[EntityState]]`
+- `_by_recipe: dict[str, list[EntityState]]`
+- `_by_status: dict[EntityStatus, list[EntityState]]`
+- `_inserters_from: dict[int, list[InserterState]] | None` — built lazily after integrate
+- `_inserters_to: dict[int, list[InserterState]] | None` — built lazily after integrate
+
+Convenience properties (still on WorldState, used by WorldQuery): `game_time_seconds`,
+`has_damage`, `recent_losses`, `charted_chunks`.
+
+### WorldQuery (`world/query.py`)
+
+The sole read interface. Wraps a `WorldState` reference. Optionally wraps a
+`KnowledgeBase` reference for tile-dimension-aware spatial queries.
+
+```python
+class WorldQuery:
+    def __init__(self, state: WorldState, kb: KnowledgeBase | None = None)
+
+    # Entity lookups (O(1) via index)
+    def entity_by_id(self, entity_id: int) -> EntityState | None
+    def entities_by_name(self, name: str) -> list[EntityState]
+    def entities_by_status(self, status: EntityStatus) -> list[EntityState]
+    def entities_by_recipe(self, recipe: str) -> list[EntityState]
+    def all_entities(self) -> list[EntityState]
+
+    # Connectivity queries
+    def inserters_taking_from(self, entity_id, tile_width=1, tile_height=1) -> list[InserterState]
+    def inserters_delivering_to(self, entity_id, tile_width=1, tile_height=1) -> list[InserterState]
+    def inserters_taking_from_type(self, entity_name: str) -> list[InserterState]
+    def inserters_delivering_to_type(self, entity_name: str) -> list[InserterState]
+
+    # Compound convenience
+    def fully_connected_entities(self, recipe: str) -> list[EntityState]
+
+    # Composable builder
+    def entities(self) -> EntityQuery  # → .with_name/.with_recipe/.with_status/
+                                       #    .with_inserter_input/.with_inserter_output/
+                                       #    .with_predicate → .get()/.count()/.first()
+
+    # Resource / player / exploration
+    def resources_of_type(self, resource_type: str) -> list[ResourcePatch]
+    def inventory_count(self, item: str) -> int
+    def player_position(self) -> Position
+    def player_health(self) -> float
+
+    # Properties
+    charted_chunks: int           # NON-PROXIMAL
+    charted_tiles: int            # NON-PROXIMAL
+    charted_area_km2: float       # NON-PROXIMAL
+    tick: int                     # NON-PROXIMAL
+    game_time_seconds: float      # NON-PROXIMAL
+    research: ResearchState       # NON-PROXIMAL
+    logistics: LogisticsState     # PROXIMAL
+    power: PowerGrid              # PROXIMAL
+    threat: ThreatState
+    has_damage: bool
+    damaged_entities: list
+    recent_losses: list
+    ground_items: list
+
+    def tech_unlocked(self, tech: str) -> bool
+    def section_staleness(self, section: str, current_tick: int) -> int | None
+
+    # Escape hatch for reward evaluator namespace compatibility
+    @property
+    def state(self) -> WorldState
+```
+
+### WorldWriter (`world/writer.py`)
+
+The sole write interface. Wraps the same `WorldState` reference as `WorldQuery`.
+
+```python
+class WorldWriter:
+    def __init__(self, state: WorldState)
+
+    # Bridge use case — merges snapshot, staleness-guarded, rebuilds indices
+    def integrate_snapshot(self, snapshot: WorldState) -> None
+
+    # Section replacement (bridge or bulk updates)
+    def replace_entities(self, entities: list[EntityState], tick: int) -> None
+    def replace_logistics(self, logistics: LogisticsState, tick: int) -> None
+    def replace_research(self, research: ResearchState, tick: int) -> None
+    def replace_resource_map(self, patches: list[ResourcePatch], tick: int) -> None
+    def replace_ground_items(self, items: list[GroundItem], tick: int) -> None
+    def replace_player(self, player: PlayerState, tick: int) -> None
+    def replace_damaged_entities(self, damaged: list[DamagedEntity], tick: int) -> None
+    def replace_threat(self, threat: ThreatState, tick: int) -> None
+
+    # Fine-grained mutation (execution layer)
+    def add_entity(self, entity: EntityState) -> None
+    def remove_entity(self, entity_id: int) -> bool
+    def update_entity_status(self, entity_id: int, status: EntityStatus) -> bool
+    def update_entity_recipe(self, entity_id: int, recipe: str | None) -> bool
+    def update_entity_inventory(self, entity_id: int, inventory: Inventory) -> bool
+    def update_player_position(self, position: Position) -> None
+    def update_player_inventory(self, inventory: Inventory) -> None
+    def update_player_health(self, health: float) -> None
+    def update_exploration(self, exploration: ExplorationState) -> None
+```
 
 ### KnowledgeBase (`world/knowledge.py`)
 
@@ -403,18 +610,20 @@ class GoalTree:
 
 Evaluates `Goal.success_condition`, `Goal.failure_condition`, and
 `RewardSpec.milestone_rewards` as Python expression strings against a controlled
-namespace derived from the current `WorldState`. No LLM involved.
+namespace derived from the current `WorldQuery`. No LLM involved.
 
-See **`REWARD_NAMESPACE.md`** for the complete namespace reference (every name, its
-type, scope classification, and example usage). See **`CONDITION_SCOPE.md`** for
-the PROXIMAL vs NON-PROXIMAL distinction that must govern how the LLM writes conditions.
+**Interface change from Phase 4:** `evaluate()` and `evaluate_conditions()` now accept
+a `WorldQuery` argument (not `WorldState`). This enforces the access boundary.
+
+See **`REWARD_NAMESPACE.md`** for the complete namespace reference. See **`CONDITION_SCOPE.md`**
+for the PROXIMAL vs NON-PROXIMAL distinction.
 
 ```python
 class RewardEvaluator:
     def __init__(self, tracker: Optional[ProductionTrackerProtocol] = None)
-    def evaluate(self, goal: Goal, state: WorldState, tick: int, start_tick: int) -> EvaluationResult
+    def evaluate(self, goal: Goal, wq: WorldQuery, tick: int, start_tick: int) -> EvaluationResult
     def evaluate_conditions(self, success_condition, failure_condition, spec,
-                            state, tick, start_tick) -> EvaluationResult
+                            wq: WorldQuery, tick, start_tick) -> EvaluationResult
 ```
 
 Key namespace entries (see `REWARD_NAMESPACE.md` for full list):
@@ -433,6 +642,8 @@ Key namespace entries (see `REWARD_NAMESPACE.md` for full list):
 | `inserters_from(id)` | **PROXIMAL** | Inserters taking from entity |
 | `inserters_to(id)` | **PROXIMAL** | Inserters delivering to entity |
 | `staleness(section)` | META | Ticks since section last observed |
+| `wq` | — | The WorldQuery object; enables composable builder in conditions |
+| `state` | — | The raw WorldState; backwards-compat escape hatch |
 
 ### ExplorationState (`world/state.py`)
 
@@ -445,7 +656,7 @@ class ExplorationState:
 ```
 
 NON-PROXIMAL. Monotonically increasing. Lives on `PlayerState.exploration`.
-Accessible as `WorldState.charted_chunks` shorthand.
+Accessible via `WorldQuery.charted_chunks` (and `.charted_tiles`, `.charted_area_km2`).
 
 ### BeltLane and BeltSegment (`world/state.py`)
 
@@ -568,9 +779,19 @@ resource_registry = ResourceRegistry(kb)   # passed to StateParser
 tech_tree = TechTree(kb)
 production_tracker = ProductionTracker()
 
-# Each tick cycle — after bridge returns a new WorldState
-tech_tree.absorb_research_state(world_state.research)
-production_tracker.update(world_state)
+# Shared world state wiring (done once, references shared for the run)
+world_state = WorldState()
+world_query = WorldQuery(world_state, kb)
+world_writer = WorldWriter(world_state)
+
+# Each tick cycle — bridge produces a snapshot, writer integrates it
+snapshot = state_parser.parse(raw_json, current_tick=tick)
+world_writer.integrate_snapshot(snapshot)
+
+# Then downstream consumers use world_query (never world_state directly)
+tech_tree.absorb_research_state(world_query.research)
+production_tracker.update(world_query)
+reward = evaluator.evaluate(goal, world_query, tick=tick, start_tick=start_tick)
 ```
 
 ---
@@ -621,7 +842,11 @@ Each layer is independently testable before the next is built.
    connectivity queries — 200+ tests passing
 4. **Planning** ✅ — `GoalTree` (LIFO preemption), `RewardEvaluator` (full condition
    namespace + ProductionTracker + staleness guards), `ResourceAllocator` (pass-through)
-   — ~80 unit tests + ~90 integration tests (capability matrix) passing
+   — ~80 unit tests + ~91 integration tests (capability matrix) passing
+4a. **WorldQuery / WorldWriter refactor** ✅ — `WorldState` reduced to pure data container
+   with internal indices; `WorldQuery` (read) and `WorldWriter` (write) enforce access
+   boundary across codebase; `RewardEvaluator` and `ProductionTracker` updated to accept
+   `WorldQuery`; `StateParser` rebuilds indices after parse — all tests passing
 5. **Primitives** — movement, crafting, building, mining
 6. **Execution layer** — composes primitives against active goal
 7. **Examination** — mechanical auditor first, rich examiner second
@@ -637,52 +862,77 @@ Each layer is independently testable before the next is built.
 
 ### Unit tests (no Factorio required)
 
-`tests/unit/world/test_state.py` — ~87 tests covering Position, Inventory,
-BeltLane/BeltSegment (two-lane), InserterState, ExplorationState,
-WorldState connectivity queries, and all other state dataclasses.
+`tests/unit/world/test_state.py` — ~120 tests across four sections:
+- Section 1: core dataclass tests (Position, Inventory, WorldState basics,
+  BeltLane/BeltSegment, ExplorationState, InserterState)
+- Section 2: WorldState index tests (direct internal field inspection — intentional
+  for this file; other test files use fixtures helpers instead)
+- Section 3: WorldQuery tests (all named lookups, connectivity queries, EntityQuery
+  composable builder, fully_connected_entities)
+- Section 4: WorldWriter tests (section replacement, fine-grained mutation,
+  integrate_snapshot with staleness guards and deduplication)
 
 `tests/unit/world/test_knowledge.py` — 75 tests covering all five registries, placeholder
-lifecycle, enrichment, persistence across simulated restarts, SQL query methods
-(`recipes_for_product`, `recipes_for_ingredient`, `recipes_made_in`,
-`techs_unlocking_recipe`, `production_chain`), and Windows SQLite file-lock safety
-(context manager usage throughout).
+lifecycle, enrichment, persistence across simulated restarts, SQL query methods, and
+Windows SQLite file-lock safety.
 
 `tests/unit/world/test_entities.py` — 36 tests covering the `ResourceRegistry` facade and
-`get_entity_metadata()` delegation, placeholder defaults, safety guarantees, and correct
-passthrough of real records injected directly into the KB cache.
+`get_entity_metadata()` delegation, placeholder defaults, and safety guarantees.
 
 `tests/unit/world/test_tech_tree.py` — 64 tests covering empty-KB behaviour, prerequisite
-queries, reachability, unlock queries, path planning, next-researchable, absorb lifecycle,
-persistence across restarts, and mod compatibility.
+queries, reachability, unlock queries, path planning, next-researchable, absorb lifecycle.
 
-`tests/unit/world/test_production_tracker.py` — throughput tracking, gap handling,
-stall detection, and summary generation.
+`tests/unit/world/test_production_tracker.py` — ~25 tests. Uses `make_world_query()` from
+`tests/fixtures.py` so WorldState construction changes do not require edits here.
 
 `tests/unit/bridge/test_state_parser.py` — ~50 tests covering two-lane belt parsing,
-inserter object format (pickup/drop positions), charted_chunks, and legacy format
-compatibility.
+inserter object format, charted_chunks, and legacy format compatibility. The four tests
+that check `section_staleness` and `inventory_count` use `WorldQuery(state).method()`
+since these moved from `WorldState` to `WorldQuery`.
 
 `tests/unit/planning/test_goal_tree.py` — ~40 tests covering LIFO preemption, subgoal
 completion, pending goal promotion, and all status lifecycle transitions.
 
-`tests/unit/planning/test_reward_evaluator.py` — ~30 tests covering condition evaluation,
-time discounting, milestone tracking, and exception safety.
+`tests/unit/planning/test_reward_evaluator.py` — ~30 tests. Uses `make_world_query()`
+from `tests/fixtures.py`. Tests include `wq` namespace availability.
 
 `tests/unit/planning/test_resource_allocator.py` — ~10 tests covering the pass-through
 interface across all Priority levels.
 
+### Shared fixtures (`tests/fixtures.py`)
+
+`MockRconClient` — fake RCON client for bridge tests.
+
+`make_world_state(tick, entities, inserter_activity)` — builds a minimal `WorldState`
+for use as test scaffolding in files that don't test `WorldState` internals.
+
+`make_world_query(tick, entities, inserter_activity)` — wraps `make_world_state` in a
+`WorldQuery`. Use in `test_production_tracker.py`, `test_reward_evaluator.py`, and any
+future test that needs a `WorldQuery` purely as input scaffolding.
+
+`make_inventory_entity(entity_id, name, items, status)` — builds an `EntityState` with
+a populated inventory for production tracker tests.
+
+**Design rule:** `test_state.py` is the exception — it tests `WorldState` internals
+directly (Section 2) because that is its purpose. All other test files use `make_world_query`
+and never import `WorldState` for scaffolding purposes.
+
 ### Integration tests (no Factorio required)
 
-`tests/integration/test_evaluator_capabilities.py` — **the capability matrix**. ~90 tests
+`tests/integration/test_evaluator_capabilities.py` — **the capability matrix**. ~91 tests
 proving that every supported condition category can be expressed and evaluated correctly
-end-to-end against a constructed WorldState. Categories: IV (inventory), EN (entity
+end-to-end against a constructed `WorldQuery`. Categories: IV (inventory), EN (entity
 placement), PR (production/logistics including two-lane belts), RS (research), RM
 (resource map), TM (time), DM (damage/destruction), CN (connectivity), GI (ground items),
 EX (exploration / charted_chunks — NON-PROXIMAL), PT (production_rate via
 ProductionTracker — PROXIMAL), ST (staleness guards), SC (proximal/non-proximal boundary),
-XC (compound multi-category conditions).
+XC (compound multi-category conditions, including `wq` composable builder).
 
-Adding a new condition type means adding a test to this file first.
+`tests/integration/test_StateParser_WorldState.py` — 9 tests. Parses a JSON fixture
+through `StateParser`, wraps the result in `WorldQuery`, and asserts all query methods
+return correct results.
+
+Adding a new condition type means adding a test to the capability matrix file first.
 
 ### Windows compatibility note
 
@@ -747,12 +997,17 @@ The brief template:
       `bridge/mod/info.json` — 80+ unit tests; in-game integration tests pending
 - [x] World model — `world/knowledge.py`, `world/entities.py`, `world/tech_tree.py`,
       `world/production_tracker.py`, `world/state.py` (BeltLane/BeltSegment,
-      InserterState, ExplorationState, connectivity queries) — 200+ tests
+      InserterState, ExplorationState) — 200+ tests
 - [x] Planning layer — `planning/goal_tree.py` (LIFO preemption, subgoal completion),
       `planning/reward_evaluator.py` (full namespace, ProductionTracker integration,
       staleness guards), `planning/resource_allocator.py` (pass-through)
-      — ~80 unit tests + ~90 capability matrix integration tests
-- [x] `CONDITION_SCOPE.md` — proximal/non-proximal reference (include in LLM conversations)
+      — ~80 unit tests + ~91 capability matrix integration tests
+- [x] WorldQuery / WorldWriter access refactor — `world/query.py`, `world/writer.py`;
+      `WorldState` reduced to pure data container with internal indices;
+      `RewardEvaluator` and `ProductionTracker` updated to `WorldQuery` interface;
+      `StateParser` rebuilds indices after parse; `tests/fixtures.py` shared helpers
+      — all tests passing
+- [x] `CONDITION_SCOPE.md` — proximal/non-proximal reference
 - [x] `REWARD_NAMESPACE.md` — complete eval namespace reference
 - [ ] Primitives
 - [ ] Execution layer

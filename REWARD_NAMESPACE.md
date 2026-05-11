@@ -42,11 +42,46 @@ non-triggering — the goal is not failed due to a bad expression.
 
 ## Top-Level Objects
 
+### `wq`
+Type: `WorldQuery`
+
+The `WorldQuery` interface over the current belief state. Provides O(1) indexed lookups,
+connectivity queries, composable filtering, and all named helper methods. **This is the
+preferred way to query game state in conditions.** Both proximal and non-proximal
+conditions are available through `wq`.
+
+```python
+# Named lookups
+wq.entity_by_id(42)
+wq.entities_by_name('assembling-machine-1')
+wq.entities_by_recipe('electronic-circuit')
+wq.inventory_count('iron-plate')
+wq.resources_of_type('iron-ore')
+wq.tech_unlocked('automation')
+wq.section_staleness('entities', tick)
+
+# Composable builder
+wq.entities().with_recipe('electronic-circuit').with_inserter_input().with_inserter_output().count()
+
+# Convenience compound query
+wq.fully_connected_entities('electronic-circuit')
+
+# Properties
+wq.charted_chunks
+wq.charted_tiles
+wq.charted_area_km2
+wq.tick
+wq.research
+wq.logistics
+wq.power
+```
+
 ### `state`
 Type: `WorldState`
 
-The complete current belief state. All other namespace names are derived from this.
-Use `state.` prefix when a specific attribute is not exposed as a top-level shorthand.
+The underlying `WorldState` data object. Exposed for backwards compatibility with
+condition strings that use `state.` prefix. Prefer named namespace entries or `wq`
+methods over `state.` where possible, but `state.` patterns remain fully supported.
 
 ```python
 state.tick                     # current game tick (also available as tick)
@@ -79,7 +114,7 @@ tick > 7200           # more than 2 minutes
 Scope: **NON-PROXIMAL**
 
 Returns the player's current count of the named item. Aggregates across all inventory
-slots. Returns 0 if the item is not present.
+slots. Returns 0 if the item is not present. Equivalent to `wq.inventory_count(item)`.
 
 ```python
 inventory('iron-plate') >= 200
@@ -98,20 +133,21 @@ Scope: **NON-PROXIMAL**
 
 Total number of 32×32-tile chunks revealed by this force. Sourced from
 `LuaForce::get_chart_size(surface)`. Monotonically increasing — never decreases.
-Accurate anywhere, regardless of player position.
+Accurate anywhere, regardless of player position. Equivalent to `wq.charted_chunks`.
 
 ### `charted_tiles`
 Type: `int`
 Scope: **NON-PROXIMAL**
 
 `charted_chunks × 1024`. Total revealed tiles (32² = 1024 tiles per chunk).
+Equivalent to `wq.charted_tiles`.
 
 ### `charted_area_km2`
 Type: `float`
 Scope: **NON-PROXIMAL**
 
 `charted_tiles ÷ 1,000,000`. Factorio tiles are nominally 1m × 1m in lore.
-1,000,000 tiles = 1 km².
+Equivalent to `wq.charted_area_km2`.
 
 ```python
 charted_chunks >= 50            # explored at least 50 chunks
@@ -136,10 +172,13 @@ charted_chunks >= 50 and len(resources_of_type('iron-ore')) >= 3
 Scope: **NON-PROXIMAL**
 
 Returns True if the named technology is in the force's researched set.
+Equivalent to `wq.tech_unlocked(tech)`.
 
 ### `research`
 Type: `ResearchState`
 Scope: **NON-PROXIMAL**
+
+Equivalent to `wq.research`.
 
 ```python
 research.in_progress            # str | None — currently researching
@@ -163,7 +202,7 @@ len(research.queued) >= 2
 Scope: **NON-PROXIMAL**
 
 Returns all resource patches of the named type accumulated across all visits.
-Patches are added to the map as the player explores; they are never removed.
+Equivalent to `wq.resources_of_type(resource_type)`.
 Each patch has `.amount`, `.size`, `.position`, `.observed_at`.
 
 ```python
@@ -186,6 +225,7 @@ any(p.size >= 100 for p in resources_of_type('iron-ore'))
 Scope: **PROXIMAL** — scan radius only
 
 Returns all placed entities of the named type currently within `LOCAL_SCAN_RADIUS`.
+Equivalent to `wq.entities_by_name(name)`.
 Each `EntityState` has `.entity_id`, `.name`, `.position`, `.status`, `.recipe`,
 `.inventory`, `.energy`.
 
@@ -195,8 +235,12 @@ Each `EntityState` has `.entity_id`, `.name`, `.position`, `.status`, `.recipe`,
 ### `entity_by_id(entity_id: int) -> EntityState | None`
 Scope: **PROXIMAL** — scan radius only
 
+Equivalent to `wq.entity_by_id(entity_id)`.
+
 ### `entities_by_status(status: EntityStatus) -> list[EntityState]`
 Scope: **PROXIMAL** — scan radius only
+
+Equivalent to `wq.entities_by_status(status)`.
 
 ```python
 len(entities('assembling-machine-1')) >= 3
@@ -212,6 +256,26 @@ sum(1 for e in state.entities if e.status.value == 'working') >= 5
 
 # Failure: any entity is starved
 any(e.status.value == 'no_input' for e in state.entities)
+```
+
+### `wq` composable builder for entity conditions
+Scope: **PROXIMAL** for inserter predicates; **same as entities()** otherwise
+
+The `wq.entities()` builder chains multiple predicates and executes them efficiently
+using pre-built indices. Prefer this over ad-hoc comprehensions for compound conditions:
+
+```python
+# Assemblers with recipe AND both input and output inserters
+wq.entities().with_recipe('electronic-circuit').with_inserter_input().with_inserter_output().count() >= 4
+
+# Via convenience method (equivalent)
+len(wq.fully_connected_entities('electronic-circuit')) >= 4
+
+# With status filter
+wq.entities().with_name('assembling-machine-1').with_status(EntityStatus.WORKING).count() >= 3
+
+# Custom predicate
+wq.entities().with_predicate(lambda e: e.energy > 50000).count() >= 2
 ```
 
 ---
@@ -256,6 +320,8 @@ See `CONDITION_SCOPE.md` Rule 4.
 Type: `LogisticsState`
 Scope: **PROXIMAL** — scan radius only
 
+Equivalent to `wq.logistics`.
+
 ```python
 logistics.belts          # list[BeltSegment]
 logistics.inserters      # dict[int, InserterState]
@@ -266,6 +332,8 @@ logistics.inserter_activity  # dict[int, int] — legacy, prefer inserters
 ### `power`
 Type: `PowerGrid`
 Scope: **PROXIMAL** — nearest electric pole's network
+
+Equivalent to `wq.power`.
 
 ```python
 power.produced_kw        # float
@@ -329,23 +397,26 @@ sum(1 for i in logistics.inserters.values() if i.active) >= 5
 Scope: **PROXIMAL** — scan radius only
 
 Inserters whose `pickup_position` falls within the bounding box of the entity.
-For non-1×1 entities, you need the entity_id-based method on WorldState directly
-with `tile_width` and `tile_height` arguments — this shorthand assumes 1×1.
+Equivalent to `wq.inserters_taking_from(entity_id)`. For non-1×1 entities, pass
+tile dimensions explicitly: `wq.inserters_taking_from(entity_id, tile_width=3, tile_height=3)`.
 
 ### `inserters_to(entity_id: int) -> list[InserterState]`
 Scope: **PROXIMAL** — scan radius only
 
 Inserters whose `drop_position` falls within the bounding box of the entity.
+Equivalent to `wq.inserters_delivering_to(entity_id)`.
 
 ### `inserters_from_type(entity_name: str) -> list[InserterState]`
 Scope: **PROXIMAL** — scan radius only
 
-All inserters taking from any entity of the named type. Assumes 1×1 tile footprint.
+All inserters taking from any entity of the named type.
+Equivalent to `wq.inserters_taking_from_type(entity_name)`.
 
 ### `inserters_to_type(entity_name: str) -> list[InserterState]`
 Scope: **PROXIMAL** — scan radius only
 
-All inserters delivering to any entity of the named type. Assumes 1×1 tile footprint.
+All inserters delivering to any entity of the named type.
+Equivalent to `wq.inserters_delivering_to_type(entity_name)`.
 
 ```python
 len(inserters_from(entity_id)) >= 1     # at least one inserter taking from entity
@@ -409,6 +480,7 @@ Scope: META
 
 Returns ticks since `section` was last observed, or `None` if never observed this session.
 Use to guard PROXIMAL conditions against stale data.
+Equivalent to `wq.section_staleness(section, tick)`.
 
 Section names: `'player'`, `'entities'`, `'resource_map'`, `'ground_items'`,
 `'research'`, `'logistics'`, `'damaged_entities'`, `'destroyed_entities'`, `'threat'`
@@ -422,7 +494,6 @@ At 60 tps: 60 = 1s, 300 = 5s, 600 = 10s, 1800 = 30s, 3600 = 1 min.
  len(entities('assembling-machine-1')) >= 3)
 
 # In a failure condition: don't falsely fail if data is stale
-# (failure fires only if section is fresh AND condition is true)
 (staleness('entities') is not None and
  staleness('entities') < 600 and
  len(entities('stone-furnace')) == 0)
@@ -444,6 +515,8 @@ staleness('entities') == 0         # observed this exact tick
 ### `threat`
 Type: `ThreatState`
 Scope: NON-PROXIMAL (populated from destruction event buffer; empty when biters off)
+
+Equivalent to `wq.threat`.
 
 ```python
 threat.is_empty           # True when BITERS_ENABLED=False
@@ -489,6 +562,20 @@ success_condition = (
     "staleness('entities') is not None and "
     "staleness('entities') < 300 and "
     "sum(1 for e in state.entities if e.status.value == 'working') >= 5"
+)
+```
+
+### Compound entity condition using wq builder (proximal)
+
+```python
+success_condition = (
+    "staleness('entities') is not None and "
+    "staleness('entities') < 300 and "
+    "wq.entities()"
+    "   .with_recipe('electronic-circuit')"
+    "   .with_inserter_input()"
+    "   .with_inserter_output()"
+    "   .count() >= 4"
 )
 ```
 

@@ -8,17 +8,21 @@ Target game version: **Factorio 2.x (Space Age)**.
 
 ## Status
 
-**Phase 4 complete — planning layer.** The goal tree, reward evaluator, and resource
-allocator are implemented and tested. The evaluator exposes a rich condition namespace
-covering inventory, exploration, production rates, connectivity, research, logistics, and
-more. See `REWARD_NAMESPACE.md` for the complete reference and `CONDITION_SCOPE.md` for
-the critical proximal/non-proximal distinction that governs how goals must be written.
+**Phase 4 complete — planning layer, plus world-state access refactor.**
+The goal tree, reward evaluator, and resource allocator are implemented and tested. The
+evaluator exposes a rich condition namespace covering inventory, exploration, production
+rates, connectivity, research, logistics, and more. A `WorldQuery` / `WorldWriter`
+access boundary was introduced over world state, enforcing a clean read/write interface
+across the codebase. See `REWARD_NAMESPACE.md` for the complete reference and
+`CONDITION_SCOPE.md` for the critical proximal/non-proximal distinction that governs how
+goals must be written.
 
 ```
 [✅] Core dataclasses     128 tests passing
 [✅] Bridge / Lua mod      80+ unit tests passing; basic in-game testing passed
 [✅] World model          200+ tests
 [✅] Planning layer        ~80 unit tests + ~90 integration tests passing
+[✅] WorldQuery/WorldWriter access refactor — all tests passing
 [ ] Primitives
 [ ] Execution layer
 [ ] Examination
@@ -45,16 +49,19 @@ the critical proximal/non-proximal distinction that governs how goals must be wr
 [✅] world/entities.py            36 tests — ResourceRegistry and entity metadata facade
 [✅] world/knowledge.py           75 tests — SQLite-backed KnowledgeBase
 [✅] world/production_tracker.py  25 tests — ProductionSummary, ProductionTracker
-[✅] world/state.py               87 tests — BeltLane/BeltSegment, InserterState,
-                                             ExplorationState, connectivity queries
+[✅] world/query.py + writer.py   ~40 tests — WorldQuery (lookups, connectivity, builder),
+                                             WorldWriter (section replacement, fine-grained
+                                             mutation, integrate_snapshot) — in test_state.py
+[✅] world/state.py               87 tests — WorldState indices, BeltLane/BeltSegment,
+                                             InserterState, ExplorationState
 [✅] world/tech_tree.py           64 tests — KnowledgeBase-backed TechTree
 ```
 
 ### Integration Test Breakdown - by test file in tests/integration/
 
 ```
-[✅] test_StateParser_WorldState  9 tests  — StateParser with WorldState
-[✅] test_evaluator_capabilities  ~90 tests — capability matrix across 14 categories:
+[✅] test_StateParser_WorldState  9 tests  — StateParser with WorldQuery
+[✅] test_evaluator_capabilities  ~91 tests — capability matrix across 14 categories:
                                    IV (inventory), EN (entity placement),
                                    PR (production/logistics, two-lane belts),
                                    RS (research), RM (resource map), TM (time),
@@ -62,7 +69,7 @@ the critical proximal/non-proximal distinction that governs how goals must be wr
                                    EX (exploration / charted_chunks — NON-PROXIMAL),
                                    PT (production_rate — PROXIMAL),
                                    ST (staleness guards), SC (scope boundary),
-                                   XC (compound conditions)
+                                   XC (compound conditions, including wq builder)
 ```
 
 ### In Game Test Breakdown
@@ -77,6 +84,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation including
 - Key design decisions and their rationale
 - All dataclass interfaces (WorldState, Goal, AuditReport, Action types, GoalTree,
   RewardEvaluator, ExplorationState, BeltLane/BeltSegment, InserterState)
+- WorldQuery / WorldWriter access boundary design
 - Bridge layer: two-lane belt reading, inserter positions, charted_chunks, fa.get_exploration
 - World model: KnowledgeBase schema, discovery flow, enrichment lifecycle
 - Planning layer: GoalTree, RewardEvaluator namespace, ResourceAllocator
@@ -101,8 +109,9 @@ factorio-agent/
 ├── bridge/
 │   ├── actions.py              ✅ 21 action types, ActionCategory, actions_for_context()
 │   ├── rcon_client.py          ✅ RCON TCP connection, reconnect, thread-safe
-│   ├── state_parser.py         ✅ JSON from Lua mod → WorldState; two-lane belts,
-│   │                                inserter objects, charted_chunks
+│   ├── state_parser.py         ✅ JSON from Lua mod → WorldState snapshot;
+│   │                                two-lane belts, inserter objects, charted_chunks;
+│   │                                rebuilds WorldState indices after each parse
 │   ├── action_executor.py      ✅ Action objects → RCON commands
 │   └── mod/
 │       ├── info.json           ✅ Factorio mod metadata (factorio_version: "2.0")
@@ -113,19 +122,32 @@ factorio-agent/
 ├── planning/
 │   ├── goal.py                 ✅ Goal, RewardSpec, Priority, GoalStatus, make_goal()
 │   ├── goal_tree.py            ✅ GoalTree — LIFO preemption, subgoal auto-completion
-│   ├── reward_evaluator.py     ✅ RewardEvaluator — full condition namespace,
+│   ├── reward_evaluator.py     ✅ RewardEvaluator — receives WorldQuery; full condition
+│   │                                namespace including wq composable builder,
 │   │                                ProductionTracker integration, staleness guards
 │   └── resource_allocator.py   ✅ ResourceAllocator — pass-through (biters pending)
 ├── world/
-│   ├── state.py                ✅ WorldState; BeltLane/BeltSegment (two-lane),
-│   │                                InserterState (pickup/drop positions),
-│   │                                ExplorationState (charted_chunks),
-│   │                                connectivity query methods
+│   ├── state.py                ✅ WorldState — pure data container with internal indices;
+│   │                                BeltLane/BeltSegment (two-lane), InserterState
+│   │                                (pickup/drop positions), ExplorationState
+│   │                                (charted_chunks); indices rebuilt by __post_init__
+│   │                                and maintained by WorldWriter
+│   ├── query.py                ✅ WorldQuery — sole read interface for WorldState;
+│   │                                named lookups (entity_by_id, entities_by_name,
+│   │                                entities_by_status, entities_by_recipe,
+│   │                                inserters_taking_from, inserters_delivering_to,
+│   │                                resources_of_type, inventory_count, staleness);
+│   │                                composable EntityQuery builder
+│   │                                (.with_name/.with_recipe/.with_status/
+│   │                                 .with_inserter_input/.with_inserter_output)
+│   ├── writer.py               ✅ WorldWriter — sole write interface for WorldState;
+│   │                                integrate_snapshot() for bridge updates,
+│   │                                fine-grained mutation for execution layer
 │   ├── knowledge.py            ✅ KnowledgeBase — SQLite-backed, runtime-extensible
 │   ├── entities.py             ✅ Facade: ResourceRegistry, get_entity_metadata()
 │   ├── tech_tree.py            ✅ TechTree — KB-backed research graph queries
 │   └── production_tracker.py   ✅ ProductionTrackerProtocol + ProductionTracker
-│                                    PROXIMAL — scan-radius scoped
+│                                    PROXIMAL — scan-radius scoped; update() takes WorldQuery
 ├── data/
 │   └── knowledge/
 │       └── knowledge.db        (created at runtime — gitignored)
@@ -133,6 +155,9 @@ factorio-agent/
 ├── CONDITION_SCOPE.md          ✅ PROXIMAL/NON-PROXIMAL reference — include in LLM convos
 ├── REWARD_NAMESPACE.md         ✅ Complete eval namespace reference
 └── tests/
+    ├── fixtures.py                          ✅ Shared helpers: MockRconClient,
+    │                                            make_world_state(), make_world_query(),
+    │                                            make_inventory_entity()
     ├── unit/agent/
     │   ├── test_examiner.py                 ✅ 25 tests
     │   └── test_state_machine.py            ✅ 9 tests
@@ -143,17 +168,19 @@ factorio-agent/
     │   └── test_state_parser.py             ✅ ~50 tests
     ├── unit/planning/
     │   ├── test_goal_tree.py                ✅ ~40 tests
-    │   ├── test_reward_evaluator.py         ✅ ~30 tests
+    │   ├── test_reward_evaluator.py         ✅ ~30 tests (WorldQuery interface)
     │   └── test_resource_allocator.py       ✅ ~10 tests
     ├── unit/world/
-    │   ├── test_state.py                    ✅ ~87 tests
+    │   ├── test_state.py                    ✅ ~120 tests — WorldState indices (Section 2),
+    │   │                                        WorldQuery (Section 3), WorldWriter (Section 4),
+    │   │                                        plus all original dataclass tests
     │   ├── test_knowledge.py                ✅ 75 tests
     │   ├── test_entities.py                 ✅ 36 tests
     │   ├── test_tech_tree.py                ✅ 64 tests
-    │   └── test_production_tracker.py       ✅ ~25 tests
+    │   └── test_production_tracker.py       ✅ ~25 tests (WorldQuery interface)
     └── integration/
-        ├── test_evaluator_capabilities.py   ✅ ~90 tests — capability matrix
-        └── test_StateParser_WorldState.py   ✅ 9 tests
+        ├── test_evaluator_capabilities.py   ✅ ~91 tests — capability matrix
+        └── test_StateParser_WorldState.py   ✅ 9 tests (WorldQuery interface)
 ```
 
 ## Running the Tests
@@ -161,14 +188,11 @@ factorio-agent/
 ### Unit tests — no Factorio required
 
 ```bash
-# Core dataclasses
-python -m unittest tests.test_core_dataclasses
-
 # Bridge
 python -m unittest tests.unit.bridge.test_state_parser
 python -m unittest tests.unit.bridge.test_action_executor
 
-# World model
+# World model (includes WorldQuery and WorldWriter)
 python -m unittest tests.unit.world.test_state
 python -m unittest tests.unit.world.test_knowledge
 python -m unittest tests.unit.world.test_entities
@@ -187,8 +211,11 @@ python -m unittest discover -s tests -v
 ### Integration tests — no Factorio required
 
 ```bash
-# Capability matrix — evaluator × WorldState
+# Capability matrix — evaluator × WorldQuery
 python -m unittest tests.integration.test_evaluator_capabilities
+
+# StateParser → WorldQuery
+python -m unittest tests.integration.test_StateParser_WorldState
 ```
 
 ### In-game integration tests
@@ -264,6 +291,11 @@ RCON_PASSWORD = "factorio"
 **The bridge is a hard boundary.** Nothing outside `bridge/` speaks RCON or knows about Lua.
 The entire agent stack runs against mock `WorldState` objects without Factorio installed.
 
+**WorldState is accessed only through WorldQuery and WorldWriter.** `WorldState` is a
+pure data container with internal indices. All reads go through `WorldQuery`; all
+mutations go through `WorldWriter`. This boundary isolates consumers from the backing
+implementation — the storage format can be changed without touching any consumer.
+
 **The world model starts empty.** The agent begins each fresh install knowing nothing about
 specific game content. `KnowledgeBase` is populated entirely at runtime by querying Factorio
 prototype data via RCON. Knowledge persists across runs in `data/knowledge/knowledge.db`.
@@ -287,7 +319,7 @@ Write strategic goals using non-proximal conditions. See `CONDITION_SCOPE.md`.
 **Belt lanes are independent.** Each belt tile has two transport lines. `BeltSegment` models
 both via `BeltLane` objects with per-lane item dicts and congestion flags.
 
-**Inserter connectivity is spatial.** `WorldState.inserters_taking_from(entity_id)` and
+**Inserter connectivity is spatial.** `WorldQuery.inserters_taking_from(entity_id)` and
 `inserters_delivering_to(entity_id)` use pickup/drop world coordinates for bounding-box
 containment checks, enabling connectivity queries without additional RCON calls.
 
@@ -323,9 +355,12 @@ When implementing the next component:
 
 For the **primitives and execution layer** (next phase), the files to include are:
 - `ARCHITECTURE.md`
+- `EXECUTION_BRIEF.md` — the component brief for this phase
 - `bridge/actions.py` — the Action types primitives must produce
-- `world/state.py` — WorldState the execution layer reads
+- `world/state.py` — WorldState data container
+- `world/query.py` — WorldQuery, the read interface the execution layer uses
+- `world/writer.py` — WorldWriter, the write interface the execution layer uses
 - `planning/goal.py` — Goal the execution layer pursues
 - `agent/state_machine.py` — execution runs within EXECUTING state
 - `world/knowledge.py` — KnowledgeBase the execution layer queries
-- `EXECUTION_BRIEF.md` — the component brief for this phase
+- `config.py` — scan radii and other tunable parameters

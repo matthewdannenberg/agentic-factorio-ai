@@ -1,7 +1,11 @@
 """
 tests/integration/test_StateParser_WorldState.py
 
-Integration tests for StateParser with WorldState
+Integration tests for StateParser with WorldState + WorldQuery.
+
+StateParser still constructs WorldState snapshots directly (that's the bridge's
+legitimate construction path). Tests now verify the output through WorldQuery,
+which is the correct consumer interface.
 
 Run with:  python tests/integration/test_StateParser_WorldState.py
 """
@@ -12,13 +16,12 @@ import json
 import unittest
 
 from bridge.state_parser import StateParser
-from world.state import (
-    EntityStatus
-)
+from world.query import WorldQuery
+from world.state import EntityStatus
 
 
-class TestStateParserWorldStateAPI(unittest.TestCase):
-    """Verify that parser output satisfies the WorldState accessor contracts."""
+class TestStateParserWorldQueryAPI(unittest.TestCase):
+    """Verify that parser output satisfies WorldQuery accessor contracts."""
 
     def setUp(self):
         self.parser = StateParser()
@@ -31,7 +34,7 @@ class TestStateParserWorldStateAPI(unittest.TestCase):
                 "health": 65.0,
                 "inventory": [
                     {"item": "iron-plate", "count": 100},
-                    {"item": "iron-plate", "count": 50},  # two slots same item
+                    {"item": "iron-plate", "count": 50},
                     {"item": "coal", "count": 30},
                 ],
                 "reachable": [3, 7],
@@ -56,49 +59,53 @@ class TestStateParserWorldStateAPI(unittest.TestCase):
             "threat": {},
         })
 
-    def test_entity_by_id(self):
+    def _parse(self) -> WorldQuery:
         state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        e = state.entity_by_id(3)
+        return WorldQuery(state)
+
+    def test_entity_by_id(self):
+        wq = self._parse()
+        e = wq.entity_by_id(3)
         self.assertIsNotNone(e)
         self.assertEqual(e.name, "stone-furnace")
 
     def test_entity_by_id_missing(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        self.assertIsNone(state.entity_by_id(999))
+        wq = self._parse()
+        self.assertIsNone(wq.entity_by_id(999))
 
     def test_entities_by_name(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        drills = state.entities_by_name("burner-mining-drill")
+        wq = self._parse()
+        drills = wq.entities_by_name("burner-mining-drill")
         self.assertEqual(len(drills), 1)
 
     def test_entities_by_status(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        working = state.entities_by_status(EntityStatus.WORKING)
+        wq = self._parse()
+        working = wq.entities_by_status(EntityStatus.WORKING)
         self.assertEqual(len(working), 1)
         self.assertEqual(working[0].name, "stone-furnace")
 
     def test_resources_of_type(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        iron = state.resources_of_type("iron-ore")
+        wq = self._parse()
+        iron = wq.resources_of_type("iron-ore")
         self.assertEqual(len(iron), 1)
         self.assertEqual(iron[0].amount, 150000)
 
     def test_inventory_count_multi_slot(self):
         """Counts across multiple slots of the same item are summed."""
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        self.assertEqual(state.inventory_count("iron-plate"), 150)  # 100+50
+        wq = self._parse()
+        self.assertEqual(wq.inventory_count("iron-plate"), 150)  # 100+50
 
     def test_power_headroom(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        self.assertAlmostEqual(state.logistics.power.headroom_kw, 150.0)
+        wq = self._parse()
+        self.assertAlmostEqual(wq.power.headroom_kw, 150.0)
 
     def test_recent_losses_empty(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        self.assertEqual(state.recent_losses, [])
+        wq = self._parse()
+        self.assertEqual(wq.recent_losses, [])
 
     def test_has_damage_false(self):
-        state = self.parser.parse(self._full_state_json(), current_tick=7200)
-        self.assertFalse(state.has_damage)
+        wq = self._parse()
+        self.assertFalse(wq.has_damage)
 
 
 if __name__ == "__main__":

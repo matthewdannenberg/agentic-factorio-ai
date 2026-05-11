@@ -12,10 +12,11 @@ difference when writing `success_condition`, `failure_condition`, and
 
 ## The Core Problem
 
-The `RewardEvaluator` evaluates condition expressions against a `WorldState`
-object. But `WorldState` is not ground truth about the entire game — it is a
-**partially-observed, locally-scoped snapshot** assembled by the bridge from
-whatever the Lua mod could see during the last scan.
+The `RewardEvaluator` evaluates condition expressions against a `WorldQuery`
+object (which wraps the current `WorldState` belief state). But `WorldState` is
+not ground truth about the entire game — it is a **partially-observed,
+locally-scoped snapshot** assembled by the bridge from whatever the Lua mod
+could see during the last scan.
 
 Specifically, the bridge only queries entities, belts, inserters, and
 production data **within `LOCAL_SCAN_RADIUS` tiles of the player** (default
@@ -47,6 +48,7 @@ Proximal namespace names:
 - `logistics` / `logistics.belts` / `logistics.inserters` — scan radius only
 - `power` — scoped to the nearest electric pole's network
 - `inserters_from(id)` / `inserters_to(id)` / `inserters_from_type(name)` / `inserters_to_type(name)` — scan radius
+- `wq.entities().with_inserter_input()` / `.with_inserter_output()` — scan radius
 
 **How to guard proximal conditions:**
 
@@ -141,6 +143,21 @@ When generating a `success_condition` or `failure_condition` string:
    charted_area_km2 >= 1.0   # explored at least 1 square kilometre
    ```
 
+7. **Use the `wq` composable builder for compound entity conditions.** The
+   `wq` name in the namespace gives access to the full `WorldQuery` interface,
+   including the `EntityQuery` builder. This is more reliable than ad-hoc
+   Python comprehensions over raw lists because it uses pre-built indices and
+   correctly handles tile dimensions:
+   ```python
+   # Compound: assemblers with electronic-circuit recipe AND both ends wired
+   wq.entities().with_recipe('electronic-circuit').with_inserter_input().with_inserter_output().count() >= 4
+
+   # Or via the convenience method
+   len(wq.fully_connected_entities('electronic-circuit')) >= 4
+   ```
+   Note that `with_inserter_input()` / `with_inserter_output()` are still
+   PROXIMAL — they only see inserters within scan radius.
+
 ---
 
 ## The `staleness()` Function
@@ -182,16 +199,20 @@ Always returns a non-negative integer if observed.
 | `logistics.*` | **PROXIMAL** | Scan radius only |
 | `power.*` | **PROXIMAL** | Nearest pole's network |
 | `inserters_from/to*` | **PROXIMAL** | Scan radius only |
+| `wq.entities().with_inserter_*` | **PROXIMAL** | Scan radius only |
 | `staleness(section)` | META | Use to guard proximal conditions |
+| `wq` | — | WorldQuery object; composable builder; non-proximal methods safe anywhere |
+| `state` | — | Raw WorldState; backwards-compat escape hatch |
 
 ---
 
 ## Files to update when this changes
 
-- `planning/reward_evaluator.py` — `_build_namespace()` comments
+- `planning/reward_evaluator.py` — `_build_namespace()` comments and namespace dict
+- `world/query.py` — `WorldQuery` method docstrings
 - `world/state.py` — `ExplorationState` and `WorldState.charted_chunks`
 - `bridge/mod/control.lua` — `fa._player_table()` and `fa.get_exploration()`
 - `bridge/state_parser.py` — `_parse_player()`
 - `llm/prompts/strategic.md` — condition-writing guidelines
 - `llm/prompts/tactical.md` — condition-writing guidelines
-- `tests/integration/test_evaluator_capabilities.py` — EX category
+- `tests/integration/test_evaluator_capabilities.py` — EX and XC categories

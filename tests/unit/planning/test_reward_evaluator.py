@@ -3,6 +3,9 @@ tests/unit/planning/test_reward_evaluator.py
 
 Tests for planning/reward_evaluator.py
 
+WorldState/WorldQuery construction is handled via fixtures helpers so that a
+WorldState signature change does not require edits here.
+
 Run with:  python tests/unit/planning/test_reward_evaluator.py
 """
 
@@ -12,19 +15,17 @@ import unittest
 
 from planning.goal import RewardSpec, make_goal, Priority
 from planning.reward_evaluator import EvaluationResult, RewardEvaluator
+from world.query import WorldQuery
 from world.state import Inventory, InventorySlot, PlayerState, Position, WorldState
+from tests.fixtures import make_world_query
 
 
-def _ws(**kwargs) -> WorldState:
-    return WorldState(**kwargs)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-
-def _spec(
-    milestones=None,
-    success_reward=1.0,
-    failure_penalty=0.5,
-    time_discount=1.0,
-) -> RewardSpec:
+def _spec(milestones=None, success_reward=1.0, failure_penalty=0.5,
+          time_discount=1.0) -> RewardSpec:
     return RewardSpec(
         success_reward=success_reward,
         failure_penalty=failure_penalty,
@@ -33,17 +34,17 @@ def _spec(
     )
 
 
-def _eval(ev, success="False", failure="False", spec=None, state=None, tick=0, start_tick=0):
-    """Helper: call evaluate_conditions with defaults."""
+def _eval(ev, success="False", failure="False", spec=None, wq=None,
+          tick=0, start_tick=0):
     if spec is None:
         spec = _spec()
-    if state is None:
-        state = _ws()
+    if wq is None:
+        wq = make_world_query()
     return ev.evaluate_conditions(
         success_condition=success,
         failure_condition=failure,
         spec=spec,
-        state=state,
+        wq=wq,
         tick=tick,
         start_tick=start_tick,
     )
@@ -59,16 +60,14 @@ class TestRewardEvaluatorSuccess(unittest.TestCase):
         self.assertFalse(result.failure)
 
     def test_false_condition_no_success(self):
-        result = _eval(self.ev, success="False")
-        self.assertFalse(result.success)
+        self.assertFalse(_eval(self.ev, success="False").success)
 
     def test_success_adds_reward(self):
         result = _eval(self.ev, success="True", spec=_spec(success_reward=2.0))
         self.assertAlmostEqual(result.reward, 2.0)
 
     def test_no_success_no_reward(self):
-        result = _eval(self.ev, success="False", spec=_spec(success_reward=1.0))
-        self.assertAlmostEqual(result.reward, 0.0)
+        self.assertAlmostEqual(_eval(self.ev, success="False").reward, 0.0)
 
 
 class TestRewardEvaluatorFailure(unittest.TestCase):
@@ -93,12 +92,10 @@ class TestRewardEvaluatorFailure(unittest.TestCase):
         self.assertFalse(result.failure)
 
     def test_name_error_in_failure_condition_no_raise(self):
-        result = _eval(self.ev, failure="undefined_variable > 10")
-        self.assertFalse(result.failure)
+        self.assertFalse(_eval(self.ev, failure="undefined_variable > 10").failure)
 
     def test_exception_in_success_condition_no_raise(self):
-        result = _eval(self.ev, success="1/0 > 0")
-        self.assertFalse(result.success)
+        self.assertFalse(_eval(self.ev, success="1/0 > 0").success)
 
 
 class TestRewardEvaluatorMilestones(unittest.TestCase):
@@ -159,43 +156,34 @@ class TestRewardEvaluatorTimeDiscount(unittest.TestCase):
         self.assertAlmostEqual(result.reward, 1.0)
 
     def test_elapsed_ticks_computed_correctly(self):
-        result = _eval(self.ev, tick=500, start_tick=100)
-        self.assertEqual(result.elapsed_ticks, 400)
+        self.assertEqual(_eval(self.ev, tick=500, start_tick=100).elapsed_ticks, 400)
 
     def test_elapsed_ticks_negative_start_clamped_to_zero(self):
-        result = _eval(self.ev, tick=50, start_tick=100)
-        self.assertEqual(result.elapsed_ticks, 0)
+        self.assertEqual(_eval(self.ev, tick=50, start_tick=100).elapsed_ticks, 0)
 
     def test_milestones_not_discounted(self):
         spec = RewardSpec(milestone_rewards={"True": 0.5}, time_discount=0.9)
-        result_early = _eval(self.ev, spec=spec, tick=0, start_tick=0)
-        result_late = _eval(self.ev, spec=spec, tick=10000, start_tick=0)
-        self.assertAlmostEqual(result_early.reward, 0.5)
-        self.assertAlmostEqual(result_late.reward, 0.5)
+        self.assertAlmostEqual(_eval(self.ev, spec=spec, tick=0, start_tick=0).reward, 0.5)
+        self.assertAlmostEqual(_eval(self.ev, spec=spec, tick=10000, start_tick=0).reward, 0.5)
 
 
 class TestRewardEvaluatorViaGoal(unittest.TestCase):
-    """Test the primary evaluate(goal, ...) API."""
-
     def setUp(self):
         self.ev = RewardEvaluator()
 
     def test_goal_success_condition_evaluated(self):
         goal = make_goal("test", "True", "False", Priority.NORMAL)
-        result = self.ev.evaluate(goal, _ws(), tick=0, start_tick=0)
+        result = self.ev.evaluate(goal, make_world_query(), tick=0, start_tick=0)
         self.assertTrue(result.success)
 
     def test_goal_failure_condition_evaluated(self):
         goal = make_goal("test", "False", "True", Priority.NORMAL)
-        result = self.ev.evaluate(goal, _ws(), tick=0, start_tick=0)
+        result = self.ev.evaluate(goal, make_world_query(), tick=0, start_tick=0)
         self.assertTrue(result.failure)
 
     def test_goal_milestone_evaluated(self):
-        goal = make_goal(
-            "test", "False", "False",
-            milestone_rewards={"True": 0.3},
-        )
-        result = self.ev.evaluate(goal, _ws(), tick=0, start_tick=0)
+        goal = make_goal("test", "False", "False", milestone_rewards={"True": 0.3})
+        result = self.ev.evaluate(goal, make_world_query(), tick=0, start_tick=0)
         self.assertIn("True", result.milestones_hit)
 
 
@@ -204,39 +192,35 @@ class TestRewardEvaluatorNamespace(unittest.TestCase):
         self.ev = RewardEvaluator()
 
     def test_inventory_shorthand(self):
-        ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                inventory=Inventory(slots=[InventorySlot("iron-plate", 50)]),
-            )
-        )
-        result = _eval(self.ev, success="inventory('iron-plate') >= 50", state=ws)
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot("iron-plate", 50)]),
+        ))
+        result = _eval(self.ev, success="inventory('iron-plate') >= 50",
+                       wq=WorldQuery(ws))
         self.assertTrue(result.success)
 
     def test_inventory_shorthand_below_threshold(self):
-        ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                inventory=Inventory(slots=[InventorySlot("iron-plate", 10)]),
-            )
-        )
-        result = _eval(self.ev, success="inventory('iron-plate') >= 50", state=ws)
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot("iron-plate", 10)]),
+        ))
+        result = _eval(self.ev, success="inventory('iron-plate') >= 50",
+                       wq=WorldQuery(ws))
         self.assertFalse(result.success)
 
     def test_tick_available_in_namespace(self):
-        result = _eval(self.ev, success="tick >= 500", tick=600)
-        self.assertTrue(result.success)
+        self.assertTrue(_eval(self.ev, success="tick >= 500", tick=600).success)
 
     def test_state_available_in_namespace(self):
         ws = WorldState(tick=1234)
-        result = _eval(self.ev, success="state.tick == 1234", state=ws)
+        result = _eval(self.ev, success="state.tick == 1234", wq=WorldQuery(ws))
         self.assertTrue(result.success)
 
     def test_empty_worldstate_does_not_raise(self):
-        ws = WorldState()
         try:
             result = _eval(self.ev, success="inventory('coal') > 0",
-                           failure="tick > 9999", state=ws)
+                           failure="tick > 9999")
         except Exception as exc:
             self.fail(f"evaluate_conditions() raised on empty WorldState: {exc}")
         self.assertFalse(result.success)
@@ -246,6 +230,15 @@ class TestRewardEvaluatorNamespace(unittest.TestCase):
         result = _eval(self.ev, success="", failure="   ")
         self.assertFalse(result.success)
         self.assertFalse(result.failure)
+
+    def test_wq_available_in_namespace(self):
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            inventory=Inventory(slots=[InventorySlot("iron-plate", 50)]),
+        ))
+        result = _eval(self.ev, success="wq.inventory_count('iron-plate') >= 50",
+                       wq=WorldQuery(ws))
+        self.assertTrue(result.success)
 
 
 if __name__ == "__main__":

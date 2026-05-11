@@ -1,15 +1,10 @@
 """
 tests/integration/test_evaluator_capabilities.py
 
-Integration tests: RewardEvaluator x WorldState capability matrix.
+Integration tests: RewardEvaluator x WorldQuery capability matrix.
 
-These tests couple world/state.py and planning/reward_evaluator.py, verifying
-that every condition category the LLM is expected to write can be expressed,
-evaluated, and return the correct result.
-
-This file is the authoritative registry of supported condition categories.
-If a condition type cannot be exercised here, it cannot reliably be written
-as a goal condition.
+RewardEvaluator now receives a WorldQuery rather than a WorldState.
+All helpers wrap WorldState in WorldQuery before passing to the evaluator.
 
 Category codes:
     IV  inventory (player item counts)
@@ -37,6 +32,7 @@ import unittest
 from planning.goal import RewardSpec, make_goal, Priority
 from planning.reward_evaluator import RewardEvaluator
 from world.production_tracker import ProductionTracker
+from world.query import WorldQuery
 from world.state import (
     BeltLane, BeltSegment, DamagedEntity, DestroyedEntity,
     EntityState, EntityStatus, ExplorationState,
@@ -50,13 +46,17 @@ from world.state import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _wq(state: WorldState = None) -> WorldQuery:
+    return WorldQuery(state or WorldState())
+
+
 def _ev(success="False", failure="False", state=None, tick=0, start_tick=0):
     ev = RewardEvaluator()
     return ev.evaluate_conditions(
         success_condition=success,
         failure_condition=failure,
         spec=RewardSpec(),
-        state=state or WorldState(),
+        wq=_wq(state),
         tick=tick,
         start_tick=start_tick,
     )
@@ -69,7 +69,7 @@ def _ev_with_tracker(tracker, success="False", failure="False",
         success_condition=success,
         failure_condition=failure,
         spec=RewardSpec(),
-        state=state or WorldState(),
+        wq=_wq(state),
         tick=tick,
         start_tick=start_tick,
     )
@@ -95,8 +95,7 @@ def _belt(segment_id, x=0.0, y=0.0,
           lane1_items=None, lane1_congested=False,
           lane2_items=None, lane2_congested=False):
     return BeltSegment(
-        segment_id=segment_id,
-        positions=[Position(x, y)],
+        segment_id=segment_id, positions=[Position(x, y)],
         lane1=BeltLane(congested=lane1_congested, items=lane1_items or {}),
         lane2=BeltLane(congested=lane2_congested, items=lane2_items or {}),
     )
@@ -130,8 +129,7 @@ class TestIV_Inventory(unittest.TestCase):
                 InventorySlot("copper-plate", 20),
             ]),
         ))
-        r = _ev("inventory('iron-plate') >= 20 and inventory('copper-plate') >= 10",
-                state=ws)
+        r = _ev("inventory('iron-plate') >= 20 and inventory('copper-plate') >= 10", state=ws)
         self.assertTrue(r.success)
 
     def test_IV_003_absent_item_is_zero(self):
@@ -147,8 +145,7 @@ class TestIV_Inventory(unittest.TestCase):
     def test_IV_005_stacked_slots_aggregated(self):
         ws = WorldState(player=PlayerState(
             position=Position(0, 0),
-            inventory=Inventory(slots=[InventorySlot("coal", 100),
-                                       InventorySlot("coal", 100)]),
+            inventory=Inventory(slots=[InventorySlot("coal", 100), InventorySlot("coal", 100)]),
         ))
         self.assertTrue(_ev("inventory('coal') >= 200", state=ws).success)
 
@@ -173,8 +170,8 @@ class TestEN_EntityPlacement(unittest.TestCase):
 
     def test_EN_003_entity_working_on_recipe(self):
         ws = WorldState(entities=[
-            _entity(1, "assembling-machine-1",
-                    status=EntityStatus.WORKING, recipe="iron-gear-wheel"),
+            _entity(1, "assembling-machine-1", status=EntityStatus.WORKING,
+                    recipe="iron-gear-wheel"),
         ])
         r = _ev(
             "any(e.recipe == 'iron-gear-wheel' and e.status.value == 'working' "
@@ -184,11 +181,8 @@ class TestEN_EntityPlacement(unittest.TestCase):
         self.assertTrue(r.success)
 
     def test_EN_004_any_entity_starved_as_failure(self):
-        ws = WorldState(entities=[
-            _entity(1, "assembling-machine-1", status=EntityStatus.NO_INPUT),
-        ])
-        r = _ev(failure="any(e.status.value == 'no_input' for e in state.entities)",
-                state=ws)
+        ws = WorldState(entities=[_entity(1, "assembling-machine-1", status=EntityStatus.NO_INPUT)])
+        r = _ev(failure="any(e.status.value == 'no_input' for e in state.entities)", state=ws)
         self.assertTrue(r.failure)
 
     def test_EN_005_count_working_entities(self):
@@ -197,8 +191,7 @@ class TestEN_EntityPlacement(unittest.TestCase):
             _entity(2, "assembling-machine-1", status=EntityStatus.WORKING),
             _entity(3, "assembling-machine-1", status=EntityStatus.IDLE),
         ])
-        r = _ev("sum(1 for e in state.entities if e.status.value == 'working') >= 2",
-                state=ws)
+        r = _ev("sum(1 for e in state.entities if e.status.value == 'working') >= 2", state=ws)
         self.assertTrue(r.success)
 
     def test_EN_006_no_entities_of_type(self):
@@ -241,8 +234,7 @@ class TestPR_Production(unittest.TestCase):
             2: InserterState(2, Position(0, 0), active=True),
             3: InserterState(3, Position(0, 0), active=False),
         }))
-        r = _ev("sum(1 for i in logistics.inserters.values() if i.active) >= 2",
-                state=ws)
+        r = _ev("sum(1 for i in logistics.inserters.values() if i.active) >= 2", state=ws)
         self.assertTrue(r.success)
 
     def test_PR_006_belt_lane1_congested(self):
@@ -268,8 +260,7 @@ class TestPR_Production(unittest.TestCase):
         ws = WorldState(logistics=LogisticsState(belts=[
             _belt(1, lane1_items={"iron-plate": 4}, lane2_items={"iron-plate": 2}),
         ]))
-        r = _ev("any(b.items.get('iron-plate', 0) >= 6 for b in logistics.belts)",
-                state=ws)
+        r = _ev("any(b.items.get('iron-plate', 0) >= 6 for b in logistics.belts)", state=ws)
         self.assertTrue(r.success)
 
 
@@ -288,15 +279,12 @@ class TestRS_Research(unittest.TestCase):
 
     def test_RS_003_multiple_techs(self):
         ws = WorldState(research=ResearchState(unlocked=["steel-processing", "automation"]))
-        r = _ev("tech_unlocked('steel-processing') and tech_unlocked('automation')",
-                state=ws)
+        r = _ev("tech_unlocked('steel-processing') and tech_unlocked('automation')", state=ws)
         self.assertTrue(r.success)
 
     def test_RS_004_in_progress(self):
         ws = WorldState(research=ResearchState(in_progress="advanced-electronics"))
-        self.assertTrue(
-            _ev("research.in_progress == 'advanced-electronics'", state=ws).success
-        )
+        self.assertTrue(_ev("research.in_progress == 'advanced-electronics'", state=ws).success)
 
     def test_RS_005_queue_length(self):
         ws = WorldState(research=ResearchState(queued=["automation", "logistics"]))
@@ -310,23 +298,16 @@ class TestRS_Research(unittest.TestCase):
 class TestRM_ResourceMap(unittest.TestCase):
 
     def test_RM_001_patch_found(self):
-        ws = WorldState(resource_map=[
-            ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
-        ])
+        ws = WorldState(resource_map=[ResourcePatch("iron-ore", Position(100, 100), 50000, 30)])
         self.assertTrue(_ev("len(resources_of_type('iron-ore')) >= 1", state=ws).success)
 
     def test_RM_002_type_not_found(self):
-        ws = WorldState(resource_map=[
-            ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
-        ])
+        ws = WorldState(resource_map=[ResourcePatch("iron-ore", Position(100, 100), 50000, 30)])
         self.assertTrue(_ev("len(resources_of_type('coal')) == 0", state=ws).success)
 
     def test_RM_003_patch_amount_threshold(self):
-        ws = WorldState(resource_map=[
-            ResourcePatch("iron-ore", Position(100, 100), 80000, 30),
-        ])
-        r = _ev("any(p.amount >= 50000 for p in resources_of_type('iron-ore'))",
-                state=ws)
+        ws = WorldState(resource_map=[ResourcePatch("iron-ore", Position(100, 100), 80000, 30)])
+        r = _ev("any(p.amount >= 50000 for p in resources_of_type('iron-ore'))", state=ws)
         self.assertTrue(r.success)
 
     def test_RM_004_all_required_types(self):
@@ -378,9 +359,7 @@ class TestDM_Damage(unittest.TestCase):
         self.assertTrue(_ev("not state.has_damage").success)
 
     def test_DM_002_damage_as_failure(self):
-        ws = WorldState(damaged_entities=[
-            DamagedEntity(1, "stone-wall", Position(50, 50), 0.4),
-        ])
+        ws = WorldState(damaged_entities=[DamagedEntity(1, "stone-wall", Position(50, 50), 0.4)])
         self.assertTrue(_ev(failure="state.has_damage", state=ws).failure)
 
     def test_DM_003_biter_kill(self):
@@ -391,11 +370,8 @@ class TestDM_Damage(unittest.TestCase):
         self.assertTrue(r.success)
 
     def test_DM_004_health_fraction_critical(self):
-        ws = WorldState(damaged_entities=[
-            DamagedEntity(1, "stone-wall", Position(50, 50), 0.2),
-        ])
-        r = _ev(failure="any(e.health_fraction < 0.5 for e in state.damaged_entities)",
-                state=ws)
+        ws = WorldState(damaged_entities=[DamagedEntity(1, "stone-wall", Position(50, 50), 0.2)])
+        r = _ev(failure="any(e.health_fraction < 0.5 for e in state.damaged_entities)", state=ws)
         self.assertTrue(r.failure)
 
 
@@ -432,9 +408,7 @@ class TestCN_Connectivity(unittest.TestCase):
             entities=[chest_a, chest_b],
             logistics=LogisticsState(inserters={10: ins_a, 11: ins_b}),
         )
-        self.assertTrue(
-            _ev("len(inserters_from_type('iron-chest')) >= 2", state=ws).success
-        )
+        self.assertTrue(_ev("len(inserters_from_type('iron-chest')) >= 2", state=ws).success)
 
     def test_CN_005_both_ends_connected(self):
         assembler = _entity(1, "assembling-machine-1", 5, 5)
@@ -445,6 +419,18 @@ class TestCN_Connectivity(unittest.TestCase):
             logistics=LogisticsState(inserters={10: feeder, 11: extractor}),
         )
         r = _ev("len(inserters_to(1)) >= 1 and len(inserters_from(1)) >= 1", state=ws)
+        self.assertTrue(r.success)
+
+    def test_CN_006_wq_fully_connected_entities(self):
+        """Compound query via WorldQuery composable builder in condition string."""
+        assembler = _entity(1, "assembling-machine-1", 5, 5, recipe="electronic-circuit")
+        feeder    = _inserter(10, 4, 5, pickup_pos=Position(3, 5), drop_pos=Position(5, 5))
+        extractor = _inserter(11, 6, 5, pickup_pos=Position(5, 5), drop_pos=Position(7, 5))
+        ws = WorldState(
+            entities=[assembler],
+            logistics=LogisticsState(inserters={10: feeder, 11: extractor}),
+        )
+        r = _ev("len(wq.fully_connected_entities('electronic-circuit')) >= 1", state=ws)
         self.assertTrue(r.success)
 
 
@@ -476,11 +462,6 @@ class TestGI_GroundItems(unittest.TestCase):
 # ===========================================================================
 
 class TestEX_Exploration(unittest.TestCase):
-    """
-    charted_chunks / charted_tiles / charted_area_km2 are NON-PROXIMAL.
-    They reflect the force's global chart, not the current scan radius.
-    Safe to evaluate anywhere.  See CONDITION_SCOPE.md.
-    """
 
     def test_EX_001_charted_chunks_threshold(self):
         self.assertTrue(_ev("charted_chunks >= 50", state=_ws_with_chart(50)).success)
@@ -489,18 +470,15 @@ class TestEX_Exploration(unittest.TestCase):
         self.assertFalse(_ev("charted_chunks >= 50", state=_ws_with_chart(30)).success)
 
     def test_EX_003_charted_tiles_derived(self):
-        # 10 chunks x 1024 tiles/chunk = 10240 tiles
         self.assertTrue(_ev("charted_tiles == 10240", state=_ws_with_chart(10)).success)
 
     def test_EX_004_charted_area_km2(self):
-        # 1000 chunks x 1024 = 1,024,000 tiles = 1.024 km²
         self.assertTrue(_ev("charted_area_km2 >= 1.0", state=_ws_with_chart(1000)).success)
 
     def test_EX_005_charted_area_not_met(self):
         self.assertFalse(_ev("charted_area_km2 >= 1.0", state=_ws_with_chart(10)).success)
 
     def test_EX_006_exploration_as_failure(self):
-        """Fail if player hasn't explored enough before time runs out."""
         ws = _ws_with_chart(5)
         r = _ev(failure="tick > 7200 and charted_chunks < 20", state=ws, tick=8000)
         self.assertTrue(r.failure)
@@ -516,7 +494,7 @@ class TestEX_Exploration(unittest.TestCase):
         ev = RewardEvaluator()
         result = ev.evaluate_conditions(
             success_condition="False", failure_condition="False",
-            spec=spec, state=ws, tick=0, start_tick=0,
+            spec=spec, wq=_wq(ws), tick=0, start_tick=0,
         )
         self.assertIn("charted_chunks >= 25", result.milestones_hit)
         self.assertAlmostEqual(result.reward, 0.2)
@@ -525,26 +503,18 @@ class TestEX_Exploration(unittest.TestCase):
         self.assertTrue(_ev("charted_chunks == 0").success)
 
     def test_EX_010_non_proximal_unaffected_by_empty_scan(self):
-        """Charted area correct even when entity scan is empty/stale."""
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                exploration=ExplorationState(charted_chunks=100),
-            ),
-            entities=[],
-            observed_at={},   # nothing ever scanned
+            player=PlayerState(position=Position(0, 0),
+                               exploration=ExplorationState(charted_chunks=100)),
+            entities=[], observed_at={},
         )
         self.assertTrue(_ev("charted_chunks >= 100", state=ws).success)
 
     def test_EX_011_charted_tiles_expression(self):
-        """Conditions can use charted_tiles directly for tile-level thresholds."""
         ws = _ws_with_chart(500)
-        # 500 * 1024 = 512000 tiles
-        r = _ev("charted_tiles >= 512000", state=ws)
-        self.assertTrue(r.success)
+        self.assertTrue(_ev("charted_tiles >= 512000", state=ws).success)
 
     def test_EX_012_exploration_combined_with_other_non_proximal(self):
-        """Exploration combined with inventory and tech — all non-proximal."""
         ws = WorldState(
             player=PlayerState(
                 position=Position(0, 0),
@@ -562,7 +532,6 @@ class TestEX_Exploration(unittest.TestCase):
         self.assertTrue(r.success)
 
     def test_EX_013_progressive_exploration_milestones(self):
-        """Multiple exploration milestones at different thresholds."""
         spec = RewardSpec(milestone_rewards={
             "charted_chunks >= 10": 0.1,
             "charted_chunks >= 50": 0.2,
@@ -573,13 +542,12 @@ class TestEX_Exploration(unittest.TestCase):
         result = ev.evaluate_conditions(
             success_condition="charted_chunks >= 200",
             failure_condition="False",
-            spec=spec, state=ws, tick=0, start_tick=0,
+            spec=spec, wq=_wq(ws), tick=0, start_tick=0,
         )
-        # 10 and 50 thresholds met, 100 not met
         self.assertIn("charted_chunks >= 10", result.milestones_hit)
         self.assertIn("charted_chunks >= 50", result.milestones_hit)
         self.assertNotIn("charted_chunks >= 100", result.milestones_hit)
-        self.assertAlmostEqual(result.reward, 0.3)   # 0.1 + 0.2
+        self.assertAlmostEqual(result.reward, 0.3)
 
 
 # ===========================================================================
@@ -587,13 +555,10 @@ class TestEX_Exploration(unittest.TestCase):
 # ===========================================================================
 
 class TestPT_ProductionRate(unittest.TestCase):
-    """
-    production_rate(item) is PROXIMAL — only reflects scan-radius entities.
-    See CONDITION_SCOPE.md.
-    """
 
     def _tracker_with_history(self, item, count_start, count_end,
                                tick_start=0, tick_end=3600):
+        from world.query import WorldQuery
         tracker = ProductionTracker()
         e_start = EntityState(
             entity_id=1, name="assembling-machine-1", position=Position(0, 0),
@@ -603,21 +568,18 @@ class TestPT_ProductionRate(unittest.TestCase):
             entity_id=1, name="assembling-machine-1", position=Position(0, 0),
             inventory=Inventory(slots=[InventorySlot(item, count_end)]),
         )
-        tracker.update(WorldState(tick=tick_start, entities=[e_start]))
-        tracker.update(WorldState(tick=tick_end, entities=[e_end]))
+        tracker.update(WorldQuery(WorldState(tick=tick_start, entities=[e_start])))
+        tracker.update(WorldQuery(WorldState(tick=tick_end, entities=[e_end])))
         return tracker
 
     def test_PT_001_rate_above_threshold(self):
-        # 60 items over 60 seconds = 60/min
         tracker = self._tracker_with_history("iron-plate", 0, 60, 0, 3600)
-        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0",
-                             tick=3600)
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0", tick=3600)
         self.assertTrue(r.success)
 
     def test_PT_002_rate_below_threshold(self):
         tracker = self._tracker_with_history("iron-plate", 0, 30, 0, 3600)
-        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0",
-                             tick=3600)
+        r = _ev_with_tracker(tracker, "production_rate('iron-plate') >= 60.0", tick=3600)
         self.assertFalse(r.success)
 
     def test_PT_003_unseen_item_returns_zero(self):
@@ -631,22 +593,18 @@ class TestPT_ProductionRate(unittest.TestCase):
 
     def test_PT_005_rate_as_failure(self):
         tracker = self._tracker_with_history("iron-plate", 0, 10, 0, 3600)
-        r = _ev_with_tracker(tracker, failure="production_rate('iron-plate') < 30.0",
-                             tick=3600)
+        r = _ev_with_tracker(tracker, failure="production_rate('iron-plate') < 30.0", tick=3600)
         self.assertTrue(r.failure)
 
     def test_PT_006_rate_as_milestone(self):
         tracker = self._tracker_with_history("copper-plate", 0, 120, 0, 3600)
-        spec = RewardSpec(milestone_rewards={
-            "production_rate('copper-plate') >= 100.0": 0.3
-        })
+        spec = RewardSpec(milestone_rewards={"production_rate('copper-plate') >= 100.0": 0.3})
         ev = RewardEvaluator(tracker=tracker)
         result = ev.evaluate_conditions(
             success_condition="False", failure_condition="False",
-            spec=spec, state=WorldState(tick=3600), tick=3600, start_tick=0,
+            spec=spec, wq=_wq(WorldState(tick=3600)), tick=3600, start_tick=0,
         )
-        self.assertIn("production_rate('copper-plate') >= 100.0",
-                      result.milestones_hit)
+        self.assertIn("production_rate('copper-plate') >= 100.0", result.milestones_hit)
         self.assertAlmostEqual(result.reward, 0.3)
 
     def test_PT_007_single_snapshot_returns_zero(self):
@@ -656,9 +614,9 @@ class TestPT_ProductionRate(unittest.TestCase):
             inventory=Inventory(slots=[InventorySlot("iron-plate", 50)]),
         )
         ws = WorldState(tick=60, entities=[e])
-        tracker.update(ws)
+        tracker.update(WorldQuery(ws))
         r = _ev_with_tracker(tracker, "production_rate('iron-plate') == 0.0",
-                             state=ws, tick=60)
+                              state=ws, tick=60)
         self.assertTrue(r.success)
 
 
@@ -731,17 +689,11 @@ class TestST_Staleness(unittest.TestCase):
 # ===========================================================================
 
 class TestSC_Scope(unittest.TestCase):
-    """
-    Verifies the proximal/non-proximal boundary as documented in
-    CONDITION_SCOPE.md.
-    """
 
     def test_SC_001_inventory_unaffected_by_empty_scan(self):
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                inventory=Inventory(slots=[InventorySlot("iron-plate", 100)]),
-            ),
+            player=PlayerState(position=Position(0, 0),
+                               inventory=Inventory(slots=[InventorySlot("iron-plate", 100)])),
             entities=[], observed_at={},
         )
         self.assertTrue(_ev("inventory('iron-plate') >= 100", state=ws).success)
@@ -753,18 +705,15 @@ class TestSC_Scope(unittest.TestCase):
 
     def test_SC_003_exploration_unaffected_by_empty_scan(self):
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                exploration=ExplorationState(charted_chunks=100),
-            ),
+            player=PlayerState(position=Position(0, 0),
+                               exploration=ExplorationState(charted_chunks=100)),
             entities=[], observed_at={},
         )
         self.assertTrue(_ev("charted_chunks >= 100", state=ws).success)
 
     def test_SC_004_resource_map_accumulates(self):
         ws = WorldState(resource_map=[
-            ResourcePatch("iron-ore", Position(p*100, 100), 50000, 30)
-            for p in range(4)
+            ResourcePatch("iron-ore", Position(p*100, 100), 50000, 30) for p in range(4)
         ])
         self.assertTrue(_ev("len(resources_of_type('iron-ore')) >= 4", state=ws).success)
 
@@ -773,22 +722,14 @@ class TestSC_Scope(unittest.TestCase):
         self.assertFalse(_ev("len(entities('assembling-machine-1')) >= 1", state=ws).success)
 
     def test_SC_006_exploration_monotonic_unrelated_to_proximity(self):
-        """
-        charted_chunks does not reset or decrease when entities are not visible.
-        Exploration is accumulated globally by the force, not by local scan.
-        """
         ws_near = _ws_with_chart(50)
         ws_far = WorldState(
-            player=PlayerState(
-                position=Position(5000, 5000),  # far from anything
-                exploration=ExplorationState(charted_chunks=50),
-            ),
+            player=PlayerState(position=Position(5000, 5000),
+                               exploration=ExplorationState(charted_chunks=50)),
             entities=[],
         )
-        r_near = _ev("charted_chunks >= 50", state=ws_near)
-        r_far  = _ev("charted_chunks >= 50", state=ws_far)
-        self.assertTrue(r_near.success)
-        self.assertTrue(r_far.success)
+        self.assertTrue(_ev("charted_chunks >= 50", state=ws_near).success)
+        self.assertTrue(_ev("charted_chunks >= 50", state=ws_far).success)
 
 
 # ===========================================================================
@@ -799,29 +740,23 @@ class TestXC_Compound(unittest.TestCase):
 
     def test_XC_001_inventory_and_tech(self):
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                inventory=Inventory(slots=[InventorySlot("iron-plate", 100)]),
-            ),
+            player=PlayerState(position=Position(0, 0),
+                               inventory=Inventory(slots=[InventorySlot("iron-plate", 100)])),
             research=ResearchState(unlocked=["steel-processing"]),
         )
-        r = _ev("inventory('iron-plate') >= 50 and tech_unlocked('steel-processing')",
-                state=ws)
+        r = _ev("inventory('iron-plate') >= 50 and tech_unlocked('steel-processing')", state=ws)
         self.assertTrue(r.success)
 
     def test_XC_002_exploration_and_research(self):
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                exploration=ExplorationState(charted_chunks=30),
-            ),
+            player=PlayerState(position=Position(0, 0),
+                               exploration=ExplorationState(charted_chunks=30)),
             research=ResearchState(unlocked=["automation"]),
         )
         r = _ev("charted_chunks >= 20 and tech_unlocked('automation')", state=ws)
         self.assertTrue(r.success)
 
     def test_XC_003_exploration_and_time(self):
-        """Must have explored enough AND enough time has passed."""
         ws = _ws_with_chart(25)
         r = _ev("tick >= 3600 and charted_chunks >= 20", state=ws, tick=4000)
         self.assertTrue(r.success)
@@ -852,14 +787,31 @@ class TestXC_Compound(unittest.TestCase):
 
     def test_XC_006_failure_if_damage_or_not_explored(self):
         ws = WorldState(
-            player=PlayerState(
-                position=Position(0, 0),
-                exploration=ExplorationState(charted_chunks=5),
-            ),
+            player=PlayerState(position=Position(0, 0),
+                               exploration=ExplorationState(charted_chunks=5)),
             damaged_entities=[DamagedEntity(1, "wall", Position(0, 0), 0.5)],
         )
         r = _ev(failure="state.has_damage or charted_chunks < 10", state=ws)
         self.assertTrue(r.failure)
+
+    def test_XC_007_wq_builder_compound(self):
+        """Condition uses wq composable builder for a multi-criteria entity query."""
+        assembler = _entity(1, "assembling-machine-1", 5, 5, recipe="electronic-circuit")
+        feeder    = _inserter(10, 4, 5, pickup_pos=Position(3, 5), drop_pos=Position(5, 5))
+        extractor = _inserter(11, 6, 5, pickup_pos=Position(5, 5), drop_pos=Position(7, 5))
+        ws = WorldState(
+            entities=[assembler],
+            logistics=LogisticsState(inserters={10: feeder, 11: extractor}),
+        )
+        r = _ev(
+            "wq.entities()"
+            "   .with_recipe('electronic-circuit')"
+            "   .with_inserter_input()"
+            "   .with_inserter_output()"
+            "   .count() >= 1",
+            state=ws,
+        )
+        self.assertTrue(r.success)
 
 
 if __name__ == "__main__":
