@@ -32,6 +32,27 @@ agent can play a complete game — including defence and Space Age content — w
 circuit networks. Adding them later means adding new Action subclasses (ConnectWire,
 SetCombinatorCondition, etc.) and extending the Lua mod; no existing code changes.
 
+Railroad networks: placing rails, signals, train stops, and locomotives is handled
+by the existing PlaceEntity + RotateEntity actions. What is missing is train
+*operation*: setting schedules, configuring station departure conditions, and
+sending commands to specific trains. The planned action types are:
+
+  SetTrainSchedule(train_id, schedule: list[StopCondition])
+      Set a locomotive's full schedule — ordered list of station names and the
+      conditions under which the train departs each stop (item count, circuit
+      signal, inactivity timer, etc.).
+
+  SetStationCondition(entity_id, condition: StationCondition)
+      Set the departure or wait condition on a train stop entity independently
+      of any specific train's schedule. Used for globally configuring stops.
+
+These require a WorldState.trains section (new Lua polling surface for train
+identity, schedule, cargo, current stop, and speed) and a new NON-PROXIMAL
+reward namespace entry for train state conditions. The self-model already
+anticipates this: TRAIN_STATION is a NodeType and CONNECTED_BY_RAIL is an
+EdgeType. Implementation is deferred to a dedicated phase after the
+spatial-logistics agent (Phase 9) is stable.
+
 Combat and vehicle actions are present as stubs (see COMBAT and VEHICLE sections).
 They are included in ALL_ACTION_TYPES but the execution layer gates them by
 category, so they are never emitted when biters are disabled or no vehicle is

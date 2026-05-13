@@ -359,6 +359,17 @@ class WorldState:
     ----------------------------------
     "player", "entities", "resource_map", "ground_items", "research",
     "logistics", "damaged_entities", "destroyed_entities", "threat"
+
+    Deferred sections
+    -----------------
+    trains: Railroad network state — train identity, schedule, cargo, current
+    stop, speed, and path. Requires a new Lua polling surface in control.lua
+    and corresponding StateParser support. When added, trains will be a
+    NON-PROXIMAL section (train state is global, not scan-radius limited) and
+    will introduce new WorldQuery methods for train lookup and schedule
+    inspection. The self-model already has TRAIN_STATION (NodeType) and
+    CONNECTED_BY_RAIL (EdgeType) in anticipation. Deferred until after the
+    spatial-logistics agent (Phase 9) is stable.
     """
 
     tick: int = 0
