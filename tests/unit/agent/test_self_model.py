@@ -348,6 +348,57 @@ class TestSelfModelSubgraph(unittest.TestCase):
         self.assertEqual(sub.all_edges(), [])
 
 
+class TestSelfModelOverlappingNodes(unittest.TestCase):
+    def setUp(self):
+        self.sm = SelfModel()
+        # Three non-overlapping nodes in a row
+        self.left   = _node("left",   node_type=NodeType.PRODUCTION_LINE)
+        self.middle = _node("middle", node_type=NodeType.BELT_CORRIDOR)
+        self.right  = _node("right",  node_type=NodeType.STORAGE)
+        self.left.bounding_box   = BoundingBox(Position(0,  0), Position(10, 10))
+        self.middle.bounding_box = BoundingBox(Position(20, 0), Position(30, 10))
+        self.right.bounding_box  = BoundingBox(Position(40, 0), Position(50, 10))
+        for n in [self.left, self.middle, self.right]:
+            self.sm.add_node(n)
+
+    def test_exact_overlap(self):
+        bbox = BoundingBox(Position(0, 0), Position(10, 10))
+        hits = self.sm.overlapping_nodes(bbox)
+        self.assertEqual(len(hits), 1)
+        self.assertIs(hits[0], self.left)
+
+    def test_partial_overlap(self):
+        # Straddles left and middle
+        bbox = BoundingBox(Position(5, 0), Position(25, 10))
+        hits = self.sm.overlapping_nodes(bbox)
+        ids = {n.id for n in hits}
+        self.assertIn(self.left.id, ids)
+        self.assertIn(self.middle.id, ids)
+        self.assertNotIn(self.right.id, ids)
+
+    def test_no_overlap(self):
+        # Sits in the gap between left and middle
+        bbox = BoundingBox(Position(11, 0), Position(19, 10))
+        self.assertEqual(self.sm.overlapping_nodes(bbox), [])
+
+    def test_overlaps_all_nodes(self):
+        bbox = BoundingBox(Position(0, 0), Position(50, 10))
+        hits = self.sm.overlapping_nodes(bbox)
+        self.assertEqual(len(hits), 3)
+
+    def test_empty_graph_returns_empty(self):
+        sm = SelfModel()
+        self.assertEqual(sm.overlapping_nodes(_bbox(0, 0, 5, 5)), [])
+
+    def test_does_not_prevent_overlap(self):
+        """overlapping_nodes detects but does not prevent overlapping adds."""
+        overlapper = _node("overlapper")
+        overlapper.bounding_box = BoundingBox(Position(0, 0), Position(10, 10))
+        self.sm.add_node(overlapper)   # should not raise
+        hits = self.sm.overlapping_nodes(BoundingBox(Position(0, 0), Position(10, 10)))
+        self.assertEqual(len(hits), 2)
+
+
 class TestEmptyGraph(unittest.TestCase):
     def setUp(self):
         self.sm = SelfModel()

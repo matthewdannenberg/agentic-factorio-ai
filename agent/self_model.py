@@ -251,6 +251,9 @@ class SelfModelProtocol:
     def discard_candidate(self, node_id: NodeId) -> None:
         raise NotImplementedError
 
+    def overlapping_nodes(self, bbox: BoundingBox) -> list[SelfModelNode]:
+        raise NotImplementedError
+
     def all_nodes(self) -> list[SelfModelNode]:
         raise NotImplementedError
 
@@ -451,6 +454,22 @@ class SelfModel(SelfModelProtocol):
             for node in self._nodes.values()
             if node.status == NodeStatus.ACTIVE
         )
+
+    def overlapping_nodes(self, bbox: BoundingBox) -> list[SelfModelNode]:
+        """
+        Return all nodes whose bounding box overlaps the given bbox.
+
+        Used by the spatial-logistics agent to detect conflicts before
+        placing new infrastructure, and by the examination layer to flag
+        unexpected overlaps during reconciliation.
+
+        Enforcement of non-overlap invariants is the caller's responsibility —
+        this method only detects; it does not prevent or reject overlaps.
+        """
+        return [
+            node for node in self._nodes.values()
+            if node.bounding_box.overlaps(bbox)
+        ]
 
     def all_nodes(self) -> list[SelfModelNode]:
         """Return all nodes in insertion order."""

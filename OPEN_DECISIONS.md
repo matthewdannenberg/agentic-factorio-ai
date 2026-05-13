@@ -201,6 +201,50 @@ Until then, structural conditions are not useful even if the namespace exists.
 
 ---
 
+## OD-7 — NodeType-Specific SelfModelNode Attributes
+
+**Question:** Should different NodeType values have different attributes, and if
+so, should that be modelled through subclasses of SelfModelNode?
+
+**What we know:**
+- The current `SelfModelNode` carries a `throughput: dict[str, float]` field
+  that is the primary structured attribute beyond geometry and status. This is
+  sufficient for production-related queries (`find_producers`, `find_capacity`)
+  and for the examination layer through Phase 9.
+- Different node types plausibly need type-specific data. A `POWER_GRID` node
+  would benefit from `produced_kw` / `consumed_kw` fields. A `TRAIN_STATION`
+  might carry `scheduled_resources`. A `DEFENDED_REGION` might carry
+  `turret_coverage_fraction`. None of these fit cleanly into `throughput`.
+- Subclassing `SelfModelNode` per NodeType is the natural Python pattern for
+  this, and is localized to `agent/self_model.py` and the examination layer.
+
+**What is undecided:**
+- Whether `throughput` plus ad-hoc extra fields in the examination layer is
+  sufficient through Phase 10, or whether type-specific subclasses are needed
+  before that.
+- If subclasses: whether the graph queries (`query_nodes`, `find_producers`,
+  etc.) need to be updated to return typed subclasses, or whether a generic
+  `extra: dict` field is a simpler interim.
+
+**Where the decision lives:** `agent/self_model.py`. The graph interface
+(`SelfModelProtocol`) does not need to change — only the node dataclass and
+the examination layer code that writes to it.
+
+**When this becomes relevant:** Phase 10, when the examination layer begins
+writing type-specific verification data to nodes (throughput metrics for
+production lines, wattage for power grids, etc.).
+
+**Proposed approach when implemented:**
+- Introduce typed subclasses (`ProductionLineNode`, `PowerGridNode`, etc.)
+  each adding their own fields
+- `SelfModel.add_node()` accepts any `SelfModelNode` subclass
+- `query_nodes(type=NodeType.POWER_GRID)` returns `list[PowerGridNode]`
+  (caller casts); or add a typed variant `query_nodes_typed(type, cls)`
+- Keep `throughput` on the base class; it remains the common currency for
+  cross-type capacity queries
+
+---
+
 ## Decision log
 
 | ID | Decision | Date | Notes |
