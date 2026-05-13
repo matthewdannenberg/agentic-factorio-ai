@@ -213,6 +213,25 @@ class SetFilter(Action):
 
 
 @dataclass(frozen=True)
+class RotateEntity(Action):
+    """
+    Rotate a placed entity by 90 degrees clockwise (default) or
+    counter-clockwise.
+
+    Factorio's entity.rotate() advances the entity's direction by one step
+    in the Direction enum: NORTH → EAST → SOUTH → WEST → NORTH.
+    reverse=True rotates counter-clockwise instead.
+
+    The entity must be within the player's reach radius and must support
+    rotation (not all entities do — e.g. chests are directionless).
+    The bridge validates rotatability before dispatching.
+    """
+    entity_id: int
+    reverse: bool = False    # False = clockwise; True = counter-clockwise
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class ApplyBlueprint(Action):
     """
     Paste a blueprint string at a map position.
@@ -453,6 +472,7 @@ ALL_ACTION_TYPES: tuple[type[Action], ...] = (
     PlaceEntity,
     SetRecipe,
     SetFilter,
+    RotateEntity,
     ApplyBlueprint,
     # INVENTORY
     TransferItems,
