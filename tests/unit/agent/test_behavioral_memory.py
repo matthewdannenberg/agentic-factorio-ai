@@ -194,5 +194,24 @@ class TestSpatialPatternRecording(unittest.TestCase):
         self.mem.record_spatial_pattern(sm, label="empty")
 
 
+class TestContextManager(unittest.TestCase):
+    def test_with_statement_closes_on_exit(self):
+        with SQLiteBehavioralMemory(db_path=":memory:") as mem:
+            mem.record_outcome("production", {}, _outcome(), ticks_elapsed=0)
+            self.assertIsNotNone(mem._conn)
+        # After the with block, connection should be closed
+        self.assertIsNone(mem._conn)
+
+    def test_with_statement_closes_on_exception(self):
+        mem = None
+        try:
+            with SQLiteBehavioralMemory(db_path=":memory:") as m:
+                mem = m
+                raise RuntimeError("simulated failure")
+        except RuntimeError:
+            pass
+        self.assertIsNone(mem._conn)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
