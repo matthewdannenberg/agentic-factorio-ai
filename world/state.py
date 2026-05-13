@@ -44,8 +44,6 @@ class EntityStatus(Enum):
     FULL_OUT   = "full_output"
     UNKNOWN    = "unknown"
 
-ResourceType = str
-
 
 class Direction(Enum):
     NORTH = 0
@@ -116,6 +114,8 @@ class EntityState:
 # ---------------------------------------------------------------------------
 # Resource map
 # ---------------------------------------------------------------------------
+
+ResourceType = str
 
 @dataclass
 class ResourcePatch:
