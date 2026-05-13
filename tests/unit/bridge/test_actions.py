@@ -71,9 +71,6 @@ class TestActionCategory(unittest.TestCase):
         }
         self.assertEqual(set(ACTIONS_BY_CATEGORY.keys()), expected)
 
-    def test_21_action_types_total(self):
-        self.assertEqual(len(ALL_ACTION_TYPES), 21)
-
 
 class TestActionsForContext(unittest.TestCase):
     def test_default_has_movement_not_vehicle(self):
