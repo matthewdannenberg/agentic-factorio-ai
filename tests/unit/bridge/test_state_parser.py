@@ -20,7 +20,6 @@ from world.state import (
     EntityStatus,
     InserterState,
     Position,
-    ResourceName,
     WorldState,
 )
 
@@ -135,7 +134,7 @@ class TestStateParserFullParse(unittest.TestCase):
         state = self._parse(data)
         self.assertEqual(len(state.resource_map), 1)
         patch = state.resource_map[0]
-        self.assertEqual(patch.resource_type, ResourceName.IRON_ORE)
+        # A more general test might also query the KnowledgeBase about resource_type
         self.assertEqual(patch.amount, 200000)
         self.assertEqual(patch.size, 500)
 

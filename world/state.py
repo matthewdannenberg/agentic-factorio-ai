@@ -44,17 +44,6 @@ class EntityStatus(Enum):
     FULL_OUT   = "full_output"
     UNKNOWN    = "unknown"
 
-
-class ResourceName:
-    IRON_ORE    = "iron-ore"
-    COPPER_ORE  = "copper-ore"
-    COAL        = "coal"
-    STONE       = "stone"
-    CRUDE_OIL   = "crude-oil"
-    URANIUM_ORE = "uranium-ore"
-    WATER       = "water"
-    WOOD        = "wood"
-
 ResourceType = str
 
 

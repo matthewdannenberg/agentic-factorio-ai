@@ -27,7 +27,7 @@ from world.state import (
     Direction, EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
-    ResourceName, ResourcePatch, ResearchState,
+    ResourcePatch, ResearchState,
     ThreatState, WorldState,
 )
 from world.query import WorldQuery
@@ -130,10 +130,6 @@ class TestWorldStateBasics(unittest.TestCase):
         patch = ResourcePatch("se-cryonite", Position(100, 200), 50000, 40, 3600)
         self.assertEqual(patch.resource_type, "se-cryonite")
         self.assertEqual(patch.observed_at, 3600)
-
-    def test_resource_name_constants(self):
-        self.assertEqual(ResourceName.IRON_ORE, "iron-ore")
-        self.assertEqual(ResourceName.CRUDE_OIL, "crude-oil")
 
     def test_ground_items_populated(self):
         ws = WorldState(ground_items=[
