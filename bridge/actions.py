@@ -213,6 +213,58 @@ class SetFilter(Action):
 
 
 @dataclass(frozen=True)
+class SetSplitterPriority(Action):
+    """
+    Set the input and/or output priority lanes of a splitter.
+
+    Factorio splitters have two independently configurable priority settings:
+
+      input_priority  — which input belt is preferentially consumed when both
+                        are active. "left", "right", or "none" (balanced).
+      output_priority — which output belt is preferentially filled before the
+                        other receives items. "left", "right", or "none" (balanced).
+
+    Either field may be None to leave that priority unchanged. Both may be set
+    in one call.
+
+    Output priority is the primary mechanism for allocating a node's output to
+    a specific downstream consumer without circuit networks — the spatial-logistics
+    agent uses it when wiring a production node to multiple consumers with
+    different priority claims (e.g. preferentially feed a downstream assembler
+    over a buffer chest).
+
+    Input and output priority interact with SetFilter: a filtered output lane
+    with output priority set will receive priority items-of-that-type first.
+    The bridge sets both properties independently via the Lua API
+    (entity.input_priority / entity.output_priority).
+
+    Valid values: "left", "right", "none". None (Python) means leave unchanged.
+    """
+    entity_id: int
+    input_priority:  Optional[str] = None   # "left" | "right" | "none" | None
+    output_priority: Optional[str] = None   # "left" | "right" | "none" | None
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        valid = {"left", "right", "none", None}
+        if self.input_priority not in valid:
+            raise ValueError(
+                f"input_priority must be 'left', 'right', 'none', or None; "
+                f"got {self.input_priority!r}"
+            )
+        if self.output_priority not in valid:
+            raise ValueError(
+                f"output_priority must be 'left', 'right', 'none', or None; "
+                f"got {self.output_priority!r}"
+            )
+        if self.input_priority is None and self.output_priority is None:
+            raise ValueError(
+                "SetSplitterPriority requires at least one of input_priority "
+                "or output_priority to be set"
+            )
+
+
+@dataclass(frozen=True)
 class RotateEntity(Action):
     """
     Rotate a placed entity by 90 degrees clockwise (default) or
@@ -472,6 +524,7 @@ ALL_ACTION_TYPES: tuple[type[Action], ...] = (
     PlaceEntity,
     SetRecipe,
     SetFilter,
+    SetSplitterPriority,
     RotateEntity,
     ApplyBlueprint,
     # INVENTORY

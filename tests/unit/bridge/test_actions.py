@@ -15,7 +15,7 @@ from bridge.actions import (
     MoveTo, StopMovement,
     MineResource, MineEntity,
     CraftItem,
-    PlaceEntity, SetRecipe, SetFilter, ApplyBlueprint,
+    PlaceEntity, SetRecipe, SetFilter, SetSplitterPriority, ApplyBlueprint,
     TransferItems,
     SetResearchQueue,
     EquipArmor, UseItem,
@@ -232,6 +232,37 @@ class TestActions(unittest.TestCase):
             SetFilter(entity_id=4, slot=0, item="coal").category,
             ActionCategory.BUILDING
         )
+
+    def test_splitter_output_priority_only(self):
+        a = SetSplitterPriority(entity_id=5, output_priority="left")
+        self.assertEqual(a.output_priority, "left")
+        self.assertIsNone(a.input_priority)
+        self.assertEqual(a.category, ActionCategory.BUILDING)
+
+    def test_splitter_input_priority_only(self):
+        a = SetSplitterPriority(entity_id=5, input_priority="right")
+        self.assertEqual(a.input_priority, "right")
+        self.assertIsNone(a.output_priority)
+
+    def test_splitter_both_priorities(self):
+        a = SetSplitterPriority(entity_id=5, input_priority="left", output_priority="right")
+        self.assertEqual(a.input_priority, "left")
+        self.assertEqual(a.output_priority, "right")
+
+    def test_splitter_none_priority_resets(self):
+        a = SetSplitterPriority(entity_id=5, output_priority="none")
+        self.assertEqual(a.output_priority, "none")
+
+    def test_splitter_requires_at_least_one_priority(self):
+        with self.assertRaises(ValueError):
+            SetSplitterPriority(entity_id=5)
+
+    def test_splitter_rejects_invalid_priority_value(self):
+        with self.assertRaises(ValueError):
+            SetSplitterPriority(entity_id=5, output_priority="center")
+
+    def test_splitter_in_building_bucket(self):
+        self.assertIn(SetSplitterPriority, ACTIONS_BY_CATEGORY[ActionCategory.BUILDING])
 
     def test_stop_shooting_category(self):
         self.assertEqual(StopShooting().category, ActionCategory.COMBAT)
