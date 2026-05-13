@@ -83,6 +83,45 @@ Non-proximal namespace names:
 - `state.recent_losses` / `state.damaged_entities` — populated from the
   destruction event buffer, which is global (not scan-radius scoped)
 
+### STRUCTURAL conditions
+
+**Phase 10+ only. Requires a populated self-model.**
+
+Evidence comes from the **factory self-model graph** — the agent's persistent,
+graph-theoretic model of what it has built. STRUCTURAL conditions are globally
+accurate (not scan-radius limited) and persistent (not subject to snapshot
+staleness), but they can lag behind game reality if the examination layer has not
+run recently.
+
+STRUCTURAL conditions are the natural form for goals that describe factory
+infrastructure rather than directly observable game state:
+
+```python
+# Does an active iron plate production line exist?
+production_line('iron-plate') is not None
+
+# Is throughput sufficient?
+production_capacity('iron-plate') >= 30.0
+
+# Is infrastructure present?
+has_infrastructure('BELT_CORRIDOR')
+
+# Self-model freshness guard (ticks since examination layer last reconciled)
+sm_staleness() < 1800 and production_capacity('iron-plate') >= 30.0
+```
+
+STRUCTURAL conditions are evaluated by `RewardEvaluator` when a self-model is
+provided alongside `WorldQuery`. When no self-model is available (early phases,
+or before examination has run), structural conditions evaluate to `False` rather
+than raising.
+
+The `sm_staleness()` function returns the number of ticks since the examination
+layer last reconciled the self-model against WorldState. Use it to guard structural
+conditions the same way `staleness(section)` guards proximal conditions.
+
+**These namespace entries are not yet implemented.** See `OPEN_DECISIONS.md` OD-6
+for the design and the list of files to update when they are added (Phase 10).
+
 ---
 
 ## Rules for the Strategic/Tactical LLM
@@ -201,6 +240,11 @@ Always returns a non-negative integer if observed.
 | `inserters_from/to*` | **PROXIMAL** | Scan radius only |
 | `wq.entities().with_inserter_*` | **PROXIMAL** | Scan radius only |
 | `staleness(section)` | META | Use to guard proximal conditions |
+| `production_line(item)` | **STRUCTURAL** | Self-model: active producer node for item (Phase 10+) |
+| `production_capacity(item)` | **STRUCTURAL** | Self-model: throughput in units/min (Phase 10+) |
+| `has_infrastructure(type)` | **STRUCTURAL** | Self-model: any active node of type (Phase 10+) |
+| `connected(node_a, node_b)` | **STRUCTURAL** | Self-model: path exists between nodes (Phase 10+) |
+| `sm_staleness()` | META | Use to guard structural conditions (Phase 10+) |
 | `wq` | — | WorldQuery object; composable builder; non-proximal methods safe anywhere |
 | `state` | — | Raw WorldState; backwards-compat escape hatch |
 
@@ -216,3 +260,8 @@ Always returns a non-negative integer if observed.
 - `llm/prompts/strategic.md` — condition-writing guidelines
 - `llm/prompts/tactical.md` — condition-writing guidelines
 - `tests/integration/test_evaluator_capabilities.py` — EX and XC categories
+
+**Additional files to update when STRUCTURAL conditions are implemented (Phase 10):**
+- `agent/self_model.py` — self-model query interface
+- `REWARD_NAMESPACE.md` — new STRUCTURAL namespace entries
+- `OPEN_DECISIONS.md` — close out OD-6
