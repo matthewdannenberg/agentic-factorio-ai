@@ -74,10 +74,18 @@ component responsibilities:
 Hard interface boundary. Nothing outside speaks RCON or knows Lua. Produces
 WorldState snapshots via StateParser, dispatches Action objects via ActionExecutor.
 
+Action types (23 total across 10 categories): movement, mining, crafting, building
+(including `RotateEntity` and `SetSplitterPriority`), inventory, research, player,
+vehicle, combat, and meta. Circuit networks and railroad scheduling operations are
+explicitly deferred — see `bridge/actions.py` known omissions.
+
 **World state layer** (`world/`)
 `WorldState` is a pure data container. `WorldQuery` is the sole read interface.
 `WorldWriter` is the sole write interface. `KnowledgeBase` stores game knowledge
 learned at runtime. `TechTree`, `ProductionTracker` unchanged.
+
+A `WorldState.trains` section for railroad network state is anticipated but
+deferred — see `world/state.py` deferred sections note.
 
 **Planning layer** (`planning/`)
 `GoalTree`, `RewardEvaluator`, `ResourceAllocator`. Goal lifecycle management and
@@ -92,7 +100,7 @@ See `OPEN_DECISIONS.md` OD-6 and `CONDITION_SCOPE.md` for the design.
 
 ---
 
-### Phase 5 — Execution layer foundation
+### Phase 5 — Execution layer foundation ✅
 
 **ExecutionLayerProtocol** (`agent/execution_protocol.py`)
 
@@ -113,17 +121,33 @@ class ExecutionResult:
     status: ExecutionStatus
     stuck_context: Optional[StuckContext] = None  # populated when STUCK
 
-class ExecutionLayerProtocol(Protocol):
-    def reset(self, goal: Goal, wq: WorldQuery) -> None: ...
+class ExecutionLayerProtocol:
+    def reset(self, goal: Goal, wq: WorldQuery,
+              seed_subtasks: Optional[list[Subtask]] = None) -> None: ...
     def tick(self, goal: Goal, wq: WorldQuery, ww: WorldWriter,
              tick: int) -> ExecutionResult: ...
     def progress(self, goal: Goal, wq: WorldQuery) -> float: ...
     def observe(self, wq: WorldQuery) -> dict: ...
 ```
 
-`StuckContext` carries the parent goal, the subtask that failed or could not be
-derived, and the blackboard observations at time of failure. This is what the LLM
-receives when asked to decompose.
+`reset()` accepts an optional `seed_subtasks` list for the post-escalation path:
+when the LLM decomposes a stuck goal and injects subtasks, the coordinator
+pre-populates its ledger from these rather than starting derivation from scratch.
+
+**StuckContext** carries the full execution context needed for LLM escalation:
+
+```python
+@dataclass
+class StuckContext:
+    goal: Goal
+    failure_chain: list[Subtask]          # outermost → innermost nesting
+    sibling_history: dict[str, list[SubtaskRecord]]  # resolved siblings per level
+    blackboard_snapshot: dict
+```
+
+This gives the LLM a complete picture of what was attempted at every level —
+not just the immediate failure point. The LLM can then decide whether to
+decompose the leaf failure, discard the parent's approach, or revise further up.
 
 **Blackboard** (`agent/blackboard.py`)
 
@@ -133,37 +157,47 @@ on subtask resolution while goal entries persist.
 
 Three entry categories:
 
-- *Intentions* — things an agent plans to do but hasn't done yet. Written by planning
-  agents, read by spatial-logistics and construction agents.
-- *Observations* — things an agent has noticed that others should know. Written and
-  read by any agent.
+- *Intentions* — things an agent plans to do but hasn't done yet.
+- *Observations* — things an agent has noticed that others should know.
 - *Reservations* — claims on resources or regions. Written by the spatial-logistics
   agent, read by all agents to avoid conflicts.
 
 Each entry carries: category, owning agent identifier, creation tick, optional
 expiry tick, and scope (goal or subtask).
 
-**Subtask** (`agent/subtask.py`)
+**Subtask and SubtaskLedger** (`agent/subtask.py`)
 
 A locally-derived prerequisite task. Structurally similar to `Goal` but created
 by the execution network rather than the LLM, without LLM involvement unless
-derivation fails.
+derivation fails (`derived_locally=False`).
 
 ```python
+class SubtaskStatus(Enum):
+    PENDING | ACTIVE | COMPLETE | FAILED | ESCALATED
+
 @dataclass
 class Subtask:
     id: str
     description: str
     success_condition: str
+    failure_condition: str
     parent_goal_id: str
-    parent_subtask_id: Optional[str]  # for nested subtasks
+    parent_subtask_id: Optional[str]
     created_at: int
     status: SubtaskStatus
-    derived_locally: bool  # False if injected by LLM after escalation
+    derived_locally: bool
+    resolved_at: Optional[int]
 ```
 
-The subtask stack is maintained by the coordinator. Subtask success conditions are
-evaluated by the same `RewardEvaluator` mechanism as goals.
+The `SubtaskLedger` replaces the simple stack design. It combines a live LIFO
+stack (the active nesting chain) with a history log of resolved `SubtaskRecord`
+objects, keyed by parent id. The stack uses call-stack semantics: pushing a new
+subtask activates it immediately (it is a prerequisite that must run first) and
+suspends the parent; popping a completed subtask resumes the parent.
+
+This design ensures the LLM receives complete sibling context at escalation time —
+completed predecessors at every nesting level are preserved in the history log and
+surfaced via `failure_chain()` and `sibling_history()`.
 
 **Self-model graph** (`agent/self_model.py`)
 
@@ -171,102 +205,66 @@ The agent's persistent graph-theoretic model of what it has built. Starts empty 
 run. Built incrementally as the examination layer verifies constructed structures.
 
 Node types: `PRODUCTION_LINE`, `RESOURCE_SITE`, `BELT_CORRIDOR`, `POWER_GRID`,
-`DEFENDED_REGION`, `TRAIN_STATION`, `STORAGE`.
+`DEFENDED_REGION`, `TRAIN_STATION`, `STORAGE`
+
+Node status: `CANDIDATE` → `ACTIVE` / `DEGRADED` / `INACTIVE`
 
 Edge types: `FEEDS_INTO`, `DEPENDS_ON`, `CONNECTED_BY_BELT`, `CONNECTED_BY_RAIL`,
-`DEFENDS`, `SPATIALLY_ADJACENT`.
+`DEFENDS`, `SPATIALLY_ADJACENT`
 
-Each node carries: type, bounding box, status, throughput metrics, creation tick,
-last verified tick.
+Each node carries: type, bounding box, status, throughput dict (item → units/min),
+creation tick, last verified tick.
 
-```python
-class SelfModelProtocol(Protocol):
-    def add_node(self, node: SelfModelNode) -> NodeId: ...
-    def add_edge(self, from_id: NodeId, to_id: NodeId,
-                 edge_type: EdgeType) -> None: ...
-    def query_nodes(self, type: NodeType,
-                    status: NodeStatus | None) -> list[SelfModelNode]: ...
-    def query_path(self, from_id: NodeId,
-                   to_id: NodeId) -> list[NodeId] | None: ...
-    def find_producers(self, item: str) -> list[SelfModelNode]: ...
-    def find_capacity(self, item: str) -> float: ...
-    def subgraph(self, node_ids: list[NodeId]) -> SelfModel: ...
-    def candidate_nodes(self) -> list[SelfModelNode]: ...
-    def promote_candidate(self, node_id: NodeId) -> None: ...
-    def discard_candidate(self, node_id: NodeId) -> None: ...
-```
+Key queries: `find_producers(item)`, `find_capacity(item)`, `query_path(a, b)`,
+`overlapping_nodes(bbox)`, `subgraph(node_ids)`, `promote_candidate(id)`,
+`discard_candidate(id)`.
 
-Candidate nodes are written by agents via the blackboard and promoted or discarded
-by the examination layer after verification against WorldState.
+`overlapping_nodes()` detects spatial conflicts between nodes but does not enforce
+non-overlap — enforcement is the spatial-logistics agent's responsibility.
+
+See `OPEN_DECISIONS.md` OD-7 for the question of NodeType-specific subclasses.
 
 **Behavioral memory** (`agent/memory/behavioral.py`)
 
-Persistent across runs. Three content categories:
+Persistent across runs. SQLite-backed. Implements `BehavioralMemoryProtocol` and
+supports use as a context manager (`with SQLiteBehavioralMemory(...) as mem:`).
+
+Three content categories:
 
 - *Strategy records* — for a given goal type and context, what approach worked.
 - *Spatial patterns* — recurring self-model subgraphs that proved effective.
-  Foundation for the eventual blueprint system.
+  Foundation for the eventual blueprint system. Full pattern extraction deferred
+  to Phase 10; stub stores node/edge counts only.
 - *Performance history* — per-goal-type statistics across runs.
-
-```python
-class BehavioralMemoryProtocol(Protocol):
-    def record_outcome(self, goal_type: str, context_summary: dict,
-                       outcome: GoalOutcome, ticks_elapsed: int) -> None: ...
-    def query_strategies(self, goal_type: str,
-                         context_summary: dict) -> list[StrategyRecord]: ...
-    def record_spatial_pattern(self, subgraph: SelfModel,
-                                label: str) -> None: ...
-    def get_performance_history(self,
-                                goal_type: str) -> PerformanceStats: ...
-```
 
 **Agent network interfaces** (`agent/network/`)
 
 ```python
-class AgentProtocol(Protocol):
+class AgentProtocol:
     def activate(self, goal: Goal, blackboard: Blackboard,
                  wq: WorldQuery) -> None: ...
     def tick(self, blackboard: Blackboard, wq: WorldQuery,
              ww: WorldWriter, tick: int) -> list[Action]: ...
-    def observe(self, blackboard: Blackboard,
-                wq: WorldQuery) -> dict: ...
-    def progress(self, blackboard: Blackboard,
-                 wq: WorldQuery) -> float: ...
-```
+    def observe(self, blackboard: Blackboard, wq: WorldQuery) -> dict: ...
+    def progress(self, blackboard: Blackboard, wq: WorldQuery) -> float: ...
 
-The coordinator and registry interfaces:
-
-```python
-class CoordinatorProtocol(Protocol):
-    def reset(self, goal: Goal, wq: WorldQuery) -> None: ...
+class CoordinatorProtocol:
+    def reset(self, goal: Goal, wq: WorldQuery,
+              seed_subtasks: Optional[list] = None) -> None: ...
     def tick(self, goal: Goal, wq: WorldQuery, ww: WorldWriter,
              tick: int) -> ExecutionResult: ...
 
 class AgentRegistry:
     def register(self, agent: AgentProtocol,
                  goal_types: list[str]) -> None: ...
-    def agents_for_goal(self,
-                        goal_type: str) -> list[AgentProtocol]: ...
+    def agents_for_goal(self, goal_type: str) -> list[AgentProtocol]: ...
     def all_agents(self) -> list[AgentProtocol]: ...
 ```
 
-**Action preconditions** (`agent/preconditions.py`)
+`StubCoordinator` satisfies `CoordinatorProtocol` and returns
+`ExecutionResult(actions=[], status=WAITING)` on every tick. Replaced in Phase 6.
 
-Helper functions that check whether an action is currently valid given WorldQuery.
-Used by agents to filter their action spaces and avoid dispatching invalid actions.
-
-```python
-def is_at(target: Position, wq: WorldQuery,
-          tolerance: float = 1.0) -> bool: ...
-def is_reachable(entity_id: int, wq: WorldQuery) -> bool: ...
-def can_craft(item: str, count: int, wq: WorldQuery,
-              kb: KnowledgeBase) -> bool: ...
-def can_place(item: str, position: Position,
-              wq: WorldQuery) -> bool: ...
-def can_mine(entity_id: int, wq: WorldQuery) -> bool: ...
-def valid_actions(wq: WorldQuery, kb: KnowledgeBase,
-                  candidate_actions: list[Action]) -> list[Action]: ...
-```
+**Action preconditions** (`agent/preconditions.py`) — Phase 6
 
 ---
 
@@ -278,10 +276,14 @@ is well-understood and adds little value from learning at this stage.
 
 - `agent/network/agents/navigation.py` — rule-based movement, pathfinding, waypoint
   following. Reads waypoints from blackboard, updates player position via WorldWriter.
+- `agent/preconditions.py` — action validity predicates
 - Rule-based coordinator implementation — routes goals to agents by goal type, derives
-  simple subtask trees from KB production chains and self-model queries.
+  simple subtask trees from KB production chains and self-model queries. Manages
+  SubtaskLedger lifecycle: pushes, pops, calls complete()/fail()/escalate() before
+  popping, clears ledger on goal reset.
 - Basic self-model writes — coordinator writes candidate nodes when construction
   subtasks complete.
+- `bridge/action_executor.py` — action dispatch handlers for all 23 action types.
 - End-to-end smoke test: "collect 50 iron ore" executes successfully.
 
 ---
@@ -359,9 +361,11 @@ The rationale: placement decisions and routing decisions are deeply interdepende
 without creating more coordination overhead than the separation saves.
 
 - `agent/network/agents/spatial_logistics.py` — layout planning, region designation,
-  belt routing, inserter placement (one agent or two coordinating, TBD)
+  belt routing, inserter placement, splitter priority management (one agent or two
+  coordinating, TBD)
 - Self-model graph grows richer — region nodes, belt corridor edges, connectivity
   relationships
+- `overlapping_nodes()` used for placement conflict detection
 - Coordinator updated to route spatial and logistics concerns appropriately
 
 ---
@@ -374,9 +378,13 @@ Examination gains new responsibilities under the revised architecture.
   promotes confirmed nodes, discards stale ones
 - **Blackboard promotion** — converts verified intentions to self-model nodes
 - **Behavioral memory updates** — extracts spatial patterns from end-of-goal
-  self-model state, records outcomes
+  self-model state, records outcomes; full `record_spatial_pattern()` implementation
+  replacing the Phase 5 stub
 - **Structured factory summary** — self-model-derived description consumed by
   the LLM layer instead of raw WorldState
+- **RewardEvaluator namespace extension** — STRUCTURAL conditions backed by
+  self-model (`production_line`, `production_capacity`, `has_infrastructure`,
+  `connected`, `sm_staleness`). See `OPEN_DECISIONS.md` OD-6.
 - Rich and mechanical examination modes preserved
 
 ---
@@ -387,8 +395,10 @@ Updated to work with the revised architecture. The LLM never receives raw WorldS
 
 - Revised strategic prompt — receives self-model summary and behavioral memory
   statistics, not WorldState
-- Escalation handling — receives `StuckContext` from `ExecutionResult`, produces
-  targeted subgoals injected into `GoalTree`
+- Escalation handling — receives `StuckContext` from `ExecutionResult` (including
+  `failure_chain` and `sibling_history`), produces targeted subgoals injected into
+  `GoalTree` as children of the current goal; coordinator receives them via
+  `reset(seed_subtasks=...)` to re-enter the execution network at the right level
 - Reflection — post-goal call assesses reward spec calibration, result written to
   behavioral memory
 
@@ -415,6 +425,13 @@ Adding them should require new components, not restructuring existing ones.
 - **Coordinator learning** — transition from rule-based to learned coordination
 - **Higher-order compositional learning** — learning to compose previously learned
   strategies
+- **Railroad networks** — `SetTrainSchedule`, `SetStationCondition` action types;
+  `WorldState.trains` section; train-state reward namespace entries. Self-model
+  already has `TRAIN_STATION` (NodeType) and `CONNECTED_BY_RAIL` (EdgeType) in
+  anticipation. Likely warrants a dedicated train-scheduler agent.
+- **Circuit networks** — `ConnectWire`, `SetCombinatorCondition`, and related
+  action types; significant Lua mod extension required. Likely warrants a dedicated
+  circuit-network agent.
 
 ---
 
@@ -446,34 +463,46 @@ Adding them should require new components, not restructuring existing ones.
 **Initiation:**
 1. An agent identifies a prerequisite gap via self-model (`find_producers(item)`)
    and KB (`production_chain(item)`).
-2. Coordinator constructs a `Subtask` and pushes it onto the subtask stack.
+2. Coordinator constructs a `Subtask` and pushes it onto the ledger. The new subtask
+   is activated immediately (call-stack semantics); the parent is suspended.
 3. Blackboard is partitioned — subtask-scoped entries created alongside goal-scoped
    entries. Agents reconfigure observation spaces relative to new subtask context.
 
 **Resolution:**
-1. Subtask success condition met — coordinator pops subtask, resumes parent context.
-2. If subtask produced a persistent structure, coordinator writes a candidate
+1. Subtask success condition met — coordinator calls `complete(tick)`, then pops
+   from the ledger. The record is written to the ledger's history log under the
+   subtask's parent id.
+2. The parent subtask (or goal) is resumed.
+3. If subtask produced a persistent structure, coordinator writes a candidate
    `SelfModelNode` to the blackboard.
-3. Examination layer (next cycle) verifies and promotes or discards the candidate.
-4. Subtask-scoped blackboard entries cleared. Goal-scoped entries persist.
+4. Examination layer (next cycle) verifies and promotes or discards the candidate.
+5. Subtask-scoped blackboard entries cleared. Goal-scoped entries persist.
 
 **Failure and escalation:**
 1. Subtask failure condition triggers, or coordinator cannot derive decomposition.
-2. `ExecutionResult.status = STUCK`. `StuckContext` carries parent goal, failed
-   subtask, and blackboard observations at time of failure.
-3. Main loop passes to LLM layer. LLM produces subgoals injected into `GoalTree`
-   as children of current goal. Execution network resets.
+2. Coordinator calls `escalate(tick)` on the stuck subtask (and any ancestors that
+   can no longer proceed), then pops them, building the history log.
+3. `ExecutionResult.status = STUCK`. `StuckContext` is constructed from the ledger:
+   - `failure_chain` = `ledger.failure_chain()` — the live nesting at failure time
+   - `sibling_history` = `ledger.sibling_history(chain, goal.id)` — resolved
+     siblings at each level, so the LLM sees what was already completed or attempted
+4. Main loop passes `StuckContext` to LLM layer. LLM produces subgoals injected
+   into `GoalTree` as children of the current goal, and returns them for
+   `reset(seed_subtasks=...)`. Execution network resets with the LLM's decomposition
+   pre-loaded into the ledger.
 
 ### Per-goal
 
 **Initiation:**
-1. `ExecutionLayerProtocol.reset(goal, wq)` called.
-2. Coordinator clears blackboard and subtask stack.
-3. Self-model queried for prerequisite feasibility. If infeasible, `STUCK` returned
+1. `ExecutionLayerProtocol.reset(goal, wq, seed_subtasks)` called.
+2. Coordinator clears blackboard and subtask ledger.
+3. If `seed_subtasks` provided (post-escalation), coordinator pushes them onto the
+   ledger in order. Otherwise, derivation starts from scratch.
+4. Self-model queried for prerequisite feasibility. If infeasible, `STUCK` returned
    immediately before any ticks are spent.
-4. Behavioral memory queried for relevant strategy records. Matching agents
+5. Behavioral memory queried for relevant strategy records. Matching agents
    warm-started with prior policy state.
-5. Agents activated; observation spaces configured relative to goal structure.
+6. Agents activated; observation spaces configured relative to goal structure.
 
 **Progression:**
 1. Subtask tree derived incrementally — only as far ahead as current state makes
@@ -507,27 +536,16 @@ Adding them should require new components, not restructuring existing ones.
 
 ## Open Implementation Decisions
 
-These questions are explicitly deferred pending research. The architecture is designed
-to accommodate any answer without structural changes.
+These questions are explicitly deferred pending research or experimentation.
+See `OPEN_DECISIONS.md` for full discussion of each.
 
-**Observation space construction.** Whether observation spaces are fixed per goal
-type or evolve over time. Whether a single unified observation space or per-agent
-spaces. Contained entirely within `AgentProtocol` implementations and
-`agent/observation.py`.
-
-**Coordinator learning.** Whether and when the rule-based coordinator transitions
-to a learned coordination mechanism. Contained within the coordinator implementation
-behind `CoordinatorProtocol`.
-
-**Self-model cross-run persistence.** What self-model information survives a run —
-full graph, subgraph summaries, or only spatial patterns promoted to behavioral
-memory. Contained within `agent/self_model.py` and `agent/memory/behavioral.py`.
-
-**RL algorithm family.** Contained entirely within individual agent implementations.
-Each agent satisfies `AgentProtocol` regardless of algorithm.
-
-**Spatial-logistics internal structure.** One agent or two coordinating agents.
-Contained within Phase 9 implementation.
+- **OD-1** — Observation space construction
+- **OD-2** — Coordinator learning
+- **OD-3** — Self-model cross-run persistence
+- **OD-4** — RL algorithm family
+- **OD-5** — Spatial-logistics internal structure
+- **OD-6** — RewardEvaluator namespace extension for self-model (STRUCTURAL conditions)
+- **OD-7** — NodeType-specific SelfModelNode subclasses
 
 ---
 
@@ -537,7 +555,7 @@ Contained within Phase 9 implementation.
 factorio-agent/
 │
 ├── bridge/                          # Hard boundary — nothing outside speaks RCON
-│   ├── actions.py                   ✅ 21 action types across 10 categories
+│   ├── actions.py                   ✅ 23 action types across 10 categories
 │   ├── rcon_client.py               ✅
 │   ├── state_parser.py              ✅
 │   ├── action_executor.py           ✅
@@ -562,14 +580,14 @@ factorio-agent/
 │   └── resource_allocator.py        ✅
 │
 ├── agent/
-│   ├── execution_protocol.py        [ Phase 5 ] Protocol, ExecutionResult,
-│   │                                            ExecutionStatus, StuckContext
-│   ├── blackboard.py                [ Phase 5 ] Blackboard interface and
-│   │                                            entry types
-│   ├── subtask.py                   [ Phase 5 ] Subtask, SubtaskStatus,
-│   │                                            subtask stack
-│   ├── self_model.py                [ Phase 5 ] SelfModelProtocol, node/edge
-│   │                                            types, graph interface
+│   ├── execution_protocol.py        ✅ ExecutionLayerProtocol, ExecutionResult,
+│   │                                   ExecutionStatus, StuckContext
+│   ├── blackboard.py                ✅ Blackboard, BlackboardEntry,
+│   │                                   EntryCategory, EntryScope
+│   ├── subtask.py                   ✅ Subtask, SubtaskStatus, SubtaskRecord,
+│   │                                   SubtaskLedger
+│   ├── self_model.py                ✅ SelfModel, SelfModelProtocol,
+│   │                                   node/edge types, BoundingBox
 │   ├── preconditions.py             [ Phase 6 ] Action validity predicates
 │   ├── observation.py               [ Phase 7 ] Goal-conditioned observation
 │   │                                            constructors
@@ -579,10 +597,9 @@ factorio-agent/
 │   ├── loop.py                      [ Phase 12 ]
 │   │
 │   ├── network/
-│   │   ├── agent_protocol.py        [ Phase 5 ] AgentProtocol
-│   │   ├── coordinator.py           [ Phase 5 ] CoordinatorProtocol +
-│   │   │                                        rule-based stub
-│   │   ├── registry.py              [ Phase 5 ] AgentRegistry
+│   │   ├── agent_protocol.py        ✅ AgentProtocol
+│   │   ├── coordinator.py           ✅ CoordinatorProtocol + StubCoordinator
+│   │   ├── registry.py              ✅ AgentRegistry
 │   │   └── agents/
 │   │       ├── navigation.py        [ Phase 6 ] Rule-based movement
 │   │       ├── production.py        [ Phase 8 ] RL production agent
@@ -590,8 +607,8 @@ factorio-agent/
 │   │                                            (internal structure TBD)
 │   │
 │   ├── memory/
-│   │   └── behavioral.py            [ Phase 5 ] BehavioralMemoryProtocol +
-│   │                                            SQLite stub
+│   │   └── behavioral.py            ✅ BehavioralMemoryProtocol +
+│   │                                   SQLiteBehavioralMemory stub
 │   │
 │   └── examiner/
 │       ├── audit_report.py          ✅
@@ -616,6 +633,7 @@ factorio-agent/
 ├── ARCHITECTURE.md                  (this file)
 ├── CONDITION_SCOPE.md               ✅
 ├── REWARD_NAMESPACE.md              ✅
+├── OPEN_DECISIONS.md                ✅
 │
 └── tests/
     ├── fixtures.py                  ✅
@@ -623,7 +641,7 @@ factorio-agent/
     │   ├── bridge/                  ✅
     │   ├── world/                   ✅
     │   ├── planning/                ✅
-    │   └── agent/                   [ Phases 5+ ]
+    │   └── agent/                   ✅ Phase 5 complete (179 tests)
     └── integration/                 ✅ existing; extended each phase
 ```
 
@@ -634,9 +652,9 @@ factorio-agent/
 Each phase produces interfaces before implementations, and tests before or alongside
 code. No phase begins until the previous phase's tests pass.
 
-**Phase 5** produces only interfaces, protocols, and stubs. Tests verify that the
-protocol surface is complete and that stubs satisfy their protocols. No game
-interaction required.
+**Phase 5** produced only interfaces, protocols, and stubs. 179 tests verify that
+the protocol surface is complete, stubs satisfy their protocols, and the SubtaskLedger
+correctly maintains call-stack semantics and history. No game interaction required.
 
 **Phase 6** produces the first runnable system. Tests verify end-to-end execution
 of simple goals without a learned policy.
@@ -661,7 +679,8 @@ When opening a new conversation to implement a component, include:
 1. `ARCHITECTURE.md` — full or relevant sections
 2. `CONDITION_SCOPE.md` — if the component generates or evaluates goal conditions
 3. `REWARD_NAMESPACE.md` — if the component writes or interprets condition strings
-4. The actual source files for all interfaces the component must satisfy or consume
-5. The relevant test files
+4. `OPEN_DECISIONS.md` — if the component touches any open decision
+5. The actual source files for all interfaces the component must satisfy or consume
+6. The relevant test files
 
 The component brief template (from the original architecture document) remains valid.

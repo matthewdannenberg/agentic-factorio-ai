@@ -25,9 +25,9 @@ without restructuring surrounding code.
 
 ## Status
 
-**Phases 1-4 complete.**
-The bridge, world model, and planning layers are fully implemented and tested.
-Phase 5 (execution layer foundation) is next.
+**Phases 1-5 complete.**
+The bridge, world model, planning, and execution layer foundation are fully
+implemented and tested. Phase 6 (navigation agent and rule-based coordinator) is next.
 
 ```
 [✅] Core dataclasses       128 tests passing
@@ -35,7 +35,7 @@ Phase 5 (execution layer foundation) is next.
 [✅] World model            200+ tests passing
 [✅] Planning layer         ~170 tests passing
 [✅] WorldQuery/Writer refactor — all tests passing
-[ ] Phase 5  — Execution layer foundation (protocols and interfaces)
+[✅] Phase 5  — Execution layer foundation   179 tests passing
 [ ] Phase 6  — Navigation agent and rule-based coordinator
 [ ] Phase 7  — Observation and reward infrastructure
 [ ] Phase 8  — Production agent (RL)
@@ -55,15 +55,17 @@ Receives structured factory summaries, not raw game state. Also handles escalati
 when the execution network gets stuck.
 
 **Agent execution network** — a coordinated set of learned agents operating behind
-a clean protocol interface. Communicates internally via a shared blackboard.
-Responsible for everything between receiving a goal and the game state changing.
+a clean protocol interface. Communicates internally via a shared blackboard and
+subtask ledger. Responsible for everything between receiving a goal and the game
+state changing.
 
 **Knowledge and memory system** — three distinct layers:
 - *Game knowledge* (KnowledgeBase) — what the game contains, learned at runtime
-- *Factory self-model* — a graph of what the agent has built this run
+- *Factory self-model* — a graph of logical factory units and their relationships,
+  built incrementally during execution
 - *Behavioral memory* — strategies and patterns accumulated across runs
 
-**Game Interaction** — a dedicated interface to reading the state of the game at 
+**Game Interaction** — a dedicated interface to reading the state of the game at
 any given moment and carrying out actions selected by the execution network in-game.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation.
@@ -76,8 +78,12 @@ factorio-agent/
 ├── world/           # WorldState, WorldQuery, WorldWriter, KnowledgeBase
 ├── planning/        # GoalTree, RewardEvaluator, ResourceAllocator
 ├── agent/
+│   ├── execution_protocol.py  # ExecutionLayerProtocol, ExecutionResult, StuckContext
+│   ├── blackboard.py          # Shared working memory for agents
+│   ├── subtask.py             # Subtask, SubtaskLedger (live stack + history log)
+│   ├── self_model.py          # Factory self-model graph
 │   ├── network/     # Coordinator, agent registry, individual agents
-│   ├── memory/      # Behavioral memory
+│   ├── memory/      # Behavioral memory (SQLite-backed)
 │   └── examiner/    # Rich and mechanical examination
 ├── llm/             # LLM client, prompts, rate limiting
 ├── data/            # Runtime knowledge database (gitignored)
@@ -94,9 +100,15 @@ factorio-agent/
 python -m unittest discover -s tests -v
 
 # By layer
-python -m unittest tests.unit.bridge.test_state_parser
+python -m unittest tests.unit.bridge.test_actions
 python -m unittest tests.unit.world.test_state
 python -m unittest tests.unit.planning.test_goal_tree
+python -m unittest tests.unit.agent.test_blackboard
+python -m unittest tests.unit.agent.test_subtask
+python -m unittest tests.unit.agent.test_self_model
+python -m unittest tests.unit.agent.test_behavioral_memory
+python -m unittest tests.unit.agent.test_execution_protocol
+python -m unittest tests.unit.agent.test_registry
 python -m unittest tests.integration.test_evaluator_capabilities
 ```
 
@@ -161,3 +173,4 @@ RCON_PASSWORD = "factorio"
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — full design, interfaces, data flow, phase plan
 - [`CONDITION_SCOPE.md`](CONDITION_SCOPE.md) — proximal vs non-proximal condition reference
 - [`REWARD_NAMESPACE.md`](REWARD_NAMESPACE.md) — complete reward evaluator namespace reference
+- [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md) — deferred architectural questions
