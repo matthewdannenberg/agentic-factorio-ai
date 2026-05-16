@@ -22,6 +22,7 @@ from planning.goal import Goal, GoalStatus, Priority, RewardSpec
 from agent.network.coordinator import GOAL_TYPE_COLLECTION, RuleBasedCoordinator
 from agent.network.agents.navigation import NavigationAgent
 from agent.network.registry import AgentRegistry
+from agent.self_model import SelfModel
 from agent.blackboard import Blackboard
 from agent.subtask import SubtaskLedger
 
@@ -33,7 +34,7 @@ try:
         host=config.RCON_HOST,
         port=config.RCON_PORT,
         password=config.RCON_PASSWORD,
-        timeout=2.0,
+        timeout_s=2.0,
     )
     client.close()
     _FACTORIO_AVAILABLE = True
@@ -68,6 +69,7 @@ class TestSmokeCollectIron(unittest.TestCase):
             registry=registry,
             blackboard=bb,
             ledger=ledger,
+            self_model=SelfModel(),
         )
         return coordinator, nav
 
@@ -108,17 +110,26 @@ class TestSmokeCollectIron(unittest.TestCase):
         evaluator = RewardEvaluator()
 
         coordinator.reset(goal, wq)
+        start_tick: int = 0
 
         try:
             for poll in range(self.MAX_TICKS // config.TICK_INTERVAL):
-                raw = client.send("/c rcon.print(fa.get_state())")
-                snapshot = parser.parse(raw)
+                raw = client.send(
+                    f"/c __agent__ rcon.print(fa.get_state({{"
+                    f"radius={config.LOCAL_SCAN_RADIUS}, "
+                    f"resource_radius={config.RESOURCE_SCAN_RADIUS}, "
+                    f"item_radius={config.GROUND_ITEM_SCAN_RADIUS}"
+                    f"}}))"
+                )
+                snapshot = parser.parse(raw, live_state.tick)
                 ww.integrate_snapshot(snapshot)
                 tick = live_state.tick
+                if start_tick == 0:
+                    start_tick = tick
 
                 # Check success.
-                result_flags = evaluator.evaluate_conditions(goal, wq, tick)
-                if result_flags.get("success"):
+                result_flags = evaluator.evaluate(goal, wq, tick, start_tick)
+                if result_flags.success:
                     goal.complete(tick)
                     break
 

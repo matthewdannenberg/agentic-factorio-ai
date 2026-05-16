@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 def _lua(expr: str) -> str:
     """Wrap a Lua expression as a Factorio console command."""
-    return f"/c {expr}"
+    return f"/c __agent__ {expr}"
 
 
 def _pos(position: Any) -> str:

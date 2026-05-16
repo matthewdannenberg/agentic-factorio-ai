@@ -39,7 +39,7 @@
 --   /c rcon.print(fa.move_to({x=10, y=20}, true))
 --   /c rcon.print(fa.craft_item("iron-plate", 5))
 
-local fa = {}
+fa = {}
 
 -- ============================================================
 -- Destruction event circular buffer
@@ -1324,10 +1324,6 @@ function fa._find_entity_by_id(player, entity_id)
     return nil
 end
 
--- ============================================================
--- Expose fa as a global
--- ============================================================
-_G.fa = fa
 
 -- Testing: load suite and register as a remote command
 T = require("test_bridge_live")
