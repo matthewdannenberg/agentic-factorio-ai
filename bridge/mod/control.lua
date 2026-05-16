@@ -1199,6 +1199,83 @@ function fa.use_item(item_name, target_position)
     return ok_response()
 end
 
+function fa.rotate_entity(entity_id, reverse)
+    local player = get_player()
+    if not player or not player.valid then return err_response("no_player") end
+
+    local entity = fa._find_entity_by_id(player, entity_id)
+    if not entity then return err_response("entity_not_found") end
+
+    -- entity.rotate() returns true on success, false if the entity does not
+    -- support rotation (e.g. chests, accumulators). Guard with pcall in case
+    -- the prototype does not expose the method at all.
+    local ok, result = pcall(function()
+        return entity.rotate({reverse = reverse or false})
+    end)
+
+    if not ok then
+        return err_response("rotate_failed: " .. tostring(result))
+    end
+    if not result then
+        return err_response("rotate_not_supported")
+    end
+    return ok_response()
+end
+
+function fa.flip_entity(entity_id, horizontal)
+    local player = get_player()
+    if not player or not player.valid then return err_response("no_player") end
+
+    local entity = fa._find_entity_by_id(player, entity_id)
+    if not entity then return err_response("entity_not_found") end
+
+    -- entity.flip() is available in Factorio 2.x for entities that support
+    -- mirroring (oil refineries, chemical plants, etc.). Returns true on
+    -- success, false when the entity type does not allow flipping.
+    -- horizontal=true mirrors left<->right; horizontal=false mirrors top<->bottom.
+    local ok, result = pcall(function()
+        return entity.flip(horizontal)
+    end)
+
+    if not ok then
+        return err_response("flip_failed: " .. tostring(result))
+    end
+    if not result then
+        return err_response("flip_not_supported")
+    end
+    return ok_response()
+end
+
+function fa.set_splitter_priority(entity_id, input_priority, output_priority)
+    local player = get_player()
+    if not player or not player.valid then return err_response("no_player") end
+
+    local entity = fa._find_entity_by_id(player, entity_id)
+    if not entity then return err_response("entity_not_found") end
+
+    -- Verify this is a splitter — only splitters expose input_priority /
+    -- output_priority properties in the Factorio API.
+    if entity.type ~= "splitter" then
+        return err_response("entity_is_not_a_splitter")
+    end
+
+    -- Each priority field is set independently so that passing nil for one
+    -- leaves the existing setting unchanged.
+    local ok, err = pcall(function()
+        if input_priority ~= nil then
+            entity.input_priority = input_priority
+        end
+        if output_priority ~= nil then
+            entity.output_priority = output_priority
+        end
+    end)
+
+    if not ok then
+        return err_response("set_splitter_priority_failed: " .. tostring(err))
+    end
+    return ok_response()
+end
+
 -- ============================================================
 -- VEHICLE stubs
 -- ============================================================

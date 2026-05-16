@@ -15,7 +15,8 @@ from bridge.actions import (
     MoveTo, StopMovement,
     MineResource, MineEntity,
     CraftItem,
-    PlaceEntity, SetRecipe, SetFilter, SetSplitterPriority, ApplyBlueprint,
+    PlaceEntity, SetRecipe, SetFilter, SetSplitterPriority, RotateEntity,
+    FlipEntity, ApplyBlueprint,
     TransferItems,
     SetResearchQueue,
     EquipArmor, UseItem,
@@ -266,6 +267,27 @@ class TestActions(unittest.TestCase):
 
     def test_stop_shooting_category(self):
         self.assertEqual(StopShooting().category, ActionCategory.COMBAT)
+
+    def test_flip_entity_default_horizontal(self):
+        a = FlipEntity(entity_id=1)
+        self.assertTrue(a.horizontal)
+        self.assertEqual(a.category, ActionCategory.BUILDING)
+
+    def test_flip_entity_vertical(self):
+        a = FlipEntity(entity_id=2, horizontal=False)
+        self.assertFalse(a.horizontal)
+        self.assertEqual(a.category, ActionCategory.BUILDING)
+
+    def test_flip_entity_frozen(self):
+        a = FlipEntity(entity_id=1)
+        with self.assertRaises((AttributeError, TypeError)):
+            a.horizontal = False  # type: ignore
+
+    def test_flip_entity_in_building_bucket(self):
+        self.assertIn(FlipEntity, ACTIONS_BY_CATEGORY[ActionCategory.BUILDING])
+
+    def test_flip_entity_in_all_action_types(self):
+        self.assertIn(FlipEntity, ALL_ACTION_TYPES)
 
 
 if __name__ == "__main__":

@@ -16,15 +16,18 @@ from bridge.actions import (
     ApplyBlueprint,
     CraftItem,
     EquipArmor,
+    FlipEntity,
     MineEntity,
     MineResource,
     MoveTo,
     NoOp,
     PlaceEntity,
+    RotateEntity,
     SelectWeapon,
     SetFilter,
     SetRecipe,
     SetResearchQueue,
+    SetSplitterPriority,
     ShootAt,
     StopMovement,
     TransferItems,
@@ -195,6 +198,85 @@ class TestActionExecutor(unittest.TestCase):
         mock_sleep.assert_called_once()
         args = mock_sleep.call_args[0]
         self.assertAlmostEqual(args[0], 1.0, places=2)  # 60/60 = 1s
+
+    def test_rotate_entity_clockwise(self):
+        action = RotateEntity(entity_id=5, reverse=False)
+        self.executor.execute(action)
+        self._assert_lua("fa.rotate_entity")
+        self._assert_lua("5")
+        self._assert_lua("false")
+
+    def test_rotate_entity_counter_clockwise(self):
+        action = RotateEntity(entity_id=8, reverse=True)
+        self.executor.execute(action)
+        self._assert_lua("fa.rotate_entity")
+        self._assert_lua("8")
+        self._assert_lua("true")
+
+    def test_set_splitter_priority_output_only(self):
+        action = SetSplitterPriority(entity_id=11, output_priority="left")
+        self.executor.execute(action)
+        self._assert_lua("fa.set_splitter_priority")
+        self._assert_lua("11")
+        self._assert_lua('"left"')
+        self._assert_lua("nil")   # input_priority is nil
+
+    def test_set_splitter_priority_input_only(self):
+        action = SetSplitterPriority(entity_id=12, input_priority="right")
+        self.executor.execute(action)
+        self._assert_lua("fa.set_splitter_priority")
+        self._assert_lua('"right"')
+
+    def test_set_splitter_priority_both(self):
+        action = SetSplitterPriority(
+            entity_id=13, input_priority="left", output_priority="right"
+        )
+        self.executor.execute(action)
+        self._assert_lua("fa.set_splitter_priority")
+        self._assert_lua("13")
+        self._assert_lua('"left"')
+        self._assert_lua('"right"')
+
+    def test_set_splitter_priority_none_value(self):
+        action = SetSplitterPriority(entity_id=14, output_priority="none")
+        self.executor.execute(action)
+        self._assert_lua('"none"')
+
+    def test_flip_entity_horizontal(self):
+        action = FlipEntity(entity_id=7, horizontal=True)
+        self.executor.execute(action)
+        self._assert_lua("fa.flip_entity")
+        self._assert_lua("7")
+        self._assert_lua("true")
+
+    def test_flip_entity_vertical(self):
+        action = FlipEntity(entity_id=12, horizontal=False)
+        self.executor.execute(action)
+        self._assert_lua("fa.flip_entity")
+        self._assert_lua("12")
+        self._assert_lua("false")
+
+    def test_flip_entity_default_is_horizontal(self):
+        action = FlipEntity(entity_id=3)
+        self.assertTrue(action.horizontal)
+        self.executor.execute(action)
+        self._assert_lua("true")
+
+    def test_flip_not_supported_returns_false(self):
+        client = MockRconClient({
+            "fa.flip_entity": json.dumps({"ok": False, "reason": "flip_not_supported"})
+        })
+        executor = ActionExecutor(client)
+        result = executor.execute(FlipEntity(entity_id=5))
+        self.assertFalse(result)
+
+    def test_rotate_not_supported_returns_false(self):
+        client = MockRconClient({
+            "fa.rotate_entity": json.dumps({"ok": False, "reason": "rotate_not_supported"})
+        })
+        executor = ActionExecutor(client)
+        result = executor.execute(RotateEntity(entity_id=5))
+        self.assertFalse(result)
 
     # --- VEHICLE stubs --------------------------------------------------------
 

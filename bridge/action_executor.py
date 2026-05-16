@@ -39,15 +39,18 @@ from bridge.actions import (
     EnterVehicle,
     EquipArmor,
     ExitVehicle,
+    FlipEntity,
     MineEntity,
     MineResource,
     MoveTo,
     NoOp,
     PlaceEntity,
+    RotateEntity,
     SelectWeapon,
     SetFilter,
     SetRecipe,
     SetResearchQueue,
+    SetSplitterPriority,
     ShootAt,
     StopMovement,
     StopShooting,
@@ -210,6 +213,23 @@ class ActionExecutor:
     def _execute_noop(self, action: NoOp) -> bool:
         return True
 
+    def _execute_set_splitter_priority(self, action: SetSplitterPriority) -> bool:
+        input_lua = f'"{action.input_priority}"' if action.input_priority is not None else "nil"
+        output_lua = f'"{action.output_priority}"' if action.output_priority is not None else "nil"
+        return self._send(
+            f"fa.set_splitter_priority({action.entity_id}, {input_lua}, {output_lua})"
+        )
+
+    def _execute_rotate_entity(self, action: RotateEntity) -> bool:
+        return self._send(
+            f"fa.rotate_entity({action.entity_id}, {str(action.reverse).lower()})"
+        )
+
+    def _execute_flip_entity(self, action: FlipEntity) -> bool:
+        return self._send(
+            f"fa.flip_entity({action.entity_id}, {str(action.horizontal).lower()})"
+        )
+
     # ------------------------------------------------------------------
     # VEHICLE stubs (NotImplementedError until vehicles are needed)
     # ------------------------------------------------------------------
@@ -265,6 +285,9 @@ class ActionExecutor:
         "PlaceEntity":       _execute_place_entity,
         "SetRecipe":         _execute_set_recipe,
         "SetFilter":         _execute_set_filter,
+        "SetSplitterPriority": _execute_set_splitter_priority,
+        "RotateEntity":      _execute_rotate_entity,
+        "FlipEntity":        _execute_flip_entity,
         "ApplyBlueprint":    _execute_apply_blueprint,
         "TransferItems":     _execute_transfer_items,
         "SetResearchQueue":  _execute_set_research_queue,

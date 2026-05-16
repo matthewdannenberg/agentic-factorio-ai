@@ -305,6 +305,34 @@ class RotateEntity(Action):
 
 
 @dataclass(frozen=True)
+class FlipEntity(Action):
+    """
+    Flip (mirror) a placed entity about a horizontal or vertical axis.
+
+    Produces an orientation not achievable through rotation alone. Primarily
+    useful for fluid-handling buildings with asymmetric pipe connections:
+    oil refineries, chemical plants, and similar structures where the pipe
+    layout on one side differs from the other.
+
+    Not all entity types support flip. The bridge returns ok=false with
+    reason="flip_not_supported" when the entity cannot be mirrored. The
+    execution layer should treat this as a non-fatal failure and fall back to
+    rotation if an alternative orientation is acceptable.
+
+    Parameters
+    ----------
+    entity_id  : unit_number of the entity to flip.
+    horizontal : True = flip horizontally (mirror left↔right across the
+                 vertical axis). False = flip vertically (mirror top↔bottom
+                 across the horizontal axis). Defaults to True as this is the
+                 more common case for pipe layout adjustment.
+    """
+    entity_id: int
+    horizontal: bool = True
+    category: ActionCategory = field(default=ActionCategory.BUILDING, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class ApplyBlueprint(Action):
     """
     Paste a blueprint string at a map position.
@@ -547,6 +575,7 @@ ALL_ACTION_TYPES: tuple[type[Action], ...] = (
     SetFilter,
     SetSplitterPriority,
     RotateEntity,
+    FlipEntity,
     ApplyBlueprint,
     # INVENTORY
     TransferItems,
