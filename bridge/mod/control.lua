@@ -943,11 +943,19 @@ function fa.mine_resource(position, resource_name, count)
     if not player or not player.valid then return err_response("no_player") end
     local surface = player.surface
 
-    local resources = surface.find_entities_filtered({
+    -- If resource_name is empty or nil, find whatever resource is at the
+    -- position. This allows the Python side to issue a positional mining
+    -- command without knowing the resource type in advance.
+    local filter = {
         position = position,
         radius   = 1.5,
-        name     = resource_name,
-    })
+        type     = "resource",
+    }
+    if resource_name and resource_name ~= "" then
+        filter.name = resource_name
+    end
+
+    local resources = surface.find_entities_filtered(filter)
     if #resources == 0 then return err_response("no_resource_at_position") end
 
     local target = resources[1]
