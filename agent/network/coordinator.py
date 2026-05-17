@@ -25,7 +25,7 @@ Subtask derivation for "collection"
 ------------------------------------
 1. Find the nearest known resource patch of the required type in resource_map.
 2. Push a mining subtask (success: inventory(item) >= N).
-3. Push a movement subtask as a prerequisite (success: waypoint_reached).
+3. Push an approach subtask as a prerequisite (success: is_at(patch_position)).
    Because of call-stack semantics, push mining first then movement — movement
    executes first and mining activates after movement completes.
 
@@ -242,10 +242,13 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         """
         Prepare for a new goal.
 
-        Clears the blackboard, ledger, and active agent. If seed_subtasks are
-        provided (post-LLM-escalation), pushes them onto the cleared ledger in
-        order instead of deriving from scratch, and selects the agent for the
-        first subtask.
+        Clears the blackboard, ledger, and active agent. Agents are NOT
+        activated here — activate() is called on the selected agent only when
+        a subtask becomes active (via _activate_agent_for_subtask). This
+        enforces the boundary: agents interact with Subtasks, not Goals.
+
+        If seed_subtasks are provided (post-LLM-escalation), pushes them onto
+        the cleared ledger in order and activates the agent for the first one.
         """
         self._bb.clear_all()
         self._ledger.clear()
@@ -256,7 +259,11 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         if seed_subtasks:
             for subtask in reversed(seed_subtasks):
                 self._ledger.push(subtask)
-            self._active_agent = self._select_agent(goal)
+            first = self._ledger.peek()
+            if first is not None:
+                self._active_agent = self._select_agent(goal)
+                if self._active_agent is not None:
+                    self._active_agent.activate(first, self._bb, wq)
             log.info(
                 "Coordinator reset with %d seed subtasks for goal %s",
                 len(seed_subtasks),
@@ -268,14 +275,6 @@ class RuleBasedCoordinator(CoordinatorProtocol):
                 goal.id[:8],
                 getattr(goal, "type", "unknown"),
             )
-
-        # Activate all agents registered for this goal type so they can
-        # configure their observation spaces. Only _active_agent will be
-        # ticked; the others are dormant until selected.
-        goal_type = getattr(goal, "type", "")
-        agents = self._registry.agents_for_goal(goal_type)
-        for agent in agents:
-            agent.activate(goal, self._bb, wq)
 
     def tick(
         self,
@@ -304,8 +303,12 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             result = self._derive_subtasks(goal, wq, tick)
             if result is not None:
                 return result  # STUCK from derivation failure
-            # Derivation succeeded — select the agent for the first subtask.
-            self._active_agent = self._select_agent(goal)
+            # Derivation succeeded — select and activate agent for first subtask.
+            first = self._ledger.peek()
+            if first is not None:
+                self._active_agent = self._select_agent(goal)
+                if self._active_agent is not None:
+                    self._active_agent.activate(first, self._bb, wq)
 
         # --- Evaluate active subtask ---
         active = self._ledger.peek()
@@ -327,10 +330,12 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             self._bb.clear_scope(EntryScope.SUBTASK)
             self._subtask_activated_at = 0
 
-            # Write waypoint and select owner for the next subtask.
+            # Select and activate agent for the next subtask.
             next_subtask = self._ledger.peek()
             if next_subtask is not None:
                 self._active_agent = self._select_agent(goal)
+                if self._active_agent is not None:
+                    self._active_agent.activate(next_subtask, self._bb, wq)
                 self._write_waypoint_for_subtask(next_subtask, wq, tick)
             else:
                 self._active_agent = None
@@ -358,25 +363,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             )
             return self._escalate(goal, tick)
 
-        # Check for waypoint_reached signal from navigation agent.
-        if self._check_waypoint_reached(tick):
-            log.debug("Coordinator detected waypoint_reached for subtask %s", active.id[:8])
-            active.complete(tick)
-            self._ledger.pop()
-            self._bb.clear_scope(EntryScope.SUBTASK)
-            self._subtask_activated_at = 0
-
-            next_subtask = self._ledger.peek()
-            if next_subtask is not None:
-                self._active_agent = self._select_agent(goal)
-                self._write_waypoint_for_subtask(next_subtask, wq, tick)
-            else:
-                self._active_agent = None
-
-            return ExecutionResult(actions=[], status=ExecutionStatus.PROGRESSING)
-
         # --- Tick the active agent ---
-        actions = self._tick_active_agent(self._bb, wq, ww, tick)
+        actions = self._tick_active_agent(active, self._bb, wq, ww, tick)
 
         return ExecutionResult(
             actions=actions,
@@ -442,31 +430,45 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         nearest = min(patches, key=lambda p: p.position.distance_to(player_pos))
         patch_pos = nearest.position
 
-        # Build subtasks. Push mining first (it will be suspended while
-        # movement is active), then push movement (executes first).
-        mining_subtask = Subtask(
-            description=f"Mine {target_count} {resource_type}",
+        # Two subtasks: approach (navigation agent) then gather (mining agent).
+        # Push gather first (suspended), approach second (activates immediately).
+        # Call-stack semantics: last pushed = first executed.
+        gather_subtask = Subtask(
+            description=f"Gather {target_count} {resource_type}",
             success_condition=goal.success_condition,
             failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS}",
             parent_goal_id=goal.id,
             created_at=tick,
             derived_locally=True,
         )
-        movement_subtask = Subtask(
-            description=f"Move to {resource_type} patch at ({patch_pos.x:.0f}, {patch_pos.y:.0f})",
-            success_condition="",   # Completed via waypoint_reached signal
+        gather_subtask.agent_hint = "mining"
+        gather_subtask.resource_type = resource_type
+        gather_subtask.target_position = patch_pos
+
+        # Success condition: player is within interaction range of the patch.
+        # is_at(pos, tolerance) is in the condition eval namespace.
+        approach_success = (
+            f"is_at(Position({patch_pos.x}, {patch_pos.y}), tolerance=1.5)"
+        )
+        approach_subtask = Subtask(
+            description=(
+                f"Approach {resource_type} patch at "
+                f"({patch_pos.x:.0f}, {patch_pos.y:.0f})"
+            ),
+            success_condition=approach_success,
             failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS}",
             parent_goal_id=goal.id,
-            parent_subtask_id=mining_subtask.id,
+            parent_subtask_id=gather_subtask.id,
             created_at=tick,
             derived_locally=True,
         )
+        approach_subtask.agent_hint = "navigation"
+        approach_subtask.target_position = patch_pos
 
-        # Push mining first (suspended), movement second (activates immediately).
-        self._ledger.push(mining_subtask)
-        self._ledger.push(movement_subtask)
+        self._ledger.push(gather_subtask)
+        self._ledger.push(approach_subtask)
 
-        # Write waypoint for the movement subtask.
+        # Write the navigation waypoint for the approach subtask.
         self._bb.write(
             category=EntryCategory.INTENTION,
             scope=EntryScope.SUBTASK,
@@ -482,7 +484,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         )
 
         log.info(
-            "Derived collection subtasks: move to (%s, %s) then mine %d %s",
+            "Derived collection subtasks: approach (%s, %s) then gather %d %s",
             patch_pos.x, patch_pos.y, target_count, resource_type,
         )
         return None  # success
@@ -522,6 +524,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             created_at=tick,
             derived_locally=True,
         )
+        exploration_subtask.agent_hint = "navigation"
+        exploration_subtask.target_position = next_pos
         self._ledger.push(exploration_subtask)
 
         self._bb.write(
@@ -606,11 +610,15 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         """
         Select the agent that will own the current active subtask.
 
-        Phase 6: returns the first agent registered for the goal type, or
-        None if no agents are registered. This is sufficient while there is
-        only one agent per goal type. In Phase 8+ this should be driven by
-        a subtask type tag so that different subtask types within the same
-        goal can route to different agents.
+        Routing priority:
+          1. If the active subtask carries an `agent_hint` field, look for a
+             registered agent whose AGENT_ID matches the hint. This allows the
+             coordinator to route different subtasks within the same goal to
+             different agents without a full subtask-type vocabulary.
+          2. Fall back to the first agent registered for the goal type.
+
+        In Phase 8+ the hint mechanism will be formalised into subtask type
+        tags with a proper registry lookup.
         """
         goal_type = getattr(goal, "type", "")
         agents = self._registry.agents_for_goal(goal_type)
@@ -620,16 +628,36 @@ class RuleBasedCoordinator(CoordinatorProtocol):
                 goal_type,
             )
             return None
+
+        # Try agent_hint on the active subtask first.
+        active = self._ledger.peek()
+        if active is not None:
+            hint = getattr(active, "agent_hint", None)
+            if hint:
+                for agent in agents:
+                    if getattr(agent, "AGENT_ID", None) == hint or \
+                       getattr(agent.__class__, "AGENT_ID", None) == hint:
+                        log.debug(
+                            "Agent selected by hint %r for subtask %s",
+                            hint, active.id[:8],
+                        )
+                        return agent
+                log.warning(
+                    "agent_hint %r not found among registered agents for %r; "
+                    "falling back to first",
+                    hint, goal_type,
+                )
+
         if len(agents) > 1:
             log.debug(
-                "%d agents registered for %r; selecting first. "
-                "Revisit at Phase 8 when subtask type tags are introduced.",
+                "%d agents for %r, no hint on active subtask; selecting first.",
                 len(agents), goal_type,
             )
         return agents[0]
 
     def _tick_active_agent(
         self,
+        subtask: Subtask,
         blackboard: Blackboard,
         wq: "WorldQuery",
         ww: "WorldWriter",
@@ -638,14 +666,14 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         """
         Tick the single agent that owns the current active subtask.
 
-        Only _active_agent is ticked. All other registered agents are dormant
-        until selected as the owner of a future subtask. Returns the agent's
-        candidate action list, or an empty list if no agent is selected.
+        Passes the active Subtask to the agent — agents interact with
+        Subtasks, not Goals. Only _active_agent is ticked; all other
+        registered agents are dormant until selected for a future subtask.
         """
         if self._active_agent is None:
             return []
         try:
-            return self._active_agent.tick(blackboard, wq, ww, tick)
+            return self._active_agent.tick(subtask, blackboard, wq, ww, tick)
         except Exception:
             log.exception("Active agent %s raised during tick", self._active_agent)
             return []
@@ -679,21 +707,6 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             )
             return False
 
-    def _check_waypoint_reached(self, tick: int) -> bool:
-        """
-        True if the navigation agent has written a waypoint_reached observation
-        in the current subtask scope.
-        """
-        observations = self._bb.read(
-            category=EntryCategory.OBSERVATION,
-            scope=EntryScope.SUBTASK,
-            current_tick=tick,
-        )
-        return any(
-            e.data.get("type") == "waypoint_reached"
-            for e in observations
-        )
-
     def _write_waypoint_for_subtask(
         self,
         subtask: Subtask,
@@ -701,42 +714,88 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         tick: int,
     ) -> None:
         """
-        Write a waypoint INTENTION for a newly-activated subtask.
+        Write a blackboard INTENTION for a newly-activated subtask.
 
-        For mining subtasks, the patch position was recorded during derivation
-        and must be re-derived from the resource_map. This is a best-effort
-        write; if the patch is no longer visible, the mining subtask will
-        time out and escalate.
+        Navigation subtasks get a "waypoint" INTENTION entry, with the
+        target position read directly from subtask.target_position (stored
+        at derivation time — no description parsing needed).
+
+        Mining subtasks get a "mining_task" INTENTION entry, with the
+        resource type and patch position read from subtask attributes.
+
+        The agent_hint on the subtask determines which type to write.
         """
-        # Mining subtasks: write a mine_resource waypoint toward the nearest patch.
-        desc = subtask.description.lower()
-        if "mine" in desc:
-            # Extract resource type from description "Mine N resource-type".
-            parts = desc.split()
-            if len(parts) >= 3:
-                resource_type = parts[-1]  # last word
-                patches = wq.resources_of_type(resource_type)
-                if patches:
-                    player_pos = wq.player_position()
-                    nearest = min(
-                        patches, key=lambda p: p.position.distance_to(player_pos)
-                    )
-                    self._bb.write(
-                        category=EntryCategory.INTENTION,
-                        scope=EntryScope.SUBTASK,
-                        owner_agent="coordinator",
-                        created_at=tick,
-                        data={
-                            "type": "waypoint",
-                            "waypoint_type": "mine_resource",
-                            "target_position": {
-                                "x": nearest.position.x,
-                                "y": nearest.position.y,
-                            },
-                            "target_entity_id": None,
-                            "purpose": f"mine_{resource_type}",
-                        },
-                    )
+        hint = getattr(subtask, "agent_hint", None)
+
+        if hint == "navigation":
+            pos: Optional[Position] = getattr(subtask, "target_position", None)
+            if pos is None:
+                log.warning(
+                    "Navigation subtask %s has no target_position attribute",
+                    subtask.id[:8],
+                )
+                return
+            self._bb.write(
+                category=EntryCategory.INTENTION,
+                scope=EntryScope.SUBTASK,
+                owner_agent="coordinator",
+                created_at=tick,
+                data={
+                    "type": "waypoint",
+                    "waypoint_type": "move",
+                    "target_position": {"x": pos.x, "y": pos.y},
+                    "target_entity_id": None,
+                    "purpose": "approach",
+                },
+            )
+
+        elif hint == "mining":
+            resource_type: str = getattr(subtask, "resource_type", "")
+            pos = getattr(subtask, "target_position", None)
+
+            if not resource_type or pos is None:
+                # Fall back to re-deriving from the resource map.
+                resource_type = self._parse_resource_type_from_description(
+                    subtask.description
+                )
+                if resource_type:
+                    patches = wq.resources_of_type(resource_type)
+                    if patches:
+                        player_pos = wq.player_position()
+                        nearest = min(
+                            patches,
+                            key=lambda p: p.position.distance_to(player_pos),
+                        )
+                        pos = nearest.position
+
+            if not resource_type or pos is None:
+                log.warning(
+                    "Cannot write mining_task for subtask %s — missing "
+                    "resource_type or target_position",
+                    subtask.id[:8],
+                )
+                return
+
+            self._bb.write(
+                category=EntryCategory.INTENTION,
+                scope=EntryScope.SUBTASK,
+                owner_agent="coordinator",
+                created_at=tick,
+                data={
+                    "type": "mining_task",
+                    "task_type": "gather_resource",
+                    "resource_type": resource_type,
+                    "target_position": {"x": pos.x, "y": pos.y},
+                },
+            )
+
+    def _parse_resource_type_from_description(self, description: str) -> str:
+        """
+        Parse the resource type from "Gather N resource-type".
+        Returns the last word of the description.
+        """
+        parts = description.strip().split()
+        return parts[-1] if len(parts) >= 3 else ""
 
 
 # ---------------------------------------------------------------------------
@@ -805,18 +864,33 @@ def _build_condition_namespace(wq: "WorldQuery", tick: int) -> dict:
 
     Mirrors the key entries from RewardEvaluator's namespace. Only the
     subset needed for Phase 6 subtask conditions is included.
+
+    Positional preconditions (is_at, is_reachable) are included so that
+    navigation subtask success conditions can be evaluated directly by the
+    coordinator without any side-channel blackboard signals.
     """
+    from agent.preconditions import is_at as _is_at, is_reachable as _is_reachable
+
     def inventory(item: str) -> int:
         return wq.inventory_count(item)
 
+    def is_at(pos: Position, tolerance: float = 1.5) -> bool:
+        return _is_at(pos, wq, tolerance)
+
+    def is_reachable(entity_id: int) -> bool:
+        return _is_reachable(entity_id, wq)
+
     return {
-        "inventory": inventory,
-        "charted_chunks": wq.charted_chunks,
-        "charted_tiles": wq.charted_tiles,
+        "inventory":        inventory,
+        "is_at":            is_at,
+        "is_reachable":     is_reachable,
+        "Position":         Position,
+        "charted_chunks":   wq.charted_chunks,
+        "charted_tiles":    wq.charted_tiles,
         "charted_area_km2": wq.charted_area_km2,
-        "tick": tick,
-        "wq": wq,
-        "state": wq.state,
+        "tick":             tick,
+        "wq":               wq,
+        "state":            wq.state,
         "True": True,
         "False": False,
         "len": len,
