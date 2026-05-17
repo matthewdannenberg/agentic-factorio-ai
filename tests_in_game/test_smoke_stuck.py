@@ -17,6 +17,7 @@ from planning.goal import Goal, Priority, RewardSpec
 from agent.execution_protocol import ExecutionStatus
 from agent.network.coordinator import GOAL_TYPE_PRODUCTION, RuleBasedCoordinator
 from agent.network.registry import AgentRegistry
+from agent.self_model import SelfModel
 from agent.blackboard import Blackboard
 from agent.subtask import SubtaskLedger
 
@@ -28,7 +29,7 @@ try:
         host=config.RCON_HOST,
         port=config.RCON_PORT,
         password=config.RCON_PASSWORD,
-        timeout=2.0,
+        timeout_s=2.0,
     )
     client.close()
     _FACTORIO_AVAILABLE = True
@@ -47,7 +48,12 @@ class TestSmokeStuck(unittest.TestCase):
         # No agents registered for "production" in Phase 6.
         bb = Blackboard()
         ledger = SubtaskLedger()
-        return RuleBasedCoordinator(registry=registry, blackboard=bb, ledger=ledger)
+        return RuleBasedCoordinator(
+            registry=registry,
+            blackboard=bb,
+            ledger=ledger,
+            self_model=SelfModel(),
+        )
 
     def test_production_goal_returns_stuck_immediately(self):
         from bridge.rcon_client import RconClient
@@ -80,8 +86,14 @@ class TestSmokeStuck(unittest.TestCase):
         ww = WorldWriter(live_state)
         wq = WorldQuery(live_state)
 
-        raw = client.send("/c rcon.print(fa.get_state())")
-        snapshot = parser.parse(raw)
+        raw = client.send(
+            f"/c rcon.print(fa.get_state({{"
+            f"radius={config.LOCAL_SCAN_RADIUS}, "
+            f"resource_radius={config.RESOURCE_SCAN_RADIUS}, "
+            f"item_radius={config.GROUND_ITEM_SCAN_RADIUS}"
+            f"}}))"
+        )
+        snapshot = parser.parse(raw, live_state.tick)
         ww.integrate_snapshot(snapshot)
         client.close()
 
