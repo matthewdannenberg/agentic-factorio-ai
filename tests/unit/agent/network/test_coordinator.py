@@ -289,7 +289,8 @@ class TestCoordinatorCollectionDerivation(unittest.TestCase):
 
         active = coordinator._ledger.peek()
         self.assertIsNotNone(active)
-        self.assertIn("move", active.description.lower())
+        # Approach subtask description starts with "Approach"
+        self.assertIn("Approach", active.description)
         self.assertEqual(active.status, SubtaskStatus.ACTIVE)
 
     def test_waypoint_intention_written_for_movement_subtask(self):
@@ -402,25 +403,21 @@ class TestCoordinatorSubtaskLifecycle(unittest.TestCase):
         # Derive subtasks.
         coordinator.tick(goal, wq, ww, tick=100)
 
-        # Signal waypoint reached to complete movement subtask.
-        coordinator._bb.write(
-            category=EntryCategory.OBSERVATION,
-            scope=EntryScope.SUBTASK,
-            owner_agent="navigation",
-            created_at=101,
-            data={"type": "waypoint_reached", "waypoint_id": "x"},
-        )
-        coordinator.tick(goal, wq, ww, tick=101)
+        # The approach subtask's success_condition is is_at(Position(x, y)).
+        # We advance the player to the patch position so the condition is met.
+        from world.state import WorldState, Inventory, InventorySlot, ExplorationState
+        state_at_patch = WorldState(tick=101)
+        state_at_patch.player.position = patch.position
+        state_at_patch.resource_map = [patch]
+        state_at_patch.player.exploration = ExplorationState(charted_chunks=0)
+        state_at_patch._rebuild_entity_indices()
+        from world.query import WorldQuery
+        wq_at_patch = WorldQuery(state_at_patch)
 
-        # History should have the completed movement subtask.
-        history = coordinator._ledger.history_for(goal.id)
-        # Parent of movement subtask is the mining subtask's id, not goal.id
-        # (because movement is a child of mining in our derivation). So check
-        # that at least one level of history exists.
-        all_history = {
-            k: v
-            for k, v in coordinator._ledger._history.items()
-        }
+        coordinator.tick(goal, wq_at_patch, ww, tick=101)
+
+        # History should have the completed approach subtask.
+        all_history = {k: v for k, v in coordinator._ledger._history.items()}
         total_records = sum(len(v) for v in all_history.values())
         self.assertGreater(total_records, 0)
 
@@ -442,7 +439,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
     def test_active_agent_selected_after_derivation(self):
         registry = AgentRegistry()
         nav = NavigationAgent()
-        registry.register(nav, [GOAL_TYPE_COLLECTION])
+        registry.register(nav)
 
         coordinator = _make_coordinator(registry)
         goal = _make_goal(goal_type=GOAL_TYPE_COLLECTION)
@@ -464,15 +461,15 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
             def __init__(self, name):
                 super().__init__()
                 self._name = name
-            def tick(self, bb, wq, ww, tick):
+            def tick(self, subtask, bb, wq, ww, tick):
                 ticked.append(self._name)
                 return []
-            def activate(self, goal, bb, wq): pass
+            def activate(self, subtask, bb, wq): pass
 
         agent_a = _RecordingAgent("A")
         agent_b = _RecordingAgent("B")
-        registry.register(agent_a, [GOAL_TYPE_COLLECTION])
-        registry.register(agent_b, [GOAL_TYPE_COLLECTION])
+        registry.register(agent_a)
+        registry.register(agent_b)
 
         coordinator = _make_coordinator(registry)
         goal = _make_goal(goal_type=GOAL_TYPE_COLLECTION)
@@ -489,7 +486,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
     def test_active_agent_cleared_on_reset(self):
         registry = AgentRegistry()
         nav = NavigationAgent()
-        registry.register(nav, [GOAL_TYPE_COLLECTION])
+        registry.register(nav)
 
         coordinator = _make_coordinator(registry)
         goal = _make_goal(goal_type=GOAL_TYPE_COLLECTION)
@@ -520,7 +517,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
     def test_active_agent_cleared_on_escalation(self):
         registry = AgentRegistry()
         nav = NavigationAgent()
-        registry.register(nav, [GOAL_TYPE_COLLECTION])
+        registry.register(nav)
 
         coordinator = _make_coordinator(registry)
         goal = _make_goal(goal_type=GOAL_TYPE_COLLECTION)
