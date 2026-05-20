@@ -26,21 +26,23 @@ What the navigation agent does NOT do
 - Evaluate subtask success conditions (coordinator does that)
 - Write to the subtask ledger
 
-Movement model — one-shot, not per-tick
------------------------------------------
-fa.move_to() sets player.character.walking_state, which is continuous: once
-set, the character keeps walking in that direction until changed. We issue
-MoveTo only when the subtask changes or the player stalls. All other ticks
-return [] — the character continues walking from the previous command.
+Movement model — one-shot with suppression
+-------------------------------------------
+fa.move_to() triggers a pathfinding request in the Lua mod; the mod then
+drives walking_state every game tick along the computed path. The Python side
+should issue MoveTo as rarely as possible to avoid cancelling in-flight path
+requests.
 
-This eliminates the jerkiness of per-tick RCON commands: each round-trip
-introduces a pause during which the character is stationary. One-shot movement
-means the character walks continuously at full speed between polls.
+A new MoveTo is issued only when:
+  1. A new waypoint is assigned (different waypoint blackboard entry).
+  2. The target position has changed by more than _REDUNDANT_THRESHOLD tiles
+     from the last-issued target (e.g. an entity has moved).
+  3. The player has been stationary for more than _STALL_GRACE_TICKS ticks
+     since the last command AND the target hasn't changed — indicating the
+     path was lost or the pathfinder returned unreachable.
 
-Re-issue conditions:
-  1. New subtask assigned (activate() was called with a different subtask).
-  2. Player stalled — position hasn't changed by _STOPPED_THRESHOLD tiles
-     since the last tick, suggesting an obstacle or lost walking_state.
+Condition 3 has a minimum wait of _STALL_GRACE_TICKS (default ~3 seconds)
+to give the pathfinder time to return a result before declaring a stall.
 
 Rules
 -----
@@ -74,7 +76,17 @@ AGENT_ID = "navigation"
 # Arrival tolerance (tiles) for position-only waypoints (no entity_id).
 _POSITION_ARRIVAL_TOLERANCE = 1.5
 
-# Position change below this threshold (tiles) between ticks → stalled.
+# Suppress a new MoveTo if the new target is within this many tiles of the
+# last-issued target — avoids cancelling an in-flight pathfinding request
+# just because the waypoint position is slightly different.
+_REDUNDANT_THRESHOLD = 0.5
+
+# Minimum ticks after issuing a MoveTo before stall detection fires.
+# Gives the Lua pathfinder time to compute and the character time to start
+# moving. At 60 tps and TICK_INTERVAL=10, 180 ticks ≈ 3 seconds of polls.
+_STALL_GRACE_TICKS = 180
+
+# Position change below this threshold (tiles) per tick → considered stalled.
 _STOPPED_THRESHOLD = 0.05
 
 
@@ -82,8 +94,8 @@ class NavigationAgent(AgentProtocol):
     """
     Rule-based navigation agent.
 
-    Issues MoveTo once per subtask (or on stall), not every tick, so the
-    character moves continuously between RCON polls.
+    Issues MoveTo only when the waypoint changes, the target moves
+    significantly, or a genuine stall is detected after a grace period.
     """
 
     def __init__(self) -> None:
@@ -91,6 +103,8 @@ class NavigationAgent(AgentProtocol):
         self._waypoints_completed: int = 0
         self._waypoints_total: int = 0
         self._last_issued_waypoint_id: Optional[str] = None
+        self._last_issued_target: Optional[Position] = None
+        self._last_move_tick: int = 0
         self._last_position: Optional[Position] = None
 
     # ------------------------------------------------------------------
@@ -111,6 +125,8 @@ class NavigationAgent(AgentProtocol):
         self._waypoints_completed = 0
         self._waypoints_total = 0
         self._last_issued_waypoint_id = None
+        self._last_issued_target = None
+        self._last_move_tick = 0
         self._last_position = None
 
         pos = wq.player_position()
@@ -174,18 +190,32 @@ class NavigationAgent(AgentProtocol):
             self._last_position = pos
             return [StopMovement()]
 
-        # --- Movement (one-shot) ---
-        is_new = waypoint.id != self._last_issued_waypoint_id
-        is_stalled = self._is_stalled(pos)
+        # --- Movement ---
+        is_new_waypoint = waypoint.id != self._last_issued_waypoint_id
+        target_pos = self._resolve_target(target_entity_id, target_pos_dict, wq)
 
-        if is_new or is_stalled:
-            if is_stalled and not is_new:
-                log.debug("NavigationAgent: stall detected, re-issuing MoveTo")
-            action = self._build_move_action(target_entity_id, target_pos_dict, wq)
-            if action:
-                self._last_issued_waypoint_id = waypoint.id
-                self._last_position = pos
-                return [action]
+        if target_pos is None:
+            self._last_position = pos
+            return []
+
+        is_redundant = self._is_redundant_target(target_pos)
+        grace_elapsed = (tick - self._last_move_tick) >= _STALL_GRACE_TICKS
+        is_stalled = grace_elapsed and self._is_stalled(pos)
+
+        should_issue = is_new_waypoint or not is_redundant or is_stalled
+
+        if should_issue:
+            if is_stalled and not is_new_waypoint:
+                log.debug(
+                    "NavigationAgent: stall detected after %d ticks, re-issuing",
+                    tick - self._last_move_tick,
+                )
+            action = MoveTo(position=target_pos, pathfind=True)
+            self._last_issued_waypoint_id = waypoint.id
+            self._last_issued_target = target_pos
+            self._last_move_tick = tick
+            self._last_position = pos
+            return [action]
 
         self._last_position = pos
         return []
@@ -253,27 +283,42 @@ class NavigationAgent(AgentProtocol):
             return is_at(target, wq, tolerance=_POSITION_ARRIVAL_TOLERANCE)
         return False
 
+    def _resolve_target(
+        self,
+        target_entity_id: Optional[int],
+        target_pos_dict: Optional[dict],
+        wq: "WorldQuery",
+    ) -> Optional[Position]:
+        """Resolve waypoint data to a concrete Position, or None."""
+        if target_entity_id is not None:
+            entity = wq.entity_by_id(target_entity_id)
+            if entity is not None:
+                return entity.position
+        if target_pos_dict is not None:
+            return Position(x=target_pos_dict["x"], y=target_pos_dict["y"])
+        log.warning("NavigationAgent: waypoint has no resolvable target position")
+        return None
+
+    def _is_redundant_target(self, target: Position) -> bool:
+        """
+        True if *target* is within _REDUNDANT_THRESHOLD of the last-issued
+        target — meaning a MoveTo to this position was already sent and the
+        pathfinder is likely still executing it.
+        """
+        if self._last_issued_target is None:
+            return False
+        dx = target.x - self._last_issued_target.x
+        dy = target.y - self._last_issued_target.y
+        return math.sqrt(dx * dx + dy * dy) < _REDUNDANT_THRESHOLD
+
     def _is_stalled(self, current_pos: Position) -> bool:
+        """
+        True if the player hasn't moved since the last tick — the pathfinder
+        may have returned unreachable or the path was lost.
+        Only meaningful after _STALL_GRACE_TICKS have elapsed.
+        """
         if self._last_position is None:
             return False
         dx = current_pos.x - self._last_position.x
         dy = current_pos.y - self._last_position.y
         return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
-
-    def _build_move_action(
-        self,
-        target_entity_id: Optional[int],
-        target_pos_dict: Optional[dict],
-        wq: "WorldQuery",
-    ) -> Optional[Action]:
-        target_pos: Optional[Position] = None
-        if target_entity_id is not None:
-            entity = wq.entity_by_id(target_entity_id)
-            if entity is not None:
-                target_pos = entity.position
-        if target_pos is None and target_pos_dict is not None:
-            target_pos = Position(x=target_pos_dict["x"], y=target_pos_dict["y"])
-        if target_pos is None:
-            log.warning("NavigationAgent: waypoint has no resolvable target position")
-            return None
-        return MoveTo(position=target_pos, pathfind=True)

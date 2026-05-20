@@ -30,7 +30,8 @@
 -- • defines.entity_status entries reorganised — guarded with nil-checks.
 -- • spawner_data removed from unit-spawner; use unit_count instead.
 -- • player.walking_state → player.character.walking_state
--- • move_to now uses all 8 compass directions including diagonals.
+-- • move_to uses surface.request_path() for obstacle-aware pathfinding.
+--   The path result is stored at mod level; on_tick walks waypoints each tick.
 --
 -- Usage from Python (via RCON /c command)
 -- ----------------------------------------
@@ -90,7 +91,7 @@ script.on_event(defines.events.on_entity_died, function(event)
 end)
 
 -- ============================================================
--- Helper utilities
+-- Core helpers — defined first so event handlers can use them
 -- ============================================================
 
 local function get_player()
@@ -105,6 +106,168 @@ local function safe_json(t)
         return '{"ok":false,"reason":"json_serialisation_error"}'
     end
 end
+
+local function ok_response()
+    return '{"ok":true}'
+end
+
+local function err_response(reason)
+    return helpers.table_to_json({ok = false, reason = reason})
+end
+
+-- ============================================================
+-- Persistent movement state (pathfinding)
+-- ============================================================
+-- Movement is driven by Factorio's built-in pathfinder:
+--   1. fa.move_to() requests a path via surface.request_path()
+--   2. on_script_path_request_finished stores the result
+--   3. on_tick walks waypoints one at a time using walking_state
+--
+-- New move orders cancel any in-flight request and start a fresh one.
+-- fa.stop_movement() clears all state and halts.
+
+local movement_goal       = nil   -- {x, y} final target, or nil
+local movement_path       = nil   -- array of {position={x,y}} waypoints, or nil
+local path_request_id     = nil   -- pending request ID, or nil
+local path_waypoint_idx   = 1     -- index into movement_path
+local path_unreachable    = false -- true if last request returned no path
+
+local ARRIVAL_THRESHOLD  = 0.4   -- tiles; final goal arrival
+local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
+
+local function request_movement_path(player)
+    if not player or not player.valid or not player.character then return end
+
+    local ok, id = pcall(function()
+        return player.surface.request_path({
+            bounding_box          = player.character.prototype.collision_box,
+            collision_mask        = player.character.prototype.collision_mask,
+            start                 = player.position,
+            goal                  = movement_goal,
+            force                 = player.force,
+            radius                = ARRIVAL_THRESHOLD,
+            can_open_gates        = true,
+            path_resolution_modifier = 0,
+            entity                = player.character,
+        })
+    end)
+
+    if ok and id then
+        path_request_id   = id
+        movement_path     = nil
+        path_waypoint_idx = 1
+        path_unreachable  = false
+    else
+        -- request_path unavailable or errored — fall back to direct walking.
+        -- This path is taken when the surface is not yet fully loaded.
+        movement_path     = {{position = movement_goal}}
+        path_waypoint_idx = 1
+        path_unreachable  = false
+    end
+end
+
+-- Path result handler.
+script.on_event(defines.events.on_script_path_request_finished, function(event)
+    if event.id ~= path_request_id then return end
+    path_request_id = nil
+
+    if event.try_again_later then
+        -- Pathfinder was busy; retry next tick.
+        local player = get_player()
+        if player and movement_goal then
+            request_movement_path(player)
+        end
+        return
+    end
+
+    if not event.path or #event.path == 0 then
+        -- Destination is unreachable.
+        path_unreachable = true
+        movement_goal    = nil
+        local player = get_player()
+        if player and player.character then
+            player.character.walking_state = {
+                walking   = false,
+                direction = defines.direction.north,
+            }
+        end
+        return
+    end
+
+    movement_path     = event.path
+    path_waypoint_idx = 1
+end)
+
+-- Tick handler: walk waypoints.
+script.on_event(defines.events.on_tick, function(event)
+    if movement_goal == nil and movement_path == nil then return end
+
+    local player = get_player()
+    if not player or not player.valid or not player.character then
+        movement_goal     = nil
+        movement_path     = nil
+        path_request_id   = nil
+        return
+    end
+
+    -- Still waiting for pathfinder result.
+    if movement_path == nil then return end
+
+    local pos = player.position
+
+    -- Check final arrival.
+    if movement_goal then
+        local fx = movement_goal.x - pos.x
+        local fy = movement_goal.y - pos.y
+        if math.abs(fx) < ARRIVAL_THRESHOLD and math.abs(fy) < ARRIVAL_THRESHOLD then
+            player.character.walking_state = {
+                walking   = false,
+                direction = defines.direction.north,
+            }
+            movement_goal     = nil
+            movement_path     = nil
+            path_waypoint_idx = 1
+            return
+        end
+    end
+
+    -- Advance waypoint index if close enough to current waypoint.
+    while path_waypoint_idx <= #movement_path do
+        local wp = movement_path[path_waypoint_idx].position
+        local dx = wp.x - pos.x
+        local dy = wp.y - pos.y
+        if math.abs(dx) < WAYPOINT_THRESHOLD and math.abs(dy) < WAYPOINT_THRESHOLD then
+            path_waypoint_idx = path_waypoint_idx + 1
+        else
+            break
+        end
+    end
+
+    -- All waypoints consumed — wait for final arrival check next tick.
+    if path_waypoint_idx > #movement_path then return end
+
+    -- Walk toward current waypoint.
+    local wp = movement_path[path_waypoint_idx].position
+    local dx = wp.x - pos.x
+    local dy = wp.y - pos.y
+    local ax, ay = math.abs(dx), math.abs(dy)
+    local dir
+    if ax > ay * 2 then
+        dir = dx > 0 and defines.direction.east or defines.direction.west
+    elseif ay > ax * 2 then
+        dir = dy > 0 and defines.direction.south or defines.direction.north
+    elseif dx > 0 and dy > 0 then
+        dir = defines.direction.southeast
+    elseif dx > 0 and dy < 0 then
+        dir = defines.direction.northeast
+    elseif dx < 0 and dy > 0 then
+        dir = defines.direction.southwest
+    else
+        dir = defines.direction.northwest
+    end
+
+    player.character.walking_state = {walking = true, direction = dir}
+end)
 
 -- 2.x: defines.entity_status was reorganised. Guard each lookup with a nil
 -- sentinel so that removed or renamed entries fall through to "unknown"
@@ -875,17 +1038,11 @@ end
 -- Action command functions
 -- ============================================================
 
-local function ok_response()
-    return '{"ok":true}'
-end
-
-local function err_response(reason)
-    return helpers.table_to_json({ok = false, reason = reason})
-end
-
--- 2.x: walking_state is on player.character, not the player object directly.
--- Supports all 8 compass directions; uses a diagonal when the angle to the
--- target is within 45° of a diagonal (2:1 ratio threshold on axis displacement).
+-- fa.move_to: request a pathfound route to the target position.
+-- The on_tick handler drives walking_state along the path each game tick.
+-- New calls cancel any in-flight request and start a fresh one immediately.
+-- The pathfind parameter is accepted for API compatibility but ignored —
+-- the built-in pathfinder is always used.
 function fa.move_to(position, pathfind)
     local player = get_player()
     if not player or not player.valid or not player.character then
@@ -895,8 +1052,12 @@ function fa.move_to(position, pathfind)
     local dx = position.x - player.position.x
     local dy = position.y - player.position.y
 
-    -- Close enough — halt and return success so the execution layer stops looping.
-    if math.abs(dx) < 0.5 and math.abs(dy) < 0.5 then
+    -- Already at destination.
+    if math.abs(dx) < ARRIVAL_THRESHOLD and math.abs(dy) < ARRIVAL_THRESHOLD then
+        movement_goal     = nil
+        movement_path     = nil
+        path_request_id   = nil
+        path_unreachable  = false
         player.character.walking_state = {
             walking   = false,
             direction = defines.direction.north,
@@ -904,28 +1065,14 @@ function fa.move_to(position, pathfind)
         return ok_response()
     end
 
-    if not pathfind then
-        player.teleport({x = position.x, y = position.y})
-        return ok_response()
-    end
+    -- Cancel any previous request and start a new one.
+    movement_goal    = {x = position.x, y = position.y}
+    movement_path    = nil
+    path_request_id  = nil
+    path_unreachable = false
+    path_waypoint_idx = 1
 
-    local ax, ay = math.abs(dx), math.abs(dy)
-    local dir
-    if ax > ay * 2 then
-        dir = dx > 0 and defines.direction.east or defines.direction.west
-    elseif ay > ax * 2 then
-        dir = dy > 0 and defines.direction.south or defines.direction.north
-    elseif dx > 0 and dy > 0 then
-        dir = defines.direction.southeast
-    elseif dx > 0 and dy < 0 then
-        dir = defines.direction.northeast
-    elseif dx < 0 and dy > 0 then
-        dir = defines.direction.southwest
-    else
-        dir = defines.direction.northwest
-    end
-
-    player.character.walking_state = {walking = true, direction = dir}
+    request_movement_path(player)
     return ok_response()
 end
 
@@ -934,8 +1081,31 @@ function fa.stop_movement()
     if not player or not player.valid or not player.character then
         return err_response("no_character")
     end
+    movement_goal     = nil
+    movement_path     = nil
+    path_request_id   = nil
+    path_unreachable  = false
+    path_waypoint_idx = 1
     player.character.walking_state = {walking = false, direction = defines.direction.north}
     return ok_response()
+end
+
+-- Returns the current movement state for Python-side inspection.
+-- status: "idle" | "pathing" | "walking" | "unreachable"
+function fa.get_movement_status()
+    if path_unreachable then
+        return safe_json({ok = true, status = "unreachable"})
+    end
+    if movement_goal == nil and movement_path == nil then
+        return safe_json({ok = true, status = "idle"})
+    end
+    if path_request_id ~= nil then
+        return safe_json({ok = true, status = "pathing"})
+    end
+    return safe_json({ok = true, status = "walking",
+        waypoint = path_waypoint_idx,
+        total_waypoints = movement_path and #movement_path or 0,
+    })
 end
 
 function fa.mine_resource(position, resource_name, count)
@@ -943,19 +1113,11 @@ function fa.mine_resource(position, resource_name, count)
     if not player or not player.valid then return err_response("no_player") end
     local surface = player.surface
 
-    -- If resource_name is empty or nil, find whatever resource is at the
-    -- position. This allows the Python side to issue a positional mining
-    -- command without knowing the resource type in advance.
-    local filter = {
+    local resources = surface.find_entities_filtered({
         position = position,
         radius   = 1.5,
-        type     = "resource",
-    }
-    if resource_name and resource_name ~= "" then
-        filter.name = resource_name
-    end
-
-    local resources = surface.find_entities_filtered(filter)
+        name     = resource_name,
+    })
     if #resources == 0 then return err_response("no_resource_at_position") end
 
     local target = resources[1]
