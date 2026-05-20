@@ -74,6 +74,9 @@ class GoalQueueEntry:
     milestone_rewards: dict = field(default_factory=dict)
     time_discount: float = 1.0
     calibration_notes: str = ""
+    # clear_region goals: bounding box and mode
+    bounding_box: Optional[dict] = None    # {"x_min","y_min","x_max","y_max"}
+    clear_mode: Optional[str] = None       # "clear_all" | "clear_natural"
 
     def to_goal(self) -> Goal:
         """Construct a Goal from this entry."""
@@ -92,6 +95,10 @@ class GoalQueueEntry:
         # Store the goal type as a dynamic attribute — the coordinator reads it
         # via getattr(goal, "type", "") to determine derivation strategy.
         goal.type = self.goal_type
+        if self.bounding_box is not None:
+            goal.bounding_box = self.bounding_box
+        if self.clear_mode is not None:
+            goal.clear_mode = self.clear_mode
         return goal
 
     @classmethod

@@ -89,9 +89,14 @@ GOAL_TYPE_PRODUCTION   = "production"
 GOAL_TYPE_CONSTRUCTION = "construction"
 GOAL_TYPE_EXPLORATION  = "exploration"
 GOAL_TYPE_RESEARCH     = "research"
+GOAL_TYPE_CLEAR        = "clear_region"
 
 # Goal types the Phase 6 coordinator can derive subtask trees for.
-_DERIVABLE_TYPES = {GOAL_TYPE_COLLECTION, GOAL_TYPE_EXPLORATION}
+_DERIVABLE_TYPES = {
+    GOAL_TYPE_COLLECTION,
+    GOAL_TYPE_EXPLORATION,
+    GOAL_TYPE_CLEAR,
+}
 
 # Subtask failure timeout: if a subtask's explicit failure_condition has not
 # fired but the subtask has been active for this many ticks, escalate anyway.
@@ -391,6 +396,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             return self._derive_collection(goal, wq, tick)
         elif goal_type == GOAL_TYPE_EXPLORATION:
             return self._derive_exploration(goal, wq, tick)
+        elif goal_type == GOAL_TYPE_CLEAR:
+            return self._derive_clear(goal, wq, tick)
         else:
             return self._stuck_at_goal_level(goal, tick)
 
@@ -546,6 +553,62 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             "Derived exploration subtask: chart %d chunks (currently %d)",
             target_chunks,
             wq.charted_chunks,
+        )
+        return None
+
+    def _derive_clear(
+        self,
+        goal: Goal,
+        wq: "WorldQuery",
+        tick: int,
+    ) -> Optional[ExecutionResult]:
+        """
+        Derive a subtask for a clear_region goal.
+
+        The goal's metadata must carry a 'bounding_box' dict:
+            {"x_min": f, "y_min": f, "x_max": f, "y_max": f}
+        and optionally 'clear_mode': "clear_all" | "clear_natural" (default).
+
+        The success condition is evaluated normally — typically a tick-based
+        upper bound. The mining agent clears all targets in the box and then
+        sits idle; the success condition fires at the bound or can be written
+        as a proximal entity-count check if the caller prefers.
+        """
+        bbox = getattr(goal, "bounding_box", None)
+        if not bbox:
+            log.warning("clear_region goal %s has no bounding_box attribute", goal.id[:8])
+            return self._stuck_at_goal_level(goal, tick)
+
+        clear_mode = getattr(goal, "clear_mode", "clear_natural")
+
+        clear_subtask = Subtask(
+            description=f"Clear {clear_mode} in region ({bbox})",
+            success_condition=goal.success_condition,
+            failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS}",
+            parent_goal_id=goal.id,
+            created_at=tick,
+            derived_locally=True,
+        )
+        clear_subtask.agent_hint = "mining"
+        clear_subtask.bounding_box = bbox
+        clear_subtask.clear_mode = clear_mode
+        self._ledger.push(clear_subtask)
+
+        # Write the mining_task INTENTION directly.
+        self._bb.write(
+            category=EntryCategory.INTENTION,
+            scope=EntryScope.SUBTASK,
+            owner_agent="coordinator",
+            created_at=tick,
+            data={
+                "type": "mining_task",
+                "task_type": clear_mode,
+                "bounding_box": bbox,
+            },
+        )
+
+        log.info(
+            "Derived clear subtask: %s in %s", clear_mode, bbox
         )
         return None
 
@@ -740,6 +803,25 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             )
 
         elif hint == "mining":
+            # Check if this is a clear subtask (has bounding_box) or a gather.
+            bbox = getattr(subtask, "bounding_box", None)
+            clear_mode = getattr(subtask, "clear_mode", None)
+
+            if bbox is not None:
+                # Clear subtask — re-write the mining_task INTENTION.
+                self._bb.write(
+                    category=EntryCategory.INTENTION,
+                    scope=EntryScope.SUBTASK,
+                    owner_agent="coordinator",
+                    created_at=tick,
+                    data={
+                        "type": "mining_task",
+                        "task_type": clear_mode or "clear_natural",
+                        "bounding_box": bbox,
+                    },
+                )
+                return
+
             resource_type: str = getattr(subtask, "resource_type", "")
             pos = getattr(subtask, "target_position", None)
 
