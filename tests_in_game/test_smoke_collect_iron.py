@@ -63,8 +63,8 @@ class TestSmokeCollectIron(unittest.TestCase):
         registry = AgentRegistry()
         nav = NavigationAgent()
         mining_agent = MiningAgent()
-        registry.register(nav, [GOAL_TYPE_COLLECTION])
-        registry.register(mining_agent, [GOAL_TYPE_COLLECTION])
+        registry.register(nav)
+        registry.register(mining_agent)
 
         bb = Blackboard()
         ledger = SubtaskLedger()

@@ -610,48 +610,38 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         """
         Select the agent that will own the current active subtask.
 
-        Routing priority:
-          1. If the active subtask carries an `agent_hint` field, look for a
-             registered agent whose AGENT_ID matches the hint. This allows the
-             coordinator to route different subtasks within the same goal to
-             different agents without a full subtask-type vocabulary.
-          2. Fall back to the first agent registered for the goal type.
+        Routing:
+          1. Read agent_hint from the active subtask.
+          2. Use registry.agent_by_id(hint) to find the matching agent.
+          3. If no hint or no match, fall back to the first registered agent.
 
-        In Phase 8+ the hint mechanism will be formalised into subtask type
-        tags with a proper registry lookup.
+        The registry is not queried by goal type — agents are selected purely
+        by the subtask's agent_hint matching an agent's AGENT_ID class attribute.
         """
-        goal_type = getattr(goal, "type", "")
-        agents = self._registry.agents_for_goal(goal_type)
-        if not agents:
-            log.warning(
-                "No agents registered for goal type %r — cannot select owner",
-                goal_type,
-            )
-            return None
-
-        # Try agent_hint on the active subtask first.
         active = self._ledger.peek()
         if active is not None:
             hint = getattr(active, "agent_hint", None)
             if hint:
-                for agent in agents:
-                    if getattr(agent, "AGENT_ID", None) == hint or \
-                       getattr(agent.__class__, "AGENT_ID", None) == hint:
-                        log.debug(
-                            "Agent selected by hint %r for subtask %s",
-                            hint, active.id[:8],
-                        )
-                        return agent
+                agent = self._registry.agent_by_id(hint)
+                if agent is not None:
+                    log.debug(
+                        "Agent %r selected by hint for subtask %s",
+                        hint, active.id[:8],
+                    )
+                    return agent
                 log.warning(
-                    "agent_hint %r not found among registered agents for %r; "
-                    "falling back to first",
-                    hint, goal_type,
+                    "agent_hint %r not found in registry; falling back to first",
+                    hint,
                 )
 
+        agents = self._registry.all_agents()
+        if not agents:
+            log.warning("No agents registered — cannot select owner")
+            return None
         if len(agents) > 1:
             log.debug(
-                "%d agents for %r, no hint on active subtask; selecting first.",
-                len(agents), goal_type,
+                "No hint on active subtask; selecting first of %d registered agents",
+                len(agents),
             )
         return agents[0]
 

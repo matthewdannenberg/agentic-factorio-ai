@@ -65,7 +65,7 @@ class TestSmokeExploration(unittest.TestCase):
 
         registry = AgentRegistry()
         nav = NavigationAgent()
-        registry.register(nav, [GOAL_TYPE_EXPLORATION])
+        registry.register(nav)
 
         bb = Blackboard()
         ledger = SubtaskLedger()

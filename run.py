@@ -69,10 +69,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--password", default=config.RCON_PASSWORD)
     return p
 
-
 from llm.goal_source import GoalQueue, GoalQueueEntry
 def _build_goal_queue(args) -> "GoalQueue":
-
     if args.goals:
         return GoalQueue.from_file(args.goals, loop_forever=args.loop)
 
@@ -127,11 +125,7 @@ def main() -> None:
     from agent.network.registry import AgentRegistry
     from agent.network.agents.navigation import NavigationAgent
     from agent.network.agents.mining import MiningAgent
-    from agent.network.coordinator import (
-        RuleBasedCoordinator,
-        GOAL_TYPE_COLLECTION,
-        GOAL_TYPE_EXPLORATION,
-    )
+    from agent.network.coordinator import RuleBasedCoordinator
     from agent.loop import FactorioLoop, LoopConfig
     from planning.reward_evaluator import RewardEvaluator
 
@@ -151,8 +145,8 @@ def main() -> None:
     mine_agent  = MiningAgent()
 
     registry = AgentRegistry()
-    registry.register(nav_agent,  [GOAL_TYPE_COLLECTION, GOAL_TYPE_EXPLORATION])
-    registry.register(mine_agent, [GOAL_TYPE_COLLECTION])
+    registry.register(nav_agent)
+    registry.register(mine_agent)
 
     blackboard = Blackboard()
     ledger     = SubtaskLedger()

@@ -1,18 +1,19 @@
 """
 agent/network/registry.py
 
-AgentRegistry — maps goal types to the agents responsible for handling them.
+AgentRegistry — a simple ordered registry of AgentProtocol instances.
 
-The registry is populated at startup by the main loop. When a goal arrives,
-the coordinator queries the registry for the relevant agents and activates them.
+Agents are registered directly without goal-type annotations. The coordinator
+selects the appropriate agent for each subtask using the agent_hint mechanism
+(a string matching the agent's AGENT_ID class attribute). This keeps routing
+logic in the coordinator where it belongs and keeps the registry free of any
+knowledge about goals or subtask types.
 
 Rules
 -----
 - Pure data structure. No LLM calls. No game interaction.
-- An agent may be registered for multiple goal types.
-- An unknown goal type returns an empty list (not an error) — the coordinator
-  handles the missing-agent case by escalating to STUCK.
-- Registration is append-order-stable; agents_for_goal preserves insertion order.
+- Registration is append-order-stable; all_agents() preserves insertion order.
+- Duplicate registration (by object identity) is silently ignored.
 """
 
 from __future__ import annotations
@@ -22,87 +23,60 @@ from agent.network.agent_protocol import AgentProtocol
 
 class AgentRegistry:
     """
-    Registry mapping goal type strings to AgentProtocol instances.
+    Registry of AgentProtocol instances available to the coordinator.
 
-    Goal types are arbitrary strings matching the 'type' field conventions
-    used by the LLM layer when producing Goal objects (e.g. "production",
-    "exploration", "research", "construction").
+    Agents are registered once at startup. The coordinator calls all_agents()
+    to get the full list and selects the appropriate one based on the active
+    subtask's agent_hint and each agent's AGENT_ID class attribute.
 
     Usage
     -----
         registry = AgentRegistry()
-        registry.register(navigation_agent, ["exploration", "construction"])
-        registry.register(production_agent, ["production"])
+        registry.register(navigation_agent)
+        registry.register(mining_agent)
 
-        agents = registry.agents_for_goal("production")
-        # -> [production_agent]
+        # Coordinator selects from registry.all_agents() using agent_hint.
     """
 
     def __init__(self) -> None:
-        # goal_type -> ordered list of agents (preserves registration order)
-        self._by_goal_type: dict[str, list[AgentProtocol]] = {}
-        # all agents (deduped, preserves first-registration order)
-        self._all: list[AgentProtocol] = []
-        self._all_set: set[int] = set()   # id() of registered agents
+        self._agents: list[AgentProtocol] = []
+        self._agent_ids: set[int] = set()   # id() of registered agents
 
-    def register(
-        self,
-        agent: AgentProtocol,
-        goal_types: list[str],
-    ) -> None:
+    def register(self, agent: AgentProtocol) -> None:
         """
-        Register an agent for one or more goal types.
+        Register an agent.
 
-        If the agent has already been registered (by object identity) it is
-        not added to all_agents() again, but it will be added to the bucket
-        for any new goal types.
-
-        Parameters
-        ----------
-        agent      : Agent instance satisfying AgentProtocol.
-        goal_types : Non-empty list of goal type strings this agent handles.
-
-        Raises ValueError if goal_types is empty.
+        Duplicate registration by object identity is silently ignored.
+        Preserves insertion order.
         """
-        if not goal_types:
-            raise ValueError("goal_types must be non-empty")
+        if id(agent) not in self._agent_ids:
+            self._agents.append(agent)
+            self._agent_ids.add(id(agent))
 
-        # Track agent in all_agents list (dedup by identity)
-        if id(agent) not in self._all_set:
-            self._all.append(agent)
-            self._all_set.add(id(agent))
-
-        for goal_type in goal_types:
-            bucket = self._by_goal_type.setdefault(goal_type, [])
-            # Dedup within bucket by identity
-            if not any(a is agent for a in bucket):
-                bucket.append(agent)
-
-    def agents_for_goal(self, goal_type: str) -> list[AgentProtocol]:
+    def all_agents(self) -> list[AgentProtocol]:
         """
-        Return the agents registered for the given goal type.
-
-        Returns an empty list (not an error) if no agent is registered for
-        the type. The coordinator handles this by returning STUCK.
+        Return all registered agents in insertion order.
 
         Returns a shallow copy — modifying the result does not affect the
         registry.
         """
-        return list(self._by_goal_type.get(goal_type, []))
+        return list(self._agents)
 
-    def all_agents(self) -> list[AgentProtocol]:
+    def agent_by_id(self, agent_id: str) -> AgentProtocol | None:
         """
-        Return all registered agents in first-registration order.
+        Return the first registered agent whose AGENT_ID class attribute
+        matches *agent_id*, or None if not found.
 
-        Returns a shallow copy.
+        This is the primary lookup used by the coordinator when routing
+        subtasks via agent_hint.
         """
-        return list(self._all)
+        for agent in self._agents:
+            if getattr(type(agent), "AGENT_ID", None) == agent_id:
+                return agent
+        return None
 
-    def registered_goal_types(self) -> list[str]:
-        """Return all goal types that have at least one registered agent."""
-        return list(self._by_goal_type.keys())
+    def __len__(self) -> int:
+        return len(self._agents)
 
     def __repr__(self) -> str:
-        type_count = len(self._by_goal_type)
-        agent_count = len(self._all)
-        return f"AgentRegistry({agent_count} agents, {type_count} goal types)"
+        return f"AgentRegistry({len(self._agents)} agents)"

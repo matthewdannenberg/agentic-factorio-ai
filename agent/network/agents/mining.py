@@ -99,6 +99,8 @@ class MiningAgent(AgentProtocol):
     NavigationAgent's job.
     """
 
+    AGENT_ID = "mining"   # class attribute — matched by registry.agent_by_id()
+
     def __init__(self) -> None:
         self._current_subtask: Optional["Subtask"] = None
         self._subtask_kind: _SubtaskKind = _SubtaskKind.UNKNOWN

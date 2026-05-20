@@ -98,6 +98,8 @@ class NavigationAgent(AgentProtocol):
     significantly, or a genuine stall is detected after a grace period.
     """
 
+    AGENT_ID = "navigation"   # class attribute — matched by registry.agent_by_id()
+
     def __init__(self) -> None:
         self._current_subtask: Optional["Subtask"] = None
         self._waypoints_completed: int = 0
