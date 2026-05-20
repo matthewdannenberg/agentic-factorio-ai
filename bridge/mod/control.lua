@@ -138,17 +138,23 @@ local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
 local function request_movement_path(player)
     if not player or not player.valid or not player.character then return end
 
+    -- Use plain table literals for bounding_box and collision_mask.
+    -- Passing prototype.collision_box / prototype.collision_mask directly
+    -- passes complex Factorio objects that request_path cannot interpret,
+    -- causing the pathfinder to return an empty path even for reachable goals.
+    --
+    -- Character bounding box: 0.4 x 0.4 tiles centred on position.
+    -- Collision layer: "player-layer" is the character's layer in Factorio 2.x.
     local ok, id = pcall(function()
         return player.surface.request_path({
-            bounding_box          = player.character.prototype.collision_box,
-            collision_mask        = player.character.prototype.collision_mask,
-            start                 = player.position,
-            goal                  = movement_goal,
-            force                 = player.force,
-            radius                = ARRIVAL_THRESHOLD,
-            can_open_gates        = true,
-            path_resolution_modifier = 0,
-            entity                = player.character,
+            bounding_box = {{-0.2, -0.2}, {0.2, 0.2}},
+            collision_mask = {"player-layer"},
+            start  = player.position,
+            goal   = movement_goal,
+            force  = player.force,
+            radius = ARRIVAL_THRESHOLD,
+            can_open_gates            = true,
+            path_resolution_modifier  = 0,
         })
     end)
 
