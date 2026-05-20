@@ -88,7 +88,8 @@ factorio-agent/
 ├── llm/             # LLM client, prompts, rate limiting
 ├── data/            # Runtime knowledge database (gitignored)
 ├── config.py        # All tunable parameters
-└── tests/           # Unit and integration tests
+├── tests/           # Unit and integration tests
+└── tests_in_game/   # Integration tests run with an active Factorio instance
 ```
 
 ## Running the Tests
@@ -112,13 +113,80 @@ python -m unittest tests.unit.agent.test_registry
 python -m unittest tests.integration.test_evaluator_capabilities
 ```
 
-### In-game integration tests
+### In-game mod tests
 
 Once the mod is installed and Factorio is running with RCON enabled:
 
 ```lua
 /c require("test_bridge_live")
 ```
+
+### In-Game Tests
+
+Tests in this directory require a live Factorio instance with RCON enabled.
+They are kept separate from `tests/` so that `pytest tests/` runs cleanly
+without a game connection.
+
+#### Running
+
+Start Factorio with RCON enabled (see README.md in the project root for the
+full setup), then:
+
+```bash
+# All in-game tests
+pytest tests_in_game/ -v
+
+# One category
+pytest tests_in_game/02_collection/ -v
+
+# One file
+pytest tests_in_game/02_collection/test_collect_iron.py -v
+```
+
+If Factorio is not reachable the entire session is skipped with a clear message.
+
+#### Directory structure
+
+Subdirectories of tests_in_game/ are numbered to express dependencies and natural execution order:
+
+```
+01_knowledge/   KB population — should run first; other tests benefit from a warm KB
+02_collection/  Resource gathering goals
+03_exploration/ Exploration goals
+```
+
+Within a directory, files run in alphabetical order (pytest default).
+
+#### Design principles
+
+**Tests run through the real loop.** Every test feeds a `GoalQueueEntry` to
+`FactorioLoop` via the `run_goal` or `run_goals` fixture in `conftest.py`.
+No test calls bridge, coordinator, or agent code directly. This ensures the
+test exercises the same code path as production.
+
+**Short failure conditions.** Test goals use tight failure conditions (≤ 3600
+ticks, ≈ 1 minute) so a broken agent fails fast rather than timing out after 5+
+minutes.
+
+**Isolation.** Each `run_goal` / `run_goals` call gets a fresh Blackboard,
+SubtaskLedger, SelfModel, and BehavioralMemory. Only the KnowledgeBase persists
+across the session — it accumulates entity and recipe knowledge as tests run,
+matching production behaviour.
+
+**Multi-goal sequences.** Use `run_goals([entry_a, entry_b])` when two goals
+should share accumulated world knowledge (KB state) but still run in a clean
+coordinator context. Prefer this over per-test file ordering for tightly
+coupled sequences.
+
+#### Adding new tests
+
+1. Create a file in the appropriate numbered directory (or add a new numbered
+   directory if the category is new).
+2. Use the `run_goal` or `run_goals` fixture — never build the loop manually.
+3. Keep failure conditions at ≤ 3600 ticks unless the task genuinely requires
+   longer (document why if so).
+4. Assert on `stats.goals_completed`, `stats.goals_failed`, and
+   `wq.inventory_count(...)` / `wq.charted_chunks` / etc. as appropriate.
 
 ## Installing the Mod and Connecting
 
