@@ -205,7 +205,7 @@ script.on_event(defines.events.on_script_path_request_finished, function(event)
 end)
 
 -- Tick handler: walk waypoints.
-script.on_event(defines.events.on_tick, function(event)
+local function tick_movement(event)
     if movement_goal == nil and movement_path == nil then return end
 
     local player = get_player()
@@ -273,6 +273,111 @@ script.on_event(defines.events.on_tick, function(event)
     end
 
     player.character.walking_state = {walking = true, direction = dir}
+end
+
+-- ============================================================
+-- Persistent mining state
+-- ============================================================
+-- player.mining_state is cleared by the engine after each mining swing.
+-- We re-apply it every on_tick so mining continues until the target is
+-- exhausted, destroyed, or fa.stop_mining() is called.
+--
+-- For resources: when a tile is exhausted, automatically advance to the
+-- nearest adjacent tile of the same type so the player mines the whole
+-- patch without the Python side re-issuing per tile.
+--
+-- For entities: when the entity is destroyed, clear and stop.
+
+local mining_target        = nil   -- {type, position, resource_name, entity_id}
+local MINING_SEARCH_RADIUS = 2.0   -- tiles; search for next resource tile
+
+local function clear_mining_state(player)
+    mining_target = nil
+    if player and player.valid then
+        player.mining_state = {mining = false, position = player.position}
+    end
+end
+
+local function find_resource_near(surface, position, resource_name, radius)
+    local filter = {position = position, radius = radius, type = "resource"}
+    if resource_name and resource_name ~= "" then filter.name = resource_name end
+    local results = surface.find_entities_filtered(filter)
+    if #results == 0 then return nil end
+    return results[1]
+end
+
+local function tick_mining(event)
+    if mining_target == nil then return end
+
+    local player = get_player()
+    if not player or not player.valid or not player.character then
+        clear_mining_state(nil)
+        return
+    end
+
+    if mining_target.type == "resource" then
+        -- Check whether the current tile still exists.
+        local target = find_resource_near(
+            player.surface, mining_target.position,
+            mining_target.resource_name, 0.5
+        )
+
+        if not target or not target.valid then
+            -- Tile exhausted — find the next one in the patch.
+            local next_tile = find_resource_near(
+                player.surface, mining_target.position,
+                mining_target.resource_name, MINING_SEARCH_RADIUS
+            )
+            if next_tile and next_tile.valid then
+                mining_target.position = {
+                    x = next_tile.position.x, y = next_tile.position.y
+                }
+                player.update_selected_entity(next_tile.position)
+                if player.selected and player.selected.valid then
+                    player.mining_state = {mining=true, position=next_tile.position}
+                end
+            else
+                clear_mining_state(player)  -- patch exhausted
+            end
+            return
+        end
+
+        -- Tile exists — re-apply mining_state this tick.
+        player.update_selected_entity(mining_target.position)
+        if player.selected and player.selected.valid then
+            player.mining_state = {mining=true, position=mining_target.position}
+        end
+
+    elseif mining_target.type == "entity" then
+        -- Check whether the entity still exists.
+        local candidates = player.surface.find_entities_filtered({
+            position = mining_target.position, radius = 1.0,
+        })
+        local target = nil
+        for _, e in ipairs(candidates) do
+            if e.unit_number == mining_target.entity_id then target = e; break end
+        end
+
+        if not target or not target.valid then
+            clear_mining_state(player)  -- entity destroyed
+            return
+        end
+
+        -- Entity exists — re-apply mining_state this tick.
+        player.update_selected_entity(mining_target.position)
+        player.mining_state = {mining=true, position=mining_target.position}
+    end
+end
+
+-- ============================================================
+-- Single on_tick dispatcher
+-- ============================================================
+-- All per-tick logic is routed through here. Add new tick_* functions above
+-- and call them from this dispatcher — never register a second on_tick handler.
+
+script.on_event(defines.events.on_tick, function(event)
+    tick_movement(event)
+    tick_mining(event)
 end)
 
 -- 2.x: defines.entity_status was reorganised. Guard each lookup with a nil
@@ -1117,27 +1222,31 @@ end
 function fa.mine_resource(position, resource_name, count)
     local player = get_player()
     if not player or not player.valid then return err_response("no_player") end
-    local surface = player.surface
 
-    local resources = surface.find_entities_filtered({
-        position = position,
-        radius   = 1.5,
-        name     = resource_name,
-    })
-    if #resources == 0 then return err_response("no_resource_at_position") end
+    -- Use find_resource_near (defined in persistent mining state section)
+    -- to handle empty resource_name gracefully.
+    local target = find_resource_near(player.surface, position, resource_name, 1.5)
+    if not target then return err_response("no_resource_at_position") end
 
-    local target = resources[1]
-    local reach  = (player.character and player.character.reach_distance) or 6
-    local dist   = math.sqrt(
+    local reach = (player.character and player.character.reach_distance) or 6
+    local dist  = math.sqrt(
         (player.position.x - target.position.x)^2 +
         (player.position.y - target.position.y)^2
     )
     if dist > reach + 2 then return err_response("out_of_reach") end
 
+    -- Store target; on_tick re-applies mining_state every game tick and
+    -- advances to the next tile automatically when this one is exhausted.
+    mining_target = {
+        type          = "resource",
+        position      = {x = target.position.x, y = target.position.y},
+        resource_name = target.name,
+    }
     player.update_selected_entity(target.position)
     if player.selected and player.selected.valid then
         player.mining_state = {mining = true, position = target.position}
     else
+        mining_target = nil
         return err_response("cannot_select_resource")
     end
     return ok_response()
@@ -1155,10 +1264,7 @@ function fa.mine_entity(entity_id)
         radius   = reach + 2,
     })
     for _, e in ipairs(candidates) do
-        if e.unit_number == entity_id then
-            target = e
-            break
-        end
+        if e.unit_number == entity_id then target = e; break end
     end
     if not target or not target.valid then return err_response("entity_not_found") end
 
@@ -1168,9 +1274,34 @@ function fa.mine_entity(entity_id)
     )
     if dist > reach + 2 then return err_response("out_of_reach") end
 
+    -- Store target; on_tick re-applies mining_state every game tick until
+    -- the entity is destroyed.
+    mining_target = {
+        type      = "entity",
+        position  = {x = target.position.x, y = target.position.y},
+        entity_id = entity_id,
+    }
     player.update_selected_entity(target.position)
     player.mining_state = {mining = true, position = target.position}
     return ok_response()
+end
+
+function fa.stop_mining()
+    local player = get_player()
+    clear_mining_state(player)
+    return ok_response()
+end
+
+function fa.get_mining_status()
+    if mining_target == nil then
+        return safe_json({ok = true, status = "idle"})
+    end
+    return safe_json({
+        ok     = true,
+        status = "mining",
+        type   = mining_target.type,
+        position = mining_target.position,
+    })
 end
 
 function fa.craft_item(recipe_name, count)

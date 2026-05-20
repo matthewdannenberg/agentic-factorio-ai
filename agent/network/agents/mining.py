@@ -68,7 +68,10 @@ AGENT_ID = "mining"
 _DEFAULT_REACH = 6.0
 
 # Ticks to wait after issuing a mining command before checking for stall.
-_MINING_GRACE_TICKS = 30
+# Mining a single ore tile or entity takes several seconds; this must be
+# long enough that we don't re-issue while the first swing is still in
+# progress. At 60 tps, 300 ticks = 5 seconds — conservative but safe.
+_MINING_GRACE_TICKS = 300
 
 # Ticks to wait after issuing a move command before checking for stall.
 _MOVE_GRACE_TICKS = 10
