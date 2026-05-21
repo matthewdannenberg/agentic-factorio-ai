@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from bridge.action_executor import ActionExecutor
     from bridge.rcon_client import RconClient
     from bridge.state_parser import StateParser
+    from bridge.world_poller import WorldPoller
     from llm.goal_source import GoalSource
 
 log = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ class FactorioLoop:
     ----------
     client          : Connected RconClient.
     parser          : StateParser for converting raw RCON output to WorldState.
+    poller          : WorldPoller for sending fa.get_state and returning JSON.
     executor        : ActionExecutor for dispatching Action objects to Factorio.
     coordinator     : CoordinatorProtocol implementation.
     goal_source     : GoalSource implementation (GoalQueue or real LLM).
@@ -124,6 +126,7 @@ class FactorioLoop:
         self,
         client: "RconClient",
         parser: "StateParser",
+        poller: "WorldPoller",
         executor: "ActionExecutor",
         coordinator: "CoordinatorProtocol",
         goal_source: "GoalSource",
@@ -134,6 +137,7 @@ class FactorioLoop:
     ) -> None:
         self._client       = client
         self._parser       = parser
+        self._poller       = poller
         self._executor     = executor
         self._coordinator  = coordinator
         self._goal_source  = goal_source
@@ -271,21 +275,11 @@ class FactorioLoop:
         time.sleep(self._cfg.tick_interval / 60.0)
 
     def _poll_world(self) -> None:
-        """Send a get_state command and integrate the snapshot."""
-        cmd = (
-            f"fa.get_state({{"
-            f"radius={self._cfg.local_scan_radius}, "
-            f"resource_radius={self._cfg.resource_scan_radius}, "
-            f"item_radius={self._cfg.ground_item_scan_radius}"
-            f"}})"
-        )
-        try:
-            raw = self._client.send(cmd)
-            if raw:
-                snapshot = self._parser.parse(raw, self._state.tick)
-                self._ww.integrate_snapshot(snapshot)
-        except Exception:
-            log.exception("FactorioLoop: world poll failed")
+        """Poll Factorio for a world state snapshot and integrate it."""
+        raw = self._poller.poll()
+        if raw:
+            snapshot = self._parser.parse(raw, self._state.tick)
+            self._ww.integrate_snapshot(snapshot)
 
     # ------------------------------------------------------------------
     # Goal lifecycle

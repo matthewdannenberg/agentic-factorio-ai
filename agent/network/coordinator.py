@@ -233,6 +233,10 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # Tick at which the current active subtask was activated (for timeout).
         # PLACEHOLDER — see _SUBTASK_TIMEOUT_TICKS comment above.
         self._subtask_activated_at: int = 0
+        # Set to True when _derive_subtasks fails so we don't re-attempt
+        # derivation on every subsequent tick (which would spam STUCK events).
+        # Cleared by reset() when a new goal starts.
+        self._derivation_failed: bool = False
 
     # ------------------------------------------------------------------
     # CoordinatorProtocol
@@ -260,6 +264,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         self._current_goal = goal
         self._active_agent = None
         self._subtask_activated_at = 0
+        self._derivation_failed = False
 
         if seed_subtasks:
             for subtask in reversed(seed_subtasks):
@@ -305,9 +310,17 @@ class RuleBasedCoordinator(CoordinatorProtocol):
 
         # --- Derive subtasks if ledger is empty ---
         if not self._ledger:
+            if self._derivation_failed:
+                # Already failed to derive on a previous tick — don't retry
+                # every tick, which would spam STUCK events. Return WAITING so
+                # the loop continues polling until the failure_condition fires.
+                return ExecutionResult(actions=[], status=ExecutionStatus.WAITING)
+
             result = self._derive_subtasks(goal, wq, tick)
             if result is not None:
-                return result  # STUCK from derivation failure
+                # Derivation failed — mark so we don't retry next tick.
+                self._derivation_failed = True
+                return result
             # Derivation succeeded — select and activate agent for first subtask.
             first = self._ledger.peek()
             if first is not None:

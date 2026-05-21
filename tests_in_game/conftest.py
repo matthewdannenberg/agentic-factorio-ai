@@ -67,6 +67,7 @@ from agent.subtask import SubtaskLedger
 from bridge.action_executor import ActionExecutor
 from bridge.prototype_query import make_prototype_query_fn
 from bridge.rcon_client import RconClient
+from bridge.world_poller import WorldPoller
 from bridge.state_parser import StateParser
 from llm.goal_source import GoalQueue, GoalQueueEntry
 from planning.reward_evaluator import RewardEvaluator
@@ -286,9 +287,17 @@ def _execute_goals(
         shutdown_on_empty_queue=True,
     )
 
+    poller = WorldPoller(
+        client=client,
+        local_scan=cfg.local_scan_radius,
+        resource_scan=cfg.resource_scan_radius,
+        item_scan=cfg.ground_item_scan_radius,
+    )
+
     loop = FactorioLoop(
         client=client,
         parser=parser,
+        poller=poller,
         executor=executor,
         coordinator=coordinator,
         goal_source=queue,
