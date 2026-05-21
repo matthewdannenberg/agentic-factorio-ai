@@ -75,6 +75,16 @@ from world.writer import WorldWriter
 
 log = logging.getLogger(__name__)
 
+@pytest.fixture(autouse=True)
+def configure_logging():
+    """Ensure DEBUG logging is active for all in-game tests."""
+    import logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 # ---------------------------------------------------------------------------
 # RCON availability — skip the whole session if Factorio isn't running
@@ -112,6 +122,19 @@ def rcon_client():
     yield client
     client.close()
 
+
+# ---------------------------------------------------------------------------
+# RCON diagnostics — enables bugfixing via print statements in Factorio
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def rcon(rcon_client):
+    """Convenience fixture for raw RCON commands during debugging."""
+    def _send(cmd: str) -> str:
+        result = rcon_client.send(cmd)
+        print(f"\nRCON >> {cmd}\nRCON << {result}")
+        return result
+    return _send
 
 # ---------------------------------------------------------------------------
 # Shared KB — persists across the session, accumulates as tests run
@@ -216,11 +239,12 @@ def _execute_goals(
     queue     = GoalQueue(entries)
     evaluator = RewardEvaluator()
 
-    # Wire the KB's query_fn to the live RCON client. The KB's _query() method
-    # passes expressions like 'rcon.print(fa.get_recipe_prototype("x"))' directly
-    # to query_fn. client.send() expects a full Factorio console command, so we
-    # must prepend "/c " here.
-    kb._query_fn = lambda expr: client.send(f"/c {expr}")
+    # Wire the KB's query_fn to the live RCON client so ensure_* calls can
+    # fetch full prototype data from Factorio. Without this, the KB records
+    # entity/resource names from snapshots but cannot fill prototype details
+    # (ingredients, tech prerequisites, etc.), leaving everything as placeholders.
+    # query_fn is set as an instance attribute since KnowledgeBase has no setter.
+    kb._query_fn = client.send
 
     # StateParser accepts resource_registry (not knowledge_base) — it handles
     # resource patch name registration. KB population (recipes, techs, entities)
