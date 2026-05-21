@@ -21,16 +21,21 @@ with a clear message. Individual test files do not need their own skip guards.
 
 Usage in a test file
 --------------------
-    def test_something(run_goal, wq_snapshot):
+    def test_something(run_goal):
         entry = GoalQueueEntry(
             description="Collect 10 iron ore",
             success_condition="inventory('iron-ore') >= 10",
             failure_condition="tick > 3600",
             goal_type="collection",
         )
+        # Tuple unpacking (backwards-compatible with all existing tests):
         stats, wq = run_goal(entry)
         assert stats.goals_completed == 1
         assert wq.inventory_count("iron-ore") >= 10
+
+        # Or access the richer RunResult directly:
+        result = run_goal(entry)
+        print(result.final_tick, result.kb_summary)
 
     def test_multi_goal(run_goals):
         # Two goals sharing KB state — goals run sequentially, state resets
@@ -42,25 +47,20 @@ Usage in a test file
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
-
 import tempfile
 import atexit
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Iterator
 
 import pytest
 
 import config
 from agent.blackboard import Blackboard
-from agent.loop import FactorioLoop, LoopConfig
+from agent.loop import FactorioLoop, LoopConfig, LoopStats
 from agent.memory.behavioral import SQLiteBehavioralMemory
 from agent.network.agents.mining import MiningAgent
 from agent.network.agents.navigation import NavigationAgent
-from agent.network.coordinator import (
-    GOAL_TYPE_COLLECTION,
-    GOAL_TYPE_EXPLORATION,
-    RuleBasedCoordinator,
-)
+from agent.network.coordinator import RuleBasedCoordinator
 from agent.network.registry import AgentRegistry
 from agent.self_model import SelfModel
 from agent.subtask import SubtaskLedger
@@ -70,22 +70,21 @@ from bridge.state_parser import StateParser
 from llm.goal_source import GoalQueue, GoalQueueEntry
 from planning.reward_evaluator import RewardEvaluator
 from world.knowledge import KnowledgeBase
-from world.state import WorldState
 from world.query import WorldQuery
-from world.writer import WorldWriter
 
 log = logging.getLogger(__name__)
+
 
 @pytest.fixture(autouse=True)
 def configure_logging():
     """Ensure DEBUG logging is active for all in-game tests."""
-    import logging
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
         force=True,
     )
+
 
 # ---------------------------------------------------------------------------
 # RCON availability — skip the whole session if Factorio isn't running
@@ -137,17 +136,28 @@ def rcon(rcon_client):
         return result
     return _send
 
+
 # ---------------------------------------------------------------------------
-# Loop diagnostics — dataclass to contain loop internals on output of execution
+# RunResult — richer return type from _execute_goals
+#
+# Supports tuple unpacking as `stats, wq = run_goal(entry)` so all existing
+# tests continue to work without modification. Richer fields (final_tick,
+# kb_summary, goals_attempted) are available as named attributes when needed.
 # ---------------------------------------------------------------------------
 
 @dataclass
 class RunResult:
-    stats: FactorioLoop
+    stats: LoopStats
     wq: WorldQuery
-    goals_attempted: list  # goal descriptions + outcomes
-    final_tick: int
-    kb_summary: dict       # kb.summary() at end of run
+    goals_attempted: list[str]  # entry.description for each goal in the run
+    final_tick: int             # wq.tick at end of run
+    kb_summary: dict            # kb.summary() at end of run
+
+    def __iter__(self) -> Iterator:
+        """Yield (stats, wq) so tests can unpack as: stats, wq = run_goal(entry)."""
+        yield self.stats
+        yield self.wq
+
 
 # ---------------------------------------------------------------------------
 # Shared KB — persists across the session, accumulates as tests run
@@ -174,7 +184,7 @@ def knowledge_base():
 
 
 # ---------------------------------------------------------------------------
-# run_goal / run_goals — the core test execution fixture
+# run_goal / run_goals — the core test execution fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -182,17 +192,20 @@ def run_goal(rcon_client, knowledge_base):
     """
     Function fixture: run a single GoalQueueEntry through the full agent loop.
 
-    Usage:
+    Usage (tuple unpacking — compatible with all existing tests):
         stats, wq = run_goal(entry)
 
-    Returns (LoopStats, WorldQuery) where WorldQuery reflects the world state
-    at the end of the run. Each call gets a fresh Blackboard, SubtaskLedger,
-    SelfModel, and BehavioralMemory — only the KnowledgeBase persists.
+    Or access the full result:
+        result = run_goal(entry)
+        print(result.final_tick, result.kb_summary)
 
-    The LoopConfig used here sets shutdown_on_empty_queue=True so the loop
-    exits as soon as the single goal resolves (success or failure).
+    Each call gets a fresh Blackboard, SubtaskLedger, SelfModel, and
+    BehavioralMemory — only the KnowledgeBase persists across calls.
+
+    The LoopConfig sets shutdown_on_empty_queue=True so the loop exits as
+    soon as the single goal resolves (success or failure).
     """
-    def _run(entry: GoalQueueEntry):
+    def _run(entry: GoalQueueEntry) -> RunResult:
         return _execute_goals([entry], rcon_client, knowledge_base)
     return _run
 
@@ -203,14 +216,13 @@ def run_goals(rcon_client, knowledge_base):
     Function fixture: run a list of GoalQueueEntry objects sequentially.
 
     Goals share the KnowledgeBase but each goal gets a fresh coordinator,
-    blackboard, and self-model — exactly as in production. Use this when
-    you want to test multi-goal sequences that accumulate world knowledge.
+    blackboard, and self-model — exactly as in production.
 
-    Usage:
+    Usage (tuple unpacking — compatible with all existing tests):
         stats, wq = run_goals([entry_a, entry_b])
         assert stats.goals_completed == 2
     """
-    def _run(entries: list[GoalQueueEntry]):
+    def _run(entries: list[GoalQueueEntry]) -> RunResult:
         return _execute_goals(entries, rcon_client, knowledge_base)
     return _run
 
@@ -223,11 +235,12 @@ def _execute_goals(
     entries: list[GoalQueueEntry],
     client: RconClient,
     kb: KnowledgeBase,
-) -> tuple:
+) -> RunResult:
     """
     Build a complete agent stack and run the given goals to completion.
 
-    Returns (LoopStats, WorldQuery).
+    Returns a RunResult. Supports tuple unpacking as (stats, wq) for
+    backwards compatibility with existing tests.
     """
     # Fresh per-run components.
     nav_agent  = NavigationAgent()
@@ -262,8 +275,8 @@ def _execute_goals(
     # resource patch name registration. KB population (recipes, techs, entities)
     # happens separately via kb.ensure_* calls driven by WorldWriter/coordinator.
     # The KB's query_fn above allows those calls to fetch from Factorio.
-    parser    = StateParser()
-    executor  = ActionExecutor(client)
+    parser   = StateParser()
+    executor = ActionExecutor(client)
 
     cfg = LoopConfig(
         tick_interval=config.TICK_INTERVAL,
@@ -287,10 +300,13 @@ def _execute_goals(
 
     stats = loop.run()
 
-    # Warm the KB: ensure_* for all resource types observed in the final world
-    # state. This triggers query_fn calls to Factorio for any names not yet in
-    # the KB, populating recipe and tech data for the knowledge tests.
+    # Capture final world state. We reach into the loop's internal _wq —
+    # acceptable in tests.
     final_wq = loop._wq
+
+    # Warm the KB: ensure_* for all resource types and entities observed in
+    # the final world state. Triggers query_fn calls to Factorio for any names
+    # not yet in the KB, populating recipe and tech data for the knowledge tests.
     for patch in final_wq.state.resource_map:
         try:
             kb.ensure_resource(patch.resource_type)
@@ -302,9 +318,12 @@ def _execute_goals(
         except Exception:
             pass
 
-    # Capture a final world state snapshot for assertions.
-    # We reach into the loop's internal wq — this is acceptable in tests.
-    final_wq = loop._wq
-
     mem.close()
-    return RunResult(stats,final_wq,,,kb.summary())
+
+    return RunResult(
+        stats=stats,
+        wq=final_wq,
+        goals_attempted=[e.description for e in entries],
+        final_tick=final_wq.tick,
+        kb_summary=kb.summary(),
+    )
