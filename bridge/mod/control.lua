@@ -939,7 +939,7 @@ end
 -- Returns physical + crafting metadata for a placed entity prototype.
 -- Used to populate EntityRecord on first encounter.
 function fa.get_entity_prototype(entity_name)
-    local proto = game.entity_prototypes[entity_name]
+    local proto = prototypes.entity[entity_name]
     if not proto then
         return err_response("unknown_entity_prototype: " .. tostring(entity_name))
     end
@@ -980,7 +980,7 @@ end
 -- The temperature argument is informational only (used as a label by Python);
 -- the prototype data is the same regardless of temperature variant.
 function fa.get_fluid_prototype(fluid_name)
-    local proto = game.fluid_prototypes[fluid_name]
+    local proto = prototypes.fluid[fluid_name]
     if not proto then
         return err_response("unknown_fluid_prototype: " .. tostring(fluid_name))
     end
@@ -1002,7 +1002,7 @@ end
 
 -- Returns resource patch prototype properties (mineable resources).
 function fa.get_resource_prototype(resource_name)
-    local proto = game.entity_prototypes[resource_name]
+    local proto = prototypes.entity[resource_name]
     if not proto or proto.type ~= "resource" then
         return err_response("unknown_resource_prototype: " .. tostring(resource_name))
     end
@@ -1046,7 +1046,7 @@ function fa.get_recipe_prototype(recipe_name)
     -- Fall back to the raw prototype if the force recipe isn't available
     -- (e.g. during early game before the recipe is enabled).
     if not recipe then
-        local proto = game.recipe_prototypes[recipe_name]
+        local proto = prototypes.recipe[recipe_name]
         if not proto then
             return err_response("unknown_recipe: " .. tostring(recipe_name))
         end
@@ -1073,7 +1073,7 @@ function fa.get_recipe_prototype(recipe_name)
 
         -- Determine which entity types can craft this recipe category.
         local made_in = {}
-        for proto_name, ep in pairs(game.entity_prototypes) do
+        for proto_name, ep in pairs(prototypes.entity) do
             local ok, cc = pcall(function() return ep.crafting_categories end)
             if ok and cc and cc[proto.category] then
                 table.insert(made_in, proto_name)
@@ -1113,7 +1113,7 @@ function fa.get_recipe_prototype(recipe_name)
     end
 
     local made_in = {}
-    for proto_name, ep in pairs(game.entity_prototypes) do
+    for proto_name, ep in pairs(prototypes.entity) do
         local ok, cc = pcall(function() return ep.crafting_categories end)
         if ok and cc and cc[recipe.category] then
             table.insert(made_in, proto_name)
