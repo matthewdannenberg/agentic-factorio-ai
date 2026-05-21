@@ -138,17 +138,37 @@ local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
 local function request_movement_path(player)
     if not player or not player.valid or not player.character then return end
 
-    -- Use plain table literals for bounding_box and collision_mask.
-    -- Passing prototype.collision_box / prototype.collision_mask directly
-    -- passes complex Factorio objects that request_path cannot interpret,
-    -- causing the pathfinder to return an empty path even for reachable goals.
+    -- Build the collision mask from the character prototype so we don't
+    -- hardcode layer names. In Factorio 2.x, LuaCollisionMask supports pairs()
+    -- iteration where keys are layer name strings.
     --
-    -- Character bounding box: 0.4 x 0.4 tiles centred on position.
-    -- Collision layer: "player-layer" is the character's layer in Factorio 2.x.
+    -- Fallback: if prototype iteration fails, use the known layers the character
+    -- collides with. "player-layer" alone is NOT sufficient — the crashed ship,
+    -- buildings, rocks, and walls are on "object-layer". Without it the pathfinder
+    -- computes a path straight through them, causing the character to walk into
+    -- obstacles and get stuck.
+    local collision_mask = {"player-layer", "object-layer", "water-tile"}
+    local ok_mask, proto = pcall(function()
+        return player.character.prototype.collision_mask
+    end)
+    if ok_mask and proto then
+        local layers = {}
+        local ok_iter = pcall(function()
+            for layer_name, _ in pairs(proto) do
+                if type(layer_name) == "string" then
+                    table.insert(layers, layer_name)
+                end
+            end
+        end)
+        if ok_iter and #layers > 0 then
+            collision_mask = layers
+        end
+    end
+
     local ok, id = pcall(function()
         return player.surface.request_path({
             bounding_box = {{-0.2, -0.2}, {0.2, 0.2}},
-            collision_mask = {"player-layer"},
+            collision_mask = collision_mask,
             start  = player.position,
             goal   = movement_goal,
             force  = player.force,
