@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 import tempfile
 import atexit
+from dataclasses import dataclass
 
 import pytest
 
@@ -135,6 +136,18 @@ def rcon(rcon_client):
         print(f"\nRCON >> {cmd}\nRCON << {result}")
         return result
     return _send
+
+# ---------------------------------------------------------------------------
+# Loop diagnostics — dataclass to contain loop internals on output of execution
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RunResult:
+    stats: FactorioLoop
+    wq: WorldQuery
+    goals_attempted: list  # goal descriptions + outcomes
+    final_tick: int
+    kb_summary: dict       # kb.summary() at end of run
 
 # ---------------------------------------------------------------------------
 # Shared KB — persists across the session, accumulates as tests run
@@ -239,12 +252,11 @@ def _execute_goals(
     queue     = GoalQueue(entries)
     evaluator = RewardEvaluator()
 
-    # Wire the KB's query_fn to the live RCON client so ensure_* calls can
-    # fetch full prototype data from Factorio. Without this, the KB records
-    # entity/resource names from snapshots but cannot fill prototype details
-    # (ingredients, tech prerequisites, etc.), leaving everything as placeholders.
-    # query_fn is set as an instance attribute since KnowledgeBase has no setter.
-    kb._query_fn = client.send
+    # Wire the KB's query_fn to the live RCON client. The KB's _query() method
+    # passes expressions like 'rcon.print(fa.get_recipe_prototype("x"))' directly
+    # to query_fn. client.send() expects a full Factorio console command, so we
+    # must prepend "/c " here.
+    kb._query_fn = lambda expr: client.send(f"/c {expr}")
 
     # StateParser accepts resource_registry (not knowledge_base) — it handles
     # resource patch name registration. KB population (recipes, techs, entities)
@@ -295,4 +307,4 @@ def _execute_goals(
     final_wq = loop._wq
 
     mem.close()
-    return stats, final_wq
+    return RunResult(stats,final_wq,,,kb.summary())

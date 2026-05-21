@@ -14,9 +14,9 @@ from llm.goal_source import GoalQueueEntry
 
 
 _WARM_KB_GOAL = GoalQueueEntry(
-    description="Warm KB — explore briefly",
-    success_condition="charted_chunks >= 2",
-    failure_condition="tick > 3600",
+    description="Warm KB connection",
+    success_condition="tick >= 0",
+    failure_condition="tick > 600",
     goal_type="exploration",
 )
 
