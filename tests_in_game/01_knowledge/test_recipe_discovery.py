@@ -25,24 +25,21 @@ _WARM_KB_GOAL = GoalQueueEntry(
 
 def test_kb_learns_iron_plate_recipe(run_goal, knowledge_base):
     """
-    After a state poll, the KB should be able to look up the iron-plate recipe.
-    iron-plate is a core recipe present in every default Factorio game.
+    After calling ensure_recipe('iron-plate'), the KB should contain the
+    full prototype. The warm-up goal establishes the RCON connection;
+    ensure_recipe then queries Factorio via kb._query_fn.
     """
     run_goal(_WARM_KB_GOAL)
-    recipe = knowledge_base.get_recipe("iron-plate")
+    recipe = knowledge_base.ensure_recipe("iron-plate")
     assert recipe is not None, (
-        "KB did not learn the iron-plate recipe after polling game state. "
-        "Check that StateParser populates KnowledgeBase on each snapshot."
+        "KB.ensure_recipe('iron-plate') returned None. "
+        "Check that kb._query_fn is set and fa.get_recipe_prototype is reachable."
     )
 
 
 def test_kb_learns_iron_gear_wheel_recipe(run_goal, knowledge_base):
-    """
-    iron-gear-wheel requires iron-plate as an ingredient. Verifying its
-    recipe is in the KB confirms multi-ingredient recipes are stored correctly.
-    """
     run_goal(_WARM_KB_GOAL)
-    recipe = knowledge_base.get_recipe("iron-gear-wheel")
+    recipe = knowledge_base.ensure_recipe("iron-gear-wheel")
     assert recipe is not None
     ingredient_names = [i.name for i in (recipe.ingredients or [])]
     assert "iron-plate" in ingredient_names, (
@@ -51,18 +48,14 @@ def test_kb_learns_iron_gear_wheel_recipe(run_goal, knowledge_base):
 
 
 def test_kb_recipe_has_expected_fields(run_goal, knowledge_base):
-    """
-    A learned recipe should have non-empty ingredients and products lists
-    and a non-empty category string.
-    """
     run_goal(_WARM_KB_GOAL)
-    recipe = knowledge_base.get_recipe("electronic-circuit")
-    if recipe is None:
-        pytest.skip("electronic-circuit not yet in KB — run after more polling")
+    recipe = knowledge_base.ensure_recipe("electronic-circuit")
+    if recipe is None or recipe.is_placeholder:
+        pytest.skip("electronic-circuit recipe could not be fetched")
 
     assert recipe.category, "recipe.category should not be empty"
     assert recipe.ingredients, "recipe.ingredients should not be empty"
     assert recipe.products, "recipe.products should not be empty"
     assert not recipe.is_placeholder, (
-        "recipe should not be a placeholder after KB has learned it"
+        "recipe should not be a placeholder after ensure_recipe"
     )

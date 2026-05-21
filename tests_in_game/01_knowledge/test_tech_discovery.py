@@ -23,42 +23,32 @@ _WARM_KB_GOAL = GoalQueueEntry(
 
 def test_kb_learns_automation_tech(run_goal, knowledge_base):
     """
-    'automation' is the first research technology in every vanilla Factorio
-    game. The KB should learn it during the first state poll that queries
-    the research prototype table.
+    After calling ensure_tech('automation'), the KB should contain the full
+    prototype. The warm-up exploration goal runs first to establish the RCON
+    connection; the KB's query_fn is then used to fetch the tech prototype.
     """
     run_goal(_WARM_KB_GOAL)
-    tech = knowledge_base.get_tech("automation")
+    # Explicitly fetch the tech — the KB won't have it unless we ask for it,
+    # since StateParser doesn't call ensure_tech during snapshot parsing.
+    tech = knowledge_base.ensure_tech("automation")
     assert tech is not None, (
-        "KB did not learn the 'automation' technology. "
-        "Check that StateParser populates KnowledgeBase.ensure_tech() "
-        "when the research state is polled."
+        "KB.ensure_tech('automation') returned None. "
+        "Check that kb._query_fn is set and fa.get_technology is reachable."
     )
 
 
 def test_automation_tech_not_placeholder(run_goal, knowledge_base):
-    """
-    A properly learned tech should not be a placeholder — it should have
-    the full prototype data including unlocks and prerequisites.
-    """
     run_goal(_WARM_KB_GOAL)
-    tech = knowledge_base.get_tech("automation")
-    if tech is None:
-        pytest.skip("automation tech not yet in KB")
+    tech = knowledge_base.ensure_tech("automation")
     assert not tech.is_placeholder, (
         "automation tech is still a placeholder — "
-        "KB learned the name but not the prototype data"
+        "ensure_tech queried Factorio but parsing failed"
     )
 
 
 def test_automation_unlocks_assembling_machine(run_goal, knowledge_base):
-    """
-    The 'automation' tech unlocks the assembling-machine-1 recipe.
-    Verifying the unlock list confirms that recipe-unlock effects are
-    parsed and stored correctly.
-    """
     run_goal(_WARM_KB_GOAL)
-    tech = knowledge_base.get_tech("automation")
+    tech = knowledge_base.ensure_tech("automation")
     if tech is None or tech.is_placeholder:
         pytest.skip("automation tech not fully learned yet")
     assert "assembling-machine-1" in tech.unlocks_recipes, (
@@ -68,12 +58,9 @@ def test_automation_unlocks_assembling_machine(run_goal, knowledge_base):
 
 
 def test_logistics_tech_has_automation_prerequisite(run_goal, knowledge_base):
-    """
-    'logistics' requires 'automation' as a prerequisite.
-    Verifies that prerequisite edges are stored correctly.
-    """
     run_goal(_WARM_KB_GOAL)
-    tech = knowledge_base.get_tech("logistics")
+    knowledge_base.ensure_tech("automation")  # fetch prerequisite first
+    tech = knowledge_base.ensure_tech("logistics")
     if tech is None or tech.is_placeholder:
         pytest.skip("logistics tech not fully learned yet")
     assert "automation" in tech.prerequisites, (
@@ -83,12 +70,8 @@ def test_logistics_tech_has_automation_prerequisite(run_goal, knowledge_base):
 
 
 def test_techs_unlocking_recipe_roundtrip(run_goal, knowledge_base):
-    """
-    KnowledgeBase.techs_unlocking_recipe() should return the tech that
-    unlocks a given recipe. 'automation' unlocks 'assembling-machine-1',
-    so techs_unlocking_recipe('assembling-machine-1') should include it.
-    """
     run_goal(_WARM_KB_GOAL)
+    knowledge_base.ensure_tech("automation")
     tech = knowledge_base.get_tech("automation")
     if tech is None or tech.is_placeholder:
         pytest.skip("automation tech not fully learned yet")

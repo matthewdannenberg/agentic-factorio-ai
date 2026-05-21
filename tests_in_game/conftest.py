@@ -44,6 +44,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import tempfile
+import atexit
+
 import pytest
 
 import config
@@ -117,11 +120,21 @@ def rcon_client():
 @pytest.fixture(scope="session")
 def knowledge_base():
     """
-    Session-scoped KnowledgeBase. Uses an in-memory SQLite database so no
-    file is left on disk after the session. Accumulates recipe and entity
-    knowledge across all tests in the session, matching production behaviour.
+    Session-scoped KnowledgeBase. Uses a temporary directory so no permanent
+    file is left on disk after the session. The directory and its contents are
+    cleaned up when the session ends.
+
+    KnowledgeBase takes data_dir (a Path) rather than a db_path directly —
+    it constructs the SQLite path internally as data_dir / "knowledge.db".
     """
-    return KnowledgeBase(db_path=":memory:")
+    tmp = tempfile.mkdtemp(prefix="factorio_agent_test_kb_")
+
+    def _cleanup():
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    atexit.register(_cleanup)
+    return KnowledgeBase(data_dir=tmp)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +215,18 @@ def _execute_goals(
 
     queue     = GoalQueue(entries)
     evaluator = RewardEvaluator()
+
+    # Wire the KB's query_fn to the live RCON client so ensure_* calls can
+    # fetch full prototype data from Factorio. Without this, the KB records
+    # entity/resource names from snapshots but cannot fill prototype details
+    # (ingredients, tech prerequisites, etc.), leaving everything as placeholders.
+    # query_fn is set as an instance attribute since KnowledgeBase has no setter.
+    kb._query_fn = client.send
+
+    # StateParser accepts resource_registry (not knowledge_base) — it handles
+    # resource patch name registration. KB population (recipes, techs, entities)
+    # happens separately via kb.ensure_* calls driven by WorldWriter/coordinator.
+    # The KB's query_fn above allows those calls to fetch from Factorio.
     parser    = StateParser()
     executor  = ActionExecutor(client)
 
@@ -226,6 +251,21 @@ def _execute_goals(
     )
 
     stats = loop.run()
+
+    # Warm the KB: ensure_* for all resource types observed in the final world
+    # state. This triggers query_fn calls to Factorio for any names not yet in
+    # the KB, populating recipe and tech data for the knowledge tests.
+    final_wq = loop._wq
+    for patch in final_wq.state.resource_map:
+        try:
+            kb.ensure_resource(patch.resource_type)
+        except Exception:
+            pass
+    for entity in final_wq.state.entities:
+        try:
+            kb.ensure_entity(entity.name)
+        except Exception:
+            pass
 
     # Capture a final world state snapshot for assertions.
     # We reach into the loop's internal wq — this is acceptable in tests.

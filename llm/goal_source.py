@@ -312,6 +312,10 @@ class GoalQueue(GoalSource):
         path = Path(path)
         with path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
+        # save() writes {"goals": [...], "outcomes": [...]}; support that format
+        # as well as a bare list for hand-authored goal files.
+        if isinstance(raw, dict):
+            raw = raw.get("goals", [])
         entries = [GoalQueueEntry.from_dict(d) for d in raw]
         log.info(
             "GoalQueue: loaded %d goals from %s", len(entries), path

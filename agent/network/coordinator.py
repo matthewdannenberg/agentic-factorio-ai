@@ -918,16 +918,19 @@ def _next_exploration_waypoint(
     ring = max(1, int(math.sqrt(current_chunks)))
     step = 64 * ring  # tiles
 
-    # Emit a waypoint in a N→E→S→W pattern based on ring parity.
+    # Emit a waypoint in an E→S→W→N pattern.
+    # Starting east (not north) avoids the crashed ship at spawn, which is
+    # always to the north in a default Factorio map. Phase 9 will replace
+    # this with a proper frontier-based exploration planner.
     direction = current_chunks % 4
     if direction == 0:
-        return Position(player_pos.x, player_pos.y - step)   # north
-    elif direction == 1:
         return Position(player_pos.x + step, player_pos.y)   # east
-    elif direction == 2:
+    elif direction == 1:
         return Position(player_pos.x, player_pos.y + step)   # south
-    else:
+    elif direction == 2:
         return Position(player_pos.x - step, player_pos.y)   # west
+    else:
+        return Position(player_pos.x, player_pos.y - step)   # north
 
 
 def _build_condition_namespace(wq: "WorldQuery", tick: int) -> dict:
