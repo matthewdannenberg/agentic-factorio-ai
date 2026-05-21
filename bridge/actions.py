@@ -181,6 +181,19 @@ class MineEntity(Action):
     category: ActionCategory = field(default=ActionCategory.MINING, init=False, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class StopMining(Action):
+    """
+    Halt persistent mining immediately.
+
+    The Lua mod's on_tick handler re-applies mining_state every game tick
+    until told to stop. This action clears that state so the player stops
+    mining even if the Python side stops issuing MineResource commands.
+    Must be issued when a mining subtask completes, fails, or is pre-empted.
+    """
+    category: ActionCategory = field(default=ActionCategory.MINING, init=False, repr=False, compare=False)
+
+
 # ---------------------------------------------------------------------------
 # CRAFTING
 # ---------------------------------------------------------------------------
@@ -567,6 +580,7 @@ ALL_ACTION_TYPES: tuple[type[Action], ...] = (
     # MINING
     MineResource,
     MineEntity,
+    StopMining,
     # CRAFTING
     CraftItem,
     # BUILDING

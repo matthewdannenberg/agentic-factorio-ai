@@ -51,7 +51,7 @@ from typing import Optional, TYPE_CHECKING
 from agent.blackboard import EntryCategory, EntryScope
 from agent.network.agent_protocol import AgentProtocol
 from agent.preconditions import is_reachable
-from bridge.actions import Action, MineEntity, MineResource, MoveTo, StopMovement
+from bridge.actions import Action, MineEntity, MineResource, MoveTo, StopMining, StopMovement
 from world.state import Position
 
 if TYPE_CHECKING:
@@ -107,6 +107,10 @@ class MiningAgent(AgentProtocol):
     def __init__(self) -> None:
         self._current_subtask: Optional["Subtask"] = None
         self._subtask_kind: _SubtaskKind = _SubtaskKind.UNKNOWN
+        # Set by activate() so tick() emits StopMining on its first call.
+        # Ensures the Lua persistent miner is halted whenever the agent is
+        # assigned a new subtask, regardless of what came before.
+        self._pending_stop: bool = False
 
         # Gather state
         self._gather_resource_type: str = ""
@@ -148,6 +152,10 @@ class MiningAgent(AgentProtocol):
         self._mine_issued_at = 0
         self._move_issued_at = 0
         self._last_position = None
+        # Halt any in-progress Lua mining from a previous subtask. The stop
+        # action is emitted by tick() on its first call rather than here,
+        # because activate() has no return value.
+        self._pending_stop = True
         log.debug(
             "MiningAgent activated for subtask %s: %s",
             subtask.id[:8], subtask.description,
@@ -165,6 +173,10 @@ class MiningAgent(AgentProtocol):
         One tick. Reads the active mining_task entry and executes it.
         Issues commands only when necessary (new task or stall detected).
         """
+        if self._pending_stop:
+            self._pending_stop = False
+            return [StopMining()]
+
         task = self._find_active_task(blackboard, tick)
         if task is None:
             return []

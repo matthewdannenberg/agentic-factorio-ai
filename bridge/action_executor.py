@@ -52,6 +52,7 @@ from bridge.actions import (
     SetResearchQueue,
     SetSplitterPriority,
     ShootAt,
+    StopMining,
     StopMovement,
     StopShooting,
     TransferItems,
@@ -156,6 +157,9 @@ class ActionExecutor:
 
     def _execute_mine_entity(self, action: MineEntity) -> bool:
         return self._send(f"fa.mine_entity({action.entity_id})")
+
+    def _execute_stop_mining(self, action: StopMining) -> bool:
+        return self._send("fa.stop_mining()")
 
     def _execute_craft_item(self, action: CraftItem) -> bool:
         return self._send(f'fa.craft_item("{action.recipe}", {action.count})')
@@ -281,6 +285,7 @@ class ActionExecutor:
         "StopMovement":      _execute_stop_movement,
         "MineResource":      _execute_mine_resource,
         "MineEntity":        _execute_mine_entity,
+        "StopMining":        _execute_stop_mining,
         "CraftItem":         _execute_craft_item,
         "PlaceEntity":       _execute_place_entity,
         "SetRecipe":         _execute_set_recipe,

@@ -20,6 +20,7 @@ from bridge.actions import (
     MineEntity,
     MineResource,
     MoveTo,
+    StopMining,
     NoOp,
     PlaceEntity,
     RotateEntity,
@@ -89,6 +90,12 @@ class TestActionExecutor(unittest.TestCase):
         self.executor.execute(action)
         self._assert_lua("fa.mine_entity")
         self._assert_lua("42")
+
+    def test_stop_mining_command(self):
+        action = StopMining()
+        result = self.executor.execute(action)
+        self.assertTrue(result)
+        self._assert_lua("fa.stop_mining")
 
     # --- CRAFTING -------------------------------------------------------------
 

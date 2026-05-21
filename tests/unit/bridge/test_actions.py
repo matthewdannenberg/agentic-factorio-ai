@@ -13,7 +13,7 @@ import unittest
 from bridge.actions import (
     Action, ActionCategory, ALL_ACTION_TYPES, ACTIONS_BY_CATEGORY, actions_for_context,
     MoveTo, StopMovement,
-    MineResource, MineEntity,
+    MineResource, MineEntity, StopMining,
     CraftItem,
     PlaceEntity, SetRecipe, SetFilter, SetSplitterPriority, RotateEntity,
     FlipEntity, ApplyBlueprint,
@@ -221,6 +221,18 @@ class TestActions(unittest.TestCase):
 
     def test_mine_entity_category(self):
         self.assertEqual(MineEntity(entity_id=5).category, ActionCategory.MINING)
+
+    def test_stop_mining_category(self):
+        self.assertEqual(StopMining().category, ActionCategory.MINING)
+
+    def test_stop_mining_kind(self):
+        self.assertEqual(StopMining().kind, "StopMining")
+
+    def test_stop_mining_in_all_action_types(self):
+        self.assertIn(StopMining, ALL_ACTION_TYPES)
+
+    def test_stop_mining_in_mining_bucket(self):
+        self.assertIn(StopMining, ACTIONS_BY_CATEGORY[ActionCategory.MINING])
 
     def test_set_recipe_category(self):
         self.assertEqual(

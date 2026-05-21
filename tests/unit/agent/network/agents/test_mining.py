@@ -28,7 +28,7 @@ import unittest
 from agent.blackboard import Blackboard, EntryCategory, EntryScope
 from agent.network.agents.mining import MiningAgent
 from agent.subtask import Subtask
-from bridge.actions import MineEntity, MineResource, MoveTo
+from bridge.actions import MineEntity, MineResource, MoveTo, StopMining
 from world.state import (
     EntityState,
     Inventory,
@@ -114,6 +114,16 @@ def _write_clear_task(bb: Blackboard, task_type: str, bbox: dict, tick: int = 10
 _BBOX = {"x_min": -10.0, "y_min": -10.0, "x_max": 10.0, "y_max": 10.0}
 
 
+def _drain_stop(agent, subtask, bb, wq, ww, tick=100):
+    """
+    Drain the pending StopMining action emitted on the first tick after
+    activate(). Call this after activate() and before the real test tick
+    so tests can assert on the actual mining behaviour without noise.
+    Returns the drained actions for tests that want to inspect them.
+    """
+    return agent.tick(subtask, bb, wq, ww, tick=tick)
+
+
 # ---------------------------------------------------------------------------
 # activate()
 # ---------------------------------------------------------------------------
@@ -165,6 +175,7 @@ class TestMiningAgentNoTask(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         agent.activate(subtask, bb, wq)
+        _drain_stop(agent, subtask, bb, wq, ww)
 
         actions = agent.tick(subtask, bb, wq, ww, tick=101)
         self.assertEqual(actions, [])
@@ -183,6 +194,7 @@ class TestMiningAgentNoTask(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         agent.activate(subtask, bb, wq)
+        _drain_stop(agent, subtask, bb, wq, ww)
 
         actions = agent.tick(subtask, bb, wq, ww, tick=101)
         self.assertEqual(actions, [])
@@ -201,6 +213,7 @@ class TestMiningAgentGather(unittest.TestCase):
         self.wq = _make_wq()
         self.ww = _make_mock_writer()
         self.agent.activate(self.subtask, self.bb, self.wq)
+        _drain_stop(self.agent, self.subtask, self.bb, self.wq, self.ww)
 
     def test_first_tick_emits_mine_resource(self):
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
@@ -295,6 +308,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         agent.tick(self.subtask, bb, wq, self.ww, tick=100)
@@ -312,6 +326,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_natural", _BBOX)
 
         agent.tick(self.subtask, bb, wq, self.ww, tick=100)
@@ -329,6 +344,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
@@ -343,6 +359,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
@@ -357,6 +374,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq_both)
+        _drain_stop(agent, self.subtask, bb, wq_both, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         # First tick — picks tree1 as current target.
@@ -378,6 +396,7 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
@@ -393,11 +412,83 @@ class TestMiningAgentClear(unittest.TestCase):
         agent = MiningAgent()
         bb = Blackboard()
         agent.activate(self.subtask, bb, wq)
+        _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         agent.tick(self.subtask, bb, wq, self.ww, tick=100)
         self.assertIsNotNone(agent._current_target)
         self.assertEqual(agent._current_target.entity_id, 1)
+
+
+# ---------------------------------------------------------------------------
+# StopMining behaviour
+# ---------------------------------------------------------------------------
+
+class TestMiningAgentStopMining(unittest.TestCase):
+    """
+    Verify that activate() triggers a StopMining on the first tick and that
+    subsequent ticks are unaffected.
+    """
+
+    def test_first_tick_after_activate_emits_stop_mining(self):
+        agent = MiningAgent()
+        subtask = _make_subtask()
+        bb = Blackboard()
+        wq = _make_wq()
+        ww = _make_mock_writer()
+        agent.activate(subtask, bb, wq)
+
+        actions = agent.tick(subtask, bb, wq, ww, tick=100)
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMining)
+
+    def test_stop_only_fires_once_per_activate(self):
+        """The pending-stop flag is cleared after the first tick."""
+        agent = MiningAgent()
+        subtask = _make_subtask()
+        bb = Blackboard()
+        wq = _make_wq()
+        ww = _make_mock_writer()
+        agent.activate(subtask, bb, wq)
+
+        agent.tick(subtask, bb, wq, ww, tick=100)  # drains stop
+        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        self.assertNotIn(StopMining(), actions)
+
+    def test_re_activate_triggers_another_stop(self):
+        """A second activate() on the same agent sets the flag again."""
+        agent = MiningAgent()
+        subtask = _make_subtask()
+        bb = Blackboard()
+        wq = _make_wq()
+        ww = _make_mock_writer()
+
+        agent.activate(subtask, bb, wq)
+        agent.tick(subtask, bb, wq, ww, tick=100)  # drains first stop
+
+        agent.activate(subtask, bb, wq)  # re-activated (new subtask assigned)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMining)
+
+    def test_stop_mining_emitted_before_any_task_processing(self):
+        """Even when a blackboard task is present, stop fires first."""
+        agent = MiningAgent()
+        subtask = _make_subtask()
+        bb = Blackboard()
+        wq = _make_wq()
+        ww = _make_mock_writer()
+        agent.activate(subtask, bb, wq)
+        _write_gather_task(bb, "iron-ore", 5.0, 5.0)
+
+        actions = agent.tick(subtask, bb, wq, ww, tick=100)
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMining)
+
+        # Next tick should now mine.
+        actions2 = agent.tick(subtask, bb, wq, ww, tick=101)
+        self.assertEqual(len(actions2), 1)
+        self.assertIsInstance(actions2[0], MineResource)
 
 
 # ---------------------------------------------------------------------------
