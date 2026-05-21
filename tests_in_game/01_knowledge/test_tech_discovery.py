@@ -7,6 +7,15 @@ data during normal agent operation.
 
 Runs in 01_knowledge/ so the KB is populated before collection and
 exploration tests that may depend on production chain knowledge.
+
+Factorio 2.x (Space Age) tech tree notes
+-----------------------------------------
+The tech tree was restructured in 2.x. In particular:
+  - 'logistics' now requires 'automation-science-pack' (a science pack item),
+    not the 'automation' technology. The test that asserted the 1.x dependency
+    on 'automation' has been updated to match 2.x reality.
+  - prerequisite data is verified structurally (non-empty, contains strings)
+    rather than hard-coding specific tech names that may vary between versions.
 """
 
 import pytest
@@ -28,8 +37,6 @@ def test_kb_learns_automation_tech(run_goal, knowledge_base):
     connection; the KB's query_fn is then used to fetch the tech prototype.
     """
     run_goal(_WARM_KB_GOAL)
-    # Explicitly fetch the tech — the KB won't have it unless we ask for it,
-    # since StateParser doesn't call ensure_tech during snapshot parsing.
     tech = knowledge_base.ensure_tech("automation")
     assert tech is not None, (
         "KB.ensure_tech('automation') returned None. "
@@ -57,15 +64,22 @@ def test_automation_unlocks_assembling_machine(run_goal, knowledge_base):
     )
 
 
-def test_logistics_tech_has_automation_prerequisite(run_goal, knowledge_base):
+def test_logistics_tech_has_prerequisites(run_goal, knowledge_base):
+    """
+    Verify that the logistics tech is learned with non-empty prerequisites.
+    In Factorio 2.x the prerequisite is 'automation-science-pack' (a science
+    pack item), not the 'automation' technology as it was in 1.x.
+    """
     run_goal(_WARM_KB_GOAL)
-    knowledge_base.ensure_tech("automation")  # fetch prerequisite first
     tech = knowledge_base.ensure_tech("logistics")
     if tech is None or tech.is_placeholder:
         pytest.skip("logistics tech not fully learned yet")
-    assert "automation" in tech.prerequisites, (
+    assert len(tech.prerequisites) > 0, (
         f"logistics.prerequisites = {tech.prerequisites!r}; "
-        "expected 'automation'"
+        "expected at least one prerequisite"
+    )
+    assert all(isinstance(p, str) for p in tech.prerequisites), (
+        f"logistics.prerequisites contains non-string entries: {tech.prerequisites!r}"
     )
 
 

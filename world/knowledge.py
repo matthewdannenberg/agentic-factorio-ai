@@ -260,13 +260,21 @@ class RecipeRecord:
 
     @classmethod
     def from_prototype_json(cls, name: str, data: dict) -> "RecipeRecord":
+        # Lua's helpers.table_to_json serialises empty tables as {} (object),
+        # not [] (array). Coerce all list fields defensively.
+        def _to_list(val):
+            if isinstance(val, dict):
+                return list(val.values())
+            return list(val) if val else []
+
         ingredients = [
             IngredientRecord(
                 name=str(i.get("name", "")),
                 amount=float(i.get("amount", 1)),
                 is_fluid=bool(i.get("type") == "fluid"),
                 temperature=i.get("temperature"),
-            ) for i in data.get("ingredients", [])
+            ) for i in _to_list(data.get("ingredients"))
+            if isinstance(i, dict)
         ]
         products = [
             ProductRecord(
@@ -275,14 +283,17 @@ class RecipeRecord:
                 probability=float(p.get("probability", 1.0)),
                 is_fluid=bool(p.get("type") == "fluid"),
                 temperature=p.get("temperature"),
-            ) for p in data.get("products", [])
+            ) for p in _to_list(data.get("products"))
+            if isinstance(p, dict)
         ]
+        raw_made_in = data.get("made_in")
+        made_in = _to_list(raw_made_in)
         return cls(
             name=name,
             category=str(data.get("category", "crafting")),
             crafting_time=float(data.get("energy_required", 0.5)),
             ingredients=ingredients, products=products,
-            made_in=list(data.get("made_in", [])),
+            made_in=made_in,
             enabled_by_default=bool(data.get("enabled", False)),
             is_placeholder=False,
         )
@@ -305,15 +316,30 @@ class TechRecord:
     @classmethod
     def from_prototype_json(cls, name: str, data: dict) -> "TechRecord":
         unlocks_recipes, unlocks_entities = [], []
-        for effect in data.get("effects", []):
+        # effects may arrive as [] (array) or {} (empty Lua table serialised as
+        # an object by helpers.table_to_json). Coerce to a list of dicts.
+        raw_effects = data.get("effects", [])
+        effects = list(raw_effects.values()) if isinstance(raw_effects, dict) else list(raw_effects)
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            # Factorio 2.x uses "unlock_recipe" (underscore); 1.x used "unlock-recipe".
+            # Accept both so the code works across versions.
             etype = effect.get("type", "")
-            if etype == "unlock-recipe":
-                unlocks_recipes.append(str(effect.get("recipe", "")))
-            elif etype == "give-item":
-                unlocks_entities.append(str(effect.get("item", "")))
+            if etype in ("unlock-recipe", "unlock_recipe"):
+                recipe = effect.get("recipe", "")
+                if recipe:
+                    unlocks_recipes.append(str(recipe))
+            elif etype in ("give-item", "give_item"):
+                item = effect.get("item", "")
+                if item:
+                    unlocks_entities.append(str(item))
+        # prerequisites may similarly arrive as {} if empty in Lua.
+        raw_prereqs = data.get("prerequisites", [])
+        prerequisites = list(raw_prereqs.values()) if isinstance(raw_prereqs, dict) else list(raw_prereqs)
         return cls(
             name=name,
-            prerequisites=list(data.get("prerequisites", [])),
+            prerequisites=prerequisites,
             unlocks_recipes=unlocks_recipes,
             unlocks_entities=unlocks_entities,
             requires_dlc=bool(data.get("requires_dlc", False)),

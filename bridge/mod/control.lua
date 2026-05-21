@@ -1142,19 +1142,40 @@ function fa.get_technology(tech_name)
         return err_response("unknown_technology: " .. tostring(tech_name))
     end
 
+    -- 2.x: prerequisites and effects moved from LuaTechnology to
+    -- LuaTechnology.prototype (LuaTechnologyPrototype).
+    local proto = tech.prototype
+
     local prerequisites = {}
-    for name, _ in pairs(tech.prerequisites or {}) do
-        table.insert(prerequisites, name)
+    local ok_prereq, prereq_tbl = pcall(function()
+        return proto.prerequisites
+    end)
+    if ok_prereq and prereq_tbl then
+        for name, _ in pairs(prereq_tbl) do
+            table.insert(prerequisites, name)
+        end
     end
 
     local effects = {}
-    for _, effect in ipairs(tech.effects or {}) do
-        table.insert(effects, {
-            type   = effect.type,
-            recipe = effect.recipe,
-            item   = effect.item,
-        })
+    local ok_eff, eff_tbl = pcall(function()
+        return proto.effects
+    end)
+    if ok_eff and eff_tbl then
+        for _, effect in ipairs(eff_tbl) do
+            -- 2.x TechnologyModifier: .type is the modifier type string.
+            -- For "unlock-recipe" modifiers, the recipe name is in .recipe.
+            -- For "give-item" modifiers, the item name is in .item.
+            local entry = {type = effect.type}
+            if effect.recipe then entry.recipe = effect.recipe end
+            if effect.item   then entry.item   = effect.item   end
+            table.insert(effects, entry)
+        end
     end
+
+    -- requires_dlc: present on the prototype in 2.x (Space Age).
+    local requires_dlc = false
+    local ok_dlc, dlc_val = pcall(function() return proto.parameter end)
+    if ok_dlc and dlc_val ~= nil then requires_dlc = dlc_val end
 
     return safe_json({
         name          = tech.name,
@@ -1162,6 +1183,7 @@ function fa.get_technology(tech_name)
         effects       = effects,
         researched    = tech.researched,
         enabled       = tech.enabled,
+        requires_dlc  = requires_dlc,
     })
 end
 
