@@ -67,6 +67,7 @@ from agent.execution_protocol import (
     ExecutionStatus,
     StuckContext,
 )
+from bridge.actions import StopMining
 from agent.subtask import Subtask, SubtaskLedger, SubtaskStatus
 from planning.goal import Goal
 from world.state import Position
@@ -237,6 +238,9 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # derivation on every subsequent tick (which would spam STUCK events).
         # Cleared by reset() when a new goal starts.
         self._derivation_failed: bool = False
+        # Emit StopMining on the first tick after reset() so any in-progress
+        # Lua mining is halted before navigation or other subtasks begin.
+        self._pending_stop_mining: bool = False
 
     # ------------------------------------------------------------------
     # CoordinatorProtocol
@@ -265,6 +269,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         self._active_agent = None
         self._subtask_activated_at = 0
         self._derivation_failed = False
+        self._pending_stop_mining = True
 
         if seed_subtasks:
             for subtask in reversed(seed_subtasks):
@@ -303,6 +308,17 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         5. Return ExecutionResult.
         """
         goal_type = getattr(goal, "type", "")
+
+        # --- Halt any in-progress Lua mining from a previous goal ---
+        # reset() sets this flag; we drain it here so StopMining is the very
+        # first action dispatched at the start of every goal — before the
+        # navigation agent moves the player, while mining might still be active.
+        if self._pending_stop_mining:
+            self._pending_stop_mining = False
+            return ExecutionResult(
+                actions=[StopMining()],
+                status=ExecutionStatus.PROGRESSING,
+            )
 
         # --- Fast-path: unsupported goal type ---
         if goal_type not in _DERIVABLE_TYPES and not self._ledger:

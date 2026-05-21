@@ -103,6 +103,14 @@ def _make_mock_writer():
     return _MockWriter()
 
 
+def _drain_stop(coordinator, goal, wq, ww, tick=99):
+    """
+    Drain the StopMining action emitted on the first tick after reset().
+    Call this after reset() and before the tick that should produce real work.
+    """
+    coordinator.tick(goal, wq, ww, tick=tick)
+
+
 # ---------------------------------------------------------------------------
 # reset()
 # ---------------------------------------------------------------------------
@@ -206,6 +214,7 @@ class TestCoordinatorStuckPath(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
 
@@ -218,6 +227,7 @@ class TestCoordinatorStuckPath(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
 
@@ -230,6 +240,7 @@ class TestCoordinatorStuckPath(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
 
@@ -241,6 +252,7 @@ class TestCoordinatorStuckPath(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
         d = result.stuck_context.to_dict()
@@ -255,6 +267,7 @@ class TestCoordinatorStuckPath(unittest.TestCase):
         wq = _make_wq(resource_patches=[])  # no patches
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
 
@@ -273,6 +286,7 @@ class TestCoordinatorCollectionDerivation(unittest.TestCase):
         wq = _make_wq(resource_patches=[_make_patch()])
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         coordinator.tick(goal, wq, ww, tick=100)
 
@@ -285,6 +299,7 @@ class TestCoordinatorCollectionDerivation(unittest.TestCase):
         wq = _make_wq(resource_patches=[_make_patch()])
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
 
         active = coordinator._ledger.peek()
@@ -300,6 +315,7 @@ class TestCoordinatorCollectionDerivation(unittest.TestCase):
         wq = _make_wq(resource_patches=[patch])
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
 
         intentions = coordinator._bb.read(
@@ -323,6 +339,7 @@ class TestCoordinatorCollectionDerivation(unittest.TestCase):
         )
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
 
         intentions = coordinator._bb.read(
@@ -381,6 +398,7 @@ class TestCoordinatorSubtaskLifecycle(unittest.TestCase):
         wq_initial = _make_wq(resource_patches=[patch], tick=100)
         ww = _make_mock_writer()
         coordinator.reset(goal, wq_initial)
+        _drain_stop(coordinator, goal, wq_initial, ww)
         coordinator.tick(goal, wq_initial, ww, tick=100)
 
         # Advance time past the failure condition of the derived subtask.
@@ -446,6 +464,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
         wq = _make_wq(resource_patches=[_make_patch()])
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
 
         self.assertIs(coordinator._active_agent, nav)
@@ -493,6 +512,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
         wq = _make_wq(resource_patches=[_make_patch()])
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
         self.assertIsNotNone(coordinator._active_agent)
 
@@ -524,6 +544,7 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
         wq_initial = _make_wq(resource_patches=[_make_patch()], tick=100)
         ww = _make_mock_writer()
         coordinator.reset(goal, wq_initial)
+        _drain_stop(coordinator, goal, wq_initial, ww)
         coordinator.tick(goal, wq_initial, ww, tick=100)
         self.assertIsNotNone(coordinator._active_agent)
 
@@ -549,6 +570,7 @@ class TestCoordinatorExploration(unittest.TestCase):
         wq = _make_wq(charted_chunks=0)
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
 
         result = coordinator.tick(goal, wq, ww, tick=100)
 
@@ -565,6 +587,7 @@ class TestCoordinatorExploration(unittest.TestCase):
         wq = _make_wq(charted_chunks=0)
         ww = _make_mock_writer()
         coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
         coordinator.tick(goal, wq, ww, tick=100)
 
         intentions = coordinator._bb.read(
