@@ -23,11 +23,16 @@ network's responsibility. LLM calls are expensive, infrequent, and narrowly scop
 Implementations can be replaced — including wholesale replacement of the RL system —
 without restructuring surrounding code.
 
+**Agents own subtasks, not goals.** Goals are the coordinator's concern. The
+coordinator translates a Goal into Subtasks and hands each Subtask to the
+appropriate agent. Agents never receive or inspect the Goal object.
+
 ## Status
 
-**Phases 1-5 complete.**
-The bridge, world model, planning, and execution layer foundation are fully
-implemented and tested. Phase 6 (navigation agent and rule-based coordinator) is next.
+**Phases 1-6 complete.**
+The full end-to-end pipeline is implemented and running against a live Factorio
+instance. The agent can navigate, gather resources, explore, and clear terrain.
+Phase 7 (construction agent and observation/reward infrastructure) is next.
 
 ```
 [✅] Core dataclasses       128 tests passing
@@ -36,13 +41,12 @@ implemented and tested. Phase 6 (navigation agent and rule-based coordinator) is
 [✅] Planning layer         ~170 tests passing
 [✅] WorldQuery/Writer refactor — all tests passing
 [✅] Phase 5  — Execution layer foundation   179 tests passing
-[ ] Phase 6  — Navigation agent and rule-based coordinator
-[ ] Phase 7  — Observation and reward infrastructure
+[✅] Phase 6  — Navigation, mining, rule-based coordinator, run loop
+[ ] Phase 7  — Construction agent, observation and reward infrastructure
 [ ] Phase 8  — Production agent (RL)
 [ ] Phase 9  — Spatial-logistics agent (RL)
 [ ] Phase 10 — Examination layer revision
 [ ] Phase 11 — LLM layer revision
-[ ] Phase 12 — Main loop and state machine
 ```
 
 ## Architecture Overview
@@ -52,12 +56,14 @@ The system has four major layers:
 **LLM planning layer** — sets coarse goals (e.g. "establish iron plate production
 at 30 plates/second", "explore and find a nearby oil patch"). Fires infrequently.
 Receives structured factory summaries, not raw game state. Also handles escalation
-when the execution network gets stuck.
+when the execution network gets stuck. Currently stubbed by `GoalQueue` in
+`llm/goal_source.py`, which accepts manually-authored or pre-recorded goal sequences.
 
-**Agent execution network** — a coordinated set of learned agents operating behind
+**Agent execution network** — a coordinated set of agents operating behind
 a clean protocol interface. Communicates internally via a shared blackboard and
-subtask ledger. Responsible for everything between receiving a goal and the game
-state changing.
+subtask ledger. The coordinator translates Goals into Subtasks and routes each
+Subtask to the appropriate agent by `agent_hint`. Agents interact with Subtasks
+only — never Goals.
 
 **Knowledge and memory system** — three distinct layers:
 - *Game knowledge* (KnowledgeBase) — what the game contains, learned at runtime
@@ -65,10 +71,64 @@ state changing.
   built incrementally during execution
 - *Behavioral memory* — strategies and patterns accumulated across runs
 
-**Game Interaction** — a dedicated interface to reading the state of the game at
-any given moment and carrying out actions selected by the execution network in-game.
+**Game interaction** — the Factorio mod (`bridge/mod/control.lua`) exposes a
+persistent-state movement and mining system driven by `on_tick` handlers. The
+`fa.move_to()` function uses Factorio's built-in pathfinder (`surface.request_path`)
+and drives `walking_state` every game tick via a dispatcher. `fa.mine_resource()`
+and `fa.mine_entity()` similarly maintain `mining_state` every tick and auto-advance
+through resource tiles. The Python bridge speaks to this mod exclusively via RCON.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation.
+
+## Running the Agent
+
+```bash
+# Default smoke-test sequence (collect iron, then explore)
+python run.py
+
+# Single inline goal
+python run.py --goal-type collection \
+              --success "inventory('iron-ore') >= 10" \
+              --failure "tick > 18000" \
+              --description "Collect 10 iron ore"
+
+# Load a recorded goal sequence
+python run.py --goals runs/my_goals.json
+
+# Save goals and outcomes after the run
+python run.py --save-goals runs/session_2026.json
+```
+
+## Running the Tests
+
+### Unit and integration tests — no Factorio required
+
+```bash
+# All unit tests
+pytest tests/
+
+# Specific layer
+pytest tests/unit/agent/ -v
+pytest tests/unit/llm/ -v
+```
+
+### In-game tests — Factorio required
+
+Start Factorio with RCON enabled (see Installation below), then:
+
+```bash
+# All in-game tests
+pytest tests_in_game/ -v
+
+# One category at a time (recommended — tests run in numbered order)
+pytest tests_in_game/01_knowledge/ -v
+pytest tests_in_game/02_collection/ -v
+pytest tests_in_game/03_exploration/ -v
+```
+
+In-game tests skip automatically if RCON is unreachable. Live log streaming is
+configured in `pytest.ini` — add `--log-cli-level DEBUG` for full coordinator
+and agent output.
 
 ## Project Structure
 
@@ -82,113 +142,32 @@ factorio-agent/
 │   ├── blackboard.py          # Shared working memory for agents
 │   ├── subtask.py             # Subtask, SubtaskLedger (live stack + history log)
 │   ├── self_model.py          # Factory self-model graph
-│   ├── network/     # Coordinator, agent registry, individual agents
-│   ├── memory/      # Behavioral memory (SQLite-backed)
-│   └── examiner/    # Rich and mechanical examination
-├── llm/             # LLM client, prompts, rate limiting
-├── data/            # Runtime knowledge database (gitignored)
+│   ├── preconditions.py       # is_at, is_reachable, can_reach_count, valid_actions
+│   ├── loop.py                # FactorioLoop — master tick loop
+│   ├── network/
+│   │   ├── agent_protocol.py  # AgentProtocol — subtask-first interface
+│   │   ├── coordinator.py     # RuleBasedCoordinator + StubCoordinator
+│   │   ├── registry.py        # AgentRegistry — no goal-type coupling
+│   │   └── agents/
+│   │       ├── navigation.py  # NavigationAgent — movement only
+│   │       └── mining.py      # MiningAgent — gathering and clearing
+│   ├── memory/
+│   │   └── behavioral.py      # BehavioralMemoryProtocol + SQLiteBehavioralMemory
+│   └── examiner/              # Rich and mechanical examination (Phase 10)
+├── llm/
+│   └── goal_source.py         # GoalSource protocol, GoalQueue implementation
+├── data/            # Runtime databases (gitignored)
 ├── config.py        # All tunable parameters
-├── tests/           # Unit and integration tests
-└── tests_in_game/   # Integration tests run with an active Factorio instance
+├── run.py           # CLI entry point
+├── tests/           # Unit and integration tests (no Factorio required)
+└── tests_in_game/   # In-game tests (Factorio required)
+    ├── conftest.py  # Shared fixtures: rcon_client, knowledge_base, run_goal
+    ├── 01_knowledge/
+    ├── 02_collection/
+    └── 03_exploration/
 ```
 
-## Running the Tests
-
-### Unit and integration tests — no Factorio required
-
-```bash
-# All tests
-python -m unittest discover -s tests -v
-
-# By layer
-python -m unittest tests.unit.bridge.test_actions
-python -m unittest tests.unit.world.test_state
-python -m unittest tests.unit.planning.test_goal_tree
-python -m unittest tests.unit.agent.test_blackboard
-python -m unittest tests.unit.agent.test_subtask
-python -m unittest tests.unit.agent.test_self_model
-python -m unittest tests.unit.agent.test_behavioral_memory
-python -m unittest tests.unit.agent.test_execution_protocol
-python -m unittest tests.unit.agent.test_registry
-python -m unittest tests.integration.test_evaluator_capabilities
-```
-
-### In-game mod tests
-
-Once the mod is installed and Factorio is running with RCON enabled:
-
-```lua
-/c require("test_bridge_live")
-```
-
-### In-Game Tests
-
-Tests in this directory require a live Factorio instance with RCON enabled.
-They are kept separate from `tests/` so that `pytest tests/` runs cleanly
-without a game connection.
-
-#### Running
-
-Start Factorio with RCON enabled (see README.md in the project root for the
-full setup), then:
-
-```bash
-# All in-game tests
-pytest tests_in_game/ -v
-
-# One category
-pytest tests_in_game/02_collection/ -v
-
-# One file
-pytest tests_in_game/02_collection/test_collect_iron.py -v
-```
-
-If Factorio is not reachable the entire session is skipped with a clear message.
-
-#### Directory structure
-
-Subdirectories of tests_in_game/ are numbered to express dependencies and natural execution order:
-
-```
-01_knowledge/   KB population — should run first; other tests benefit from a warm KB
-02_collection/  Resource gathering goals
-03_exploration/ Exploration goals
-```
-
-Within a directory, files run in alphabetical order (pytest default).
-
-#### Design principles
-
-**Tests run through the real loop.** Every test feeds a `GoalQueueEntry` to
-`FactorioLoop` via the `run_goal` or `run_goals` fixture in `conftest.py`.
-No test calls bridge, coordinator, or agent code directly. This ensures the
-test exercises the same code path as production.
-
-**Short failure conditions.** Test goals use tight failure conditions (≤ 3600
-ticks, ≈ 1 minute) so a broken agent fails fast rather than timing out after 5+
-minutes.
-
-**Isolation.** Each `run_goal` / `run_goals` call gets a fresh Blackboard,
-SubtaskLedger, SelfModel, and BehavioralMemory. Only the KnowledgeBase persists
-across the session — it accumulates entity and recipe knowledge as tests run,
-matching production behaviour.
-
-**Multi-goal sequences.** Use `run_goals([entry_a, entry_b])` when two goals
-should share accumulated world knowledge (KB state) but still run in a clean
-coordinator context. Prefer this over per-test file ordering for tightly
-coupled sequences.
-
-#### Adding new tests
-
-1. Create a file in the appropriate numbered directory (or add a new numbered
-   directory if the category is new).
-2. Use the `run_goal` or `run_goals` fixture — never build the loop manually.
-3. Keep failure conditions at ≤ 3600 ticks unless the task genuinely requires
-   longer (document why if so).
-4. Assert on `stats.goals_completed`, `stats.goals_failed`, and
-   `wq.inventory_count(...)` / `wq.charted_chunks` / etc. as appropriate.
-
-## Installing the Mod and Connecting
+## Installation
 
 ### 1. Install the Factorio mod
 
@@ -200,17 +179,49 @@ cp -r bridge/mod ~/.factorio/mods/factorio-agent_0.1.0
 xcopy bridge\mod "%APPDATA%\Factorio\mods\factorio-agent_0.1.0" /E /I
 ```
 
-Enable the mod in Factorio's mod manager before starting a game.
+Enable the mod in Factorio's mod manager before starting a game, or add it
+to `%APPDATA%\Factorio\mods\mod-list.json`.
 
 ### 2. Start Factorio with RCON enabled
 
-```bash
-factorio --start-server-load-latest \
-         --rcon-port 25575 \
-         --rcon-password factorio
+In our tests, this has been done through Steam, where one edits the game launch
+via Properties -> Launch Options, entering `--rcon-port 25575 --rcon-password factorio`.
+Alternatively, these commands can be added to the executable launching the game.
+
+#### Visualized GUI Option
+
+Upon launching the game, on the main menu hold down "Ctrl-Alt" and click "Settings".
+Select "The Rest" and find the "local-rcon-socket" and "local-rcon-password" options.
+Enter `127.0.0.1:25575` and `factorio`, respectively.
+
+#### Headless Option (No GUI)
+
+On Windows, the most reliable approach is the `--start-server` flag (the
+standalone `factorio.exe`, not the Steam-launched version):
+
+```powershell
+& "C:\Program Files (x86)\Steam\steamapps\common\Factorio\bin\x64\factorio.exe" `
+  --start-server "$env:APPDATA\Factorio\saves\agent-test.zip" `
+  --rcon-port 25575 --rcon-password factorio `
+  --mod-directory "$env:APPDATA\Factorio\mods"
 ```
 
-### 3. Configure
+### 3. Verify the connection
+
+```bash
+python -c "
+from bridge.rcon_client import RconClient
+c = RconClient('localhost', 25575, 'factorio', timeout_s=5.0)
+print(repr(c.send('/c rcon.print(type(fa))')))
+c.close()
+"
+```
+
+Should print `'table\n'`. If it prints `'nil\n'`, the mod is not loaded —
+check that the mod folder is correctly installed and the save was created
+with the mod enabled.
+
+### 4. Configure
 
 Edit `config.py` if your setup differs from the defaults:
 
@@ -242,3 +253,5 @@ RCON_PASSWORD = "factorio"
 - [`CONDITION_SCOPE.md`](CONDITION_SCOPE.md) — proximal vs non-proximal condition reference
 - [`REWARD_NAMESPACE.md`](REWARD_NAMESPACE.md) — complete reward evaluator namespace reference
 - [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md) — deferred architectural questions
+- [`PHASE_7_BRIEF.md`](PHASE_7_BRIEF.md) — component brief for the next phase
+- [`PRE_PHASE_7_DECISIONS.md`](PRE_PHASE_7_DECISIONS.md) — decisions required before Phase 7 begins
