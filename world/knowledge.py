@@ -38,6 +38,7 @@ sqlite3 module requires no dependencies and stores to a single portable file.
 Public API
 --------------------------------------------------------------------
 KnowledgeBase(data_dir, query_fn)
+  query_fn signature: (domain: str, name: str) -> dict | None
   .ensure_entity/resource/fluid/recipe/tech(name)  → Record
   .get_entity/resource/fluid/recipe/tech(name)      → Record | None
   .all_entities/resources/fluids/recipes/techs()    → dict[str, Record]
@@ -54,6 +55,7 @@ Architecture constraints
 ------------------------
 - No imports from bridge/, agent/, planning/, llm/, or memory/.
 - query_fn is injected by the main loop; this module never calls RCON directly.
+- query_fn takes (domain, name) — no Lua, no RCON command syntax appears here.
 - Every public method is safe to call with any string input; nothing raises on
   unknown names.
 """
@@ -70,7 +72,10 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-QueryFn = Callable[[str], str]
+# (domain: str, name: str) -> parsed prototype dict, or None on failure.
+# domain is one of: "entity", "resource", "fluid", "recipe", "tech"
+# The concrete implementation lives in bridge/prototype_query.py.
+PrototypeQueryFn = Callable[[str, str], Optional[dict]]
 
 _DEFAULT_DATA_DIR = Path("data") / "knowledge"
 _DB_NAME = "knowledge.db"
@@ -436,14 +441,15 @@ class KnowledgeBase:
     Parameters
     ----------
     data_dir  : Directory containing knowledge.db. Created if absent.
-    query_fn  : Callable(lua_expr: str) -> raw_json: str, injected by the main
-                loop. When None (offline/test mode), unknowns get placeholders.
+    query_fn  : PrototypeQueryFn, injected by the main loop via
+                bridge.prototype_query.make_prototype_query_fn(). When None
+                (offline/test mode), unknowns get placeholders.
     """
 
     def __init__(
         self,
         data_dir: Path = _DEFAULT_DATA_DIR,
-        query_fn: Optional[QueryFn] = None,
+        query_fn: Optional[PrototypeQueryFn] = None,
     ) -> None:
         self._dir = Path(data_dir)
         self._query_fn = query_fn
@@ -685,20 +691,53 @@ class KnowledgeBase:
     # Lua query helper
     # ------------------------------------------------------------------
 
-    def _query(self, lua_expr: str) -> Optional[dict]:
+    def _query(self, domain: str, name: str) -> Optional[dict]:
+        """
+        Call the injected PrototypeQueryFn with (domain, name).
+
+        Returns the parsed prototype dict, or None if unavailable.
+        domain is one of: "entity", "resource", "fluid", "recipe", "tech".
+
+        Accepts both dict and JSON-string returns from query_fn so that test
+        stubs can return raw JSON strings (the same shape they always did)
+        without needing to pre-parse them.  The production implementation in
+        bridge/prototype_query.py returns a dict directly.
+        """
         if self._query_fn is None:
             return None
         try:
-            raw = self._query_fn(lua_expr)
-            if not raw:
+            result = self._query_fn(domain, name)
+            if result is None:
                 return None
-            data = json.loads(raw)
-            if isinstance(data, dict) and data.get("ok") is False:
-                logger.debug("Lua query failed: %s", data.get("reason"))
-                return None
-            return data
+            if isinstance(result, dict):
+                # Production path: bridge already parsed the JSON.
+                if result.get("ok") is False:
+                    logger.debug(
+                        "prototype query: Lua error for domain=%r name=%r: %s",
+                        domain, name, result.get("reason"),
+                    )
+                    return None
+                return result
+            if isinstance(result, str):
+                # Test-stub path: caller returned a raw JSON string.
+                raw = result.strip()
+                if not raw:
+                    return None
+                data = json.loads(raw)
+                if isinstance(data, dict) and data.get("ok") is False:
+                    logger.debug(
+                        "prototype query: Lua error for domain=%r name=%r: %s",
+                        domain, name, data.get("reason"),
+                    )
+                    return None
+                return data
+            logger.debug(
+                "prototype query: unexpected return type %s for domain=%r name=%r",
+                type(result).__name__, domain, name,
+            )
+            return None
         except Exception as exc:
-            logger.debug("Lua query error for %r: %s", lua_expr, exc)
+            logger.debug("prototype query error for domain=%r name=%r: %s", domain, name, exc)
             return None
 
     # ------------------------------------------------------------------
@@ -715,7 +754,7 @@ class KnowledgeBase:
         return record
 
     def _discover_entity(self, name: str) -> EntityRecord:
-        data = self._query(f'rcon.print(fa.get_entity_prototype("{name}"))')
+        data = self._query("entity", name)
         if data is None:
             return EntityRecord.placeholder(name)
         try:
@@ -744,7 +783,7 @@ class KnowledgeBase:
         return record
 
     def _discover_resource(self, name: str) -> ResourceRecord:
-        data = self._query(f'rcon.print(fa.get_resource_prototype("{name}"))')
+        data = self._query("resource", name)
         if data is None:
             return ResourceRecord.placeholder(name)
         try:
@@ -776,7 +815,7 @@ class KnowledgeBase:
 
     def _discover_fluid(self, name: str,
                         temperature: Optional[int]) -> FluidRecord:
-        data = self._query(f'rcon.print(fa.get_fluid_prototype("{name}"))')
+        data = self._query("fluid", name)
         if data is None:
             return FluidRecord.placeholder(name, temperature)
         try:
@@ -807,7 +846,7 @@ class KnowledgeBase:
         return record
 
     def _discover_recipe(self, name: str) -> RecipeRecord:
-        data = self._query(f'rcon.print(fa.get_recipe_prototype("{name}"))')
+        data = self._query("recipe", name)
         if data is None:
             return RecipeRecord.placeholder(name)
         try:
@@ -863,7 +902,7 @@ class KnowledgeBase:
         return record
 
     def _discover_tech(self, name: str) -> TechRecord:
-        data = self._query(f'rcon.print(fa.get_technology("{name}"))')
+        data = self._query("tech", name)
         if data is None:
             return TechRecord.placeholder(name)
         try:

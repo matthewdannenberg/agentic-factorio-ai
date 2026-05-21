@@ -97,10 +97,9 @@ _TECH_DEFS = {
 
 
 def _make_query_fn(*known_techs: str):
-    def qfn(expr: str) -> str:
-        for name in known_techs:
-            if f'"{name}"' in expr:
-                return json.dumps(_TECH_DEFS[name])
+    def qfn(domain: str, name: str) -> str:
+        if name in known_techs and name in _TECH_DEFS:
+            return json.dumps(_TECH_DEFS[name])
         return json.dumps({"ok": False, "reason": "unknown_technology"})
     return qfn
 
@@ -111,9 +110,8 @@ def _kb_with(*tech_names: str, tmp_dir: str = None) -> tuple[KnowledgeBase, str]
     kb = KnowledgeBase(data_dir=Path(d), query_fn=qfn)
     for name in tech_names:
         kb.ensure_tech(name)
-    # Close the DB connection after loading — tech_tree tests only use the
-    # in-memory cache (no SQL query methods), so this is safe cross-platform.
-    kb.close()
+    # KB stays open — TechTree methods call all_prerequisites() (recursive
+    # CTE) and ensure_tech() (writes), both of which require an open connection.
     return kb, d
 
 
@@ -475,7 +473,7 @@ class TestAbsorbResearchState(unittest.TestCase):
     def test_absorb_idempotent(self):
         tmp = tempfile.mkdtemp()
         call_count = [0]
-        def counting_qfn(expr):
+        def counting_qfn(domain, name):
             call_count[0] += 1
             return json.dumps(_TECH_DEFS["automation"])
         kb = KnowledgeBase(data_dir=Path(tmp), query_fn=counting_qfn)
@@ -551,7 +549,7 @@ class TestTechTreePersistence(unittest.TestCase):
 class TestModCompatibility(unittest.TestCase):
     def test_mod_tech_learned_via_query_fn(self):
         tmp = tempfile.mkdtemp()
-        def qfn(expr):
+        def qfn(domain, name):
             return json.dumps({
                 "name": "se-interstellar-travel",
                 "prerequisites": ["space-science"],
@@ -568,7 +566,7 @@ class TestModCompatibility(unittest.TestCase):
 
     def test_error_response_from_query_yields_placeholder(self):
         tmp = tempfile.mkdtemp()
-        def qfn(expr):
+        def qfn(domain, name):
             return json.dumps({"ok": False, "reason": "unknown_technology"})
         kb = KnowledgeBase(data_dir=Path(tmp), query_fn=qfn)
         tree = TechTree(kb)
@@ -593,12 +591,11 @@ class TestModCompatibility(unittest.TestCase):
             "effects": [{"type": "unlock-recipe", "recipe": "mod-assembler-3"}],
             "researched": False, "enabled": True,
         }
-        def qfn(expr):
-            if "mod-custom-assembler" in expr:
+        def qfn(domain, name):
+            if name == "mod-custom-assembler":
                 return json.dumps(mod_def)
-            for name, data in _TECH_DEFS.items():
-                if f'"{name}"' in expr:
-                    return json.dumps(data)
+            if name in _TECH_DEFS:
+                return json.dumps(_TECH_DEFS[name])
             return json.dumps({"ok": False, "reason": "unknown"})
 
         kb = KnowledgeBase(data_dir=Path(tmp), query_fn=qfn)

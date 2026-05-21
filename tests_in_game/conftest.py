@@ -65,6 +65,7 @@ from agent.network.registry import AgentRegistry
 from agent.self_model import SelfModel
 from agent.subtask import SubtaskLedger
 from bridge.action_executor import ActionExecutor
+from bridge.prototype_query import make_prototype_query_fn
 from bridge.rcon_client import RconClient
 from bridge.state_parser import StateParser
 from llm.goal_source import GoalQueue, GoalQueueEntry
@@ -265,11 +266,10 @@ def _execute_goals(
     queue     = GoalQueue(entries)
     evaluator = RewardEvaluator()
 
-    # Wire the KB's query_fn to the live RCON client. The KB's _query() method
-    # passes expressions like 'rcon.print(fa.get_recipe_prototype("x"))' directly
-    # to query_fn. client.send() expects a full Factorio console command, so we
-    # must prepend "/c " here.
-    kb._query_fn = lambda expr: client.send(f"/c {expr}")
+    # Wire the KB to Factorio via the bridge's prototype query factory.
+    # make_prototype_query_fn owns all Lua construction and mod namespacing —
+    # knowledge.py only ever calls query_fn("recipe", "iron-gear-wheel") etc.
+    kb._query_fn = make_prototype_query_fn(client)
 
     # StateParser accepts resource_registry (not knowledge_base) — it handles
     # resource patch name registration. KB population (recipes, techs, entities)

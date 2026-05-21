@@ -169,7 +169,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_ensure_with_query_fn_parses_response(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json()) as kb:
+                               query_fn=lambda domain, name: _entity_json()) as kb:
                 rec = kb.ensure_entity("assembling-machine-2")
                 self.assertFalse(rec.is_placeholder)
                 self.assertEqual(rec.tile_width, 3)
@@ -179,7 +179,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_furnace_maps_to_smelting(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json(
+                               query_fn=lambda domain, name: _entity_json(
                                    proto_type="furnace")) as kb:
                 rec = kb.ensure_entity("electric-furnace")
                 self.assertEqual(rec.category, EntityCategory.SMELTING.value)
@@ -187,7 +187,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_unknown_proto_type_maps_to_other(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json(
+                               query_fn=lambda domain, name: _entity_json(
                                    proto_type="space-wizard-device")) as kb:
                 rec = kb.ensure_entity("mod-thing")
                 self.assertEqual(rec.category, EntityCategory.OTHER.value)
@@ -195,7 +195,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_ensure_idempotent_no_extra_queries(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _entity_json()
+            def qfn(domain, name): calls[0] += 1; return _entity_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_entity("assembling-machine-2")
                 kb.ensure_entity("assembling-machine-2")
@@ -204,7 +204,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_bad_json_yields_placeholder(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: "not json {{{") as kb:
+                               query_fn=lambda domain, name: "not json {{{") as kb:
                 rec = kb.ensure_entity("broken-thing")
                 self.assertTrue(rec.is_placeholder)
 
@@ -222,7 +222,7 @@ class TestEntityRegistry(unittest.TestCase):
     def test_category_enum_property(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json(
+                               query_fn=lambda domain, name: _entity_json(
                                    proto_type="furnace")) as kb:
                 rec = kb.ensure_entity("electric-furnace")
                 self.assertEqual(rec.category_enum, EntityCategory.SMELTING)
@@ -243,7 +243,7 @@ class TestResourceRegistry(unittest.TestCase):
     def test_parses_solid_resource(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _resource_json()) as kb:
+                               query_fn=lambda domain, name: _resource_json()) as kb:
                 rec = kb.ensure_resource("iron-ore")
                 self.assertFalse(rec.is_placeholder)
                 self.assertFalse(rec.is_fluid)
@@ -251,7 +251,7 @@ class TestResourceRegistry(unittest.TestCase):
 
     def test_parses_fluid_infinite_resource(self):
         with tempfile.TemporaryDirectory() as tmp:
-            qfn = lambda e: _resource_json(name="crude-oil", is_fluid=True,
+            qfn = lambda domain, name: _resource_json(name="crude-oil", is_fluid=True,
                                            is_infinite=True, display_name="Crude Oil")
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 rec = kb.ensure_resource("crude-oil")
@@ -261,7 +261,7 @@ class TestResourceRegistry(unittest.TestCase):
     def test_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _resource_json()
+            def qfn(domain, name): calls[0] += 1; return _resource_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_resource("iron-ore")
                 kb.ensure_resource("iron-ore")
@@ -288,7 +288,7 @@ class TestFluidRegistry(unittest.TestCase):
     def test_parses_fluid(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json()) as kb:
+                               query_fn=lambda domain, name: _fluid_json()) as kb:
                 rec = kb.ensure_fluid("steam")
                 self.assertFalse(rec.is_placeholder)
                 self.assertEqual(rec.default_temperature, 165)
@@ -297,7 +297,7 @@ class TestFluidRegistry(unittest.TestCase):
     def test_temperature_variants_stored_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json()) as kb:
+                               query_fn=lambda domain, name: _fluid_json()) as kb:
                 base = kb.ensure_fluid("steam")
                 hot  = kb.ensure_fluid("steam", temperature=500)
                 self.assertIsNone(base.temperature)
@@ -308,7 +308,7 @@ class TestFluidRegistry(unittest.TestCase):
     def test_fuel_fluid(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json(
+                               query_fn=lambda domain, name: _fluid_json(
                                    fuel_value=5_000_000.0)) as kb:
                 rec = kb.ensure_fluid("rocket-fuel")
                 self.assertTrue(rec.is_fuel)
@@ -317,14 +317,14 @@ class TestFluidRegistry(unittest.TestCase):
     def test_non_fuel_fluid(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json(
+                               query_fn=lambda domain, name: _fluid_json(
                                    fuel_value=0.0)) as kb:
                 self.assertFalse(kb.ensure_fluid("water").is_fuel)
 
     def test_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _fluid_json()
+            def qfn(domain, name): calls[0] += 1; return _fluid_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_fluid("steam")
                 kb.ensure_fluid("steam")
@@ -333,7 +333,7 @@ class TestFluidRegistry(unittest.TestCase):
     def test_get_with_temperature(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json()) as kb:
+                               query_fn=lambda domain, name: _fluid_json()) as kb:
                 kb.ensure_fluid("steam", temperature=165)
                 self.assertIsNotNone(kb.get_fluid("steam", temperature=165))
                 self.assertIsNone(kb.get_fluid("steam"))   # base not yet loaded
@@ -353,7 +353,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_parses_recipe(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 rec = kb.ensure_recipe("iron-gear-wheel")
                 self.assertFalse(rec.is_placeholder)
                 self.assertEqual(len(rec.ingredients), 1)
@@ -366,7 +366,7 @@ class TestRecipeRegistry(unittest.TestCase):
 
     def test_fluid_ingredient_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def qfn(e):
+            def qfn(domain, name):
                 return json.dumps({
                     "name": "plastic-bar", "category": "chemistry",
                     "energy_required": 1.0,
@@ -389,7 +389,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _recipe_json()
+            def qfn(domain, name): calls[0] += 1; return _recipe_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
                 kb.ensure_recipe("iron-gear-wheel")
@@ -403,7 +403,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_recipes_for_product(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
                 results = kb.recipes_for_product("iron-gear-wheel")
                 self.assertEqual(len(results), 1)
@@ -417,7 +417,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_recipes_for_ingredient(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
                 self.assertEqual(len(kb.recipes_for_ingredient("iron-plate")), 1)
 
@@ -429,7 +429,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_recipes_made_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json(
+                               query_fn=lambda domain, name: _recipe_json(
                                    made_in=["assembling-machine-1",
                                             "assembling-machine-2"])) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
@@ -440,7 +440,7 @@ class TestRecipeRegistry(unittest.TestCase):
     def test_recipes_made_in_multiple(self):
         with tempfile.TemporaryDirectory() as tmp:
             call_count = [0]
-            def qfn(e):
+            def qfn(domain, name):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return _recipe_json(name="iron-gear-wheel",
@@ -480,7 +480,7 @@ class TestTechRegistry(unittest.TestCase):
     def test_parses_tech(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _tech_json()) as kb:
+                               query_fn=lambda domain, name: _tech_json()) as kb:
                 rec = kb.ensure_tech("automation")
                 self.assertFalse(rec.is_placeholder)
                 self.assertEqual(rec.prerequisites, [])
@@ -488,8 +488,8 @@ class TestTechRegistry(unittest.TestCase):
 
     def test_parses_prerequisites(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def qfn(e):
-                if "logistics" in e:
+            def qfn(domain, name):
+                if name == "logistics":
                     return _tech_json(name="logistics",
                                      prerequisites=["automation"])
                 return _tech_json()
@@ -500,8 +500,8 @@ class TestTechRegistry(unittest.TestCase):
 
     def test_all_prerequisites_transitive(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def qfn(e):
-                if "logistics" in e:
+            def qfn(domain, name):
+                if name == "logistics":
                     return _tech_json(name="logistics",
                                      prerequisites=["automation"])
                 return _tech_json()
@@ -524,7 +524,7 @@ class TestTechRegistry(unittest.TestCase):
     def test_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _tech_json()
+            def qfn(domain, name): calls[0] += 1; return _tech_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_tech("automation")
                 kb.ensure_tech("automation")
@@ -538,7 +538,7 @@ class TestTechRegistry(unittest.TestCase):
     def test_techs_unlocking_recipe(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _tech_json(
+                               query_fn=lambda domain, name: _tech_json(
                                    recipe_effects=["assembling-machine-1"])) as kb:
                 kb.ensure_tech("automation")
                 results = kb.techs_unlocking_recipe("assembling-machine-1")
@@ -594,11 +594,8 @@ class TestProductionChain(unittest.TestCase):
         }
 
         # Patch the KB's query_fn for this setup call
-        def qfn(expr):
-            for name, j in recipes.items():
-                if f'"{name}"' in expr:
-                    return j
-            return json.dumps({"ok": False, "reason": "unknown"})
+        def qfn(domain, name):
+            return recipes.get(name, json.dumps({"ok": False, "reason": "unknown"}))
 
         kb._query_fn = qfn
         for name in recipes:
@@ -649,7 +646,7 @@ class TestPersistence(unittest.TestCase):
     def test_entity_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json(
+                               query_fn=lambda domain, name: _entity_json(
                                    tile_width=3, ingredient_slots=4)) as kb:
                 kb.ensure_entity("assembling-machine-2")
 
@@ -663,7 +660,7 @@ class TestPersistence(unittest.TestCase):
     def test_resource_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _resource_json()) as kb:
+                               query_fn=lambda domain, name: _resource_json()) as kb:
                 kb.ensure_resource("iron-ore")
 
             with KnowledgeBase(data_dir=Path(tmp)) as kb:
@@ -675,7 +672,7 @@ class TestPersistence(unittest.TestCase):
     def test_fluid_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json(
+                               query_fn=lambda domain, name: _fluid_json(
                                    default_temperature=165)) as kb:
                 kb.ensure_fluid("steam", temperature=165)
 
@@ -688,7 +685,7 @@ class TestPersistence(unittest.TestCase):
     def test_recipe_with_ingredients_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
 
             with KnowledgeBase(data_dir=Path(tmp)) as kb:
@@ -701,7 +698,7 @@ class TestPersistence(unittest.TestCase):
 
     def test_recipe_ingredient_order_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def qfn(e):
+            def qfn(domain, name):
                 return json.dumps({
                     "name": "processing-unit", "category": "crafting",
                     "energy_required": 10.0,
@@ -725,8 +722,8 @@ class TestPersistence(unittest.TestCase):
 
     def test_tech_with_prereqs_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def qfn(e):
-                if "logistics" in e:
+            def qfn(domain, name):
+                if name == "logistics":
                     return _tech_json(name="logistics",
                                      prerequisites=["automation"],
                                      recipe_effects=["transport-belt"])
@@ -745,9 +742,9 @@ class TestPersistence(unittest.TestCase):
     def test_multiple_entities_accumulate(self):
         with tempfile.TemporaryDirectory() as tmp:
             call_count = [0]
-            def qfn(e):
+            def qfn(domain, name):
                 call_count[0] += 1
-                if "iron-chest" in e:
+                if name == "iron-chest":
                     return _entity_json(name="iron-chest", proto_type="container",
                                         tile_width=1, tile_height=1,
                                         has_recipe_slot=False,
@@ -766,7 +763,7 @@ class TestPersistence(unittest.TestCase):
     def test_sql_queries_work_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 kb.ensure_recipe("iron-gear-wheel")
 
             with KnowledgeBase(data_dir=Path(tmp)) as kb:
@@ -796,7 +793,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 self.assertTrue(rec.is_placeholder)
 
                 # Phase 2: query_fn becomes available mid-session
-                kb._query_fn = lambda e: _tech_json()
+                kb._query_fn = lambda domain, name: _tech_json()
                 rec2 = kb.ensure_tech("automation")
                 self.assertFalse(rec2.is_placeholder)
                 self.assertIn("assembling-machine-1", rec2.unlocks_recipes)
@@ -804,7 +801,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
     def test_ensure_does_not_re_query_non_placeholder(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _tech_json()
+            def qfn(domain, name): calls[0] += 1; return _tech_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_tech("automation")
                 first_count = calls[0]
@@ -828,7 +825,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
 
             # Session 2: now online
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _tech_json()) as kb:
+                               query_fn=lambda domain, name: _tech_json()) as kb:
                 counts = kb.enrich_placeholders()
                 self.assertEqual(counts["techs"], 1)
                 self.assertFalse(kb.get_tech("automation").is_placeholder)
@@ -842,7 +839,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 self.assertTrue(kb.get_entity("assembling-machine-2").is_placeholder)
 
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _entity_json()) as kb:
+                               query_fn=lambda domain, name: _entity_json()) as kb:
                 counts = kb.enrich_placeholders()
                 self.assertEqual(counts["entities"], 1)
                 self.assertFalse(
@@ -854,7 +851,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 kb.ensure_resource("iron-ore")
 
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _resource_json()) as kb:
+                               query_fn=lambda domain, name: _resource_json()) as kb:
                 counts = kb.enrich_placeholders()
                 self.assertEqual(counts["resources"], 1)
                 self.assertFalse(kb.get_resource("iron-ore").is_placeholder)
@@ -865,7 +862,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 kb.ensure_fluid("steam", temperature=165)
 
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _fluid_json()) as kb:
+                               query_fn=lambda domain, name: _fluid_json()) as kb:
                 counts = kb.enrich_placeholders()
                 self.assertEqual(counts["fluids"], 1)
                 self.assertFalse(
@@ -877,7 +874,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 kb.ensure_recipe("iron-gear-wheel")
 
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _recipe_json()) as kb:
+                               query_fn=lambda domain, name: _recipe_json()) as kb:
                 counts = kb.enrich_placeholders()
                 self.assertEqual(counts["recipes"], 1)
                 self.assertFalse(
@@ -886,7 +883,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
     def test_enrich_placeholders_skips_non_placeholders(self):
         with tempfile.TemporaryDirectory() as tmp:
             calls = [0]
-            def qfn(e): calls[0] += 1; return _tech_json()
+            def qfn(domain, name): calls[0] += 1; return _tech_json()
             with KnowledgeBase(data_dir=Path(tmp), query_fn=qfn) as kb:
                 kb.ensure_tech("automation")   # real record, 1 query
                 call_count_after_ensure = calls[0]
@@ -907,7 +904,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
     def test_enrich_placeholders_returns_zero_counts_when_no_placeholders(self):
         with tempfile.TemporaryDirectory() as tmp:
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _tech_json()) as kb:
+                               query_fn=lambda domain, name: _tech_json()) as kb:
                 kb.ensure_tech("automation")   # real record
                 counts = kb.enrich_placeholders()
                 self.assertEqual(sum(counts.values()), 0)
@@ -920,7 +917,7 @@ class TestPlaceholderEnrichment(unittest.TestCase):
 
             # Session 2: enrich
             with KnowledgeBase(data_dir=Path(tmp),
-                               query_fn=lambda e: _tech_json()) as kb:
+                               query_fn=lambda domain, name: _tech_json()) as kb:
                 kb.enrich_placeholders()
 
             # Session 3: no query_fn — enriched data should still be present
