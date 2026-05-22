@@ -145,7 +145,10 @@ local function request_movement_path(player)
     -- entity itself. "object" is what the Factorio pathfinder uses for
     -- standard unit movement around solid obstacles.
     local collision_mask = {
-        layers = {object = true},
+        layers = {
+            object     = true,   -- trees, rocks, walls, buildings
+            water_tile = true,   -- water (not walkable)
+        },
         consider_tile_transitions = true,
     }
 

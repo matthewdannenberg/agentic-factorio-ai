@@ -1017,6 +1017,117 @@ async("navigate_tree_maze",
     end
 )
 
+async("navigate_around_water",
+    -- Place a strip of water tiles directly east of the player, forcing
+    -- the pathfinder to route north or south around them.
+    -- Water must be placed with surface.set_tiles(). The strip is 1 tile
+    -- wide and 5 tiles tall, centered on the player's Y.
+    -- Goal is 8 tiles east — on the other side of the water.
+    --
+    -- Layout (W=water, .=land, S=start, G=goal):
+    --   row 7:  .  .  .  .  .  .  .  .  .
+    --   row 8:  .  .  W  .  .  .  .  .  .
+    --   row 9:  .  .  W  .  .  .  .  .  .
+    --   row10:  S  .  W  .  .  .  .  .  G
+    --   row11:  .  .  W  .  .  .  .  .  .
+    --   row12:  .  .  W  .  .  .  .  .  .
+    --   row13:  .  .  .  .  .  .  .  .  .
+    function(state)
+        local player = get_player()
+        player.teleport({x = 30, y = 30})
+        fa.stop_movement()
+
+        local base_x = math.floor(player.position.x)
+        local base_y = math.floor(player.position.y)
+        local water_x = base_x + 2
+
+        -- Save the original tiles so we can restore them
+        state.original_tiles = {}
+        state.water_positions = {}
+        for dy = -2, 2 do
+            local pos = {x = water_x, y = base_y + dy}
+            local tile = player.surface.get_tile(pos.x, pos.y)
+            table.insert(state.original_tiles, {
+                position = pos,
+                name     = tile.name,
+            })
+            table.insert(state.water_positions, pos)
+        end
+
+        -- Place water tiles
+        local water_tiles = {}
+        for dy = -2, 2 do
+            table.insert(water_tiles, {
+                name     = "water",
+                position = {x = water_x, y = base_y + dy},
+            })
+        end
+        player.surface.set_tiles(water_tiles)
+
+        state.start_x    = player.position.x
+        state.start_y    = player.position.y
+        state.start_tick = game.tick
+        state.base_x     = base_x
+        state.base_y     = base_y
+        state.water_x    = water_x
+
+        local goal = {x = base_x + 7, y = base_y}
+        fa.move_to(goal, true)
+
+        test_print(string.format(
+            "[INFO] water_test: placed water at x=%d rows %d to %d, moving to (%.0f,%.0f)",
+            water_x, base_y - 2, base_y + 2, goal.x, goal.y
+        ))
+    end,
+    function(state, t)
+        local player = get_player()
+        local final_x = player.position.x
+        local final_y = player.position.y
+        local elapsed = game.tick - (state.start_tick or 0)
+        local status_raw = fa.get_movement_status()
+        local status = parse_json(status_raw)
+        fa.stop_movement()
+
+        -- Restore original tiles
+        local restore_tiles = {}
+        for _, orig in ipairs(state.original_tiles or {}) do
+            table.insert(restore_tiles, {name = orig.name, position = orig.position})
+        end
+        if #restore_tiles > 0 then
+            player.surface.set_tiles(restore_tiles)
+        end
+
+        test_print(string.format(
+            "[INFO] water_test: elapsed=%d status=%s pos=(%.1f,%.1f)",
+            elapsed,
+            tostring(status and status.status),
+            final_x, final_y
+        ))
+
+        -- Player should have routed around the water (north or south)
+        -- and made meaningful progress eastward.
+        local dist_east = final_x - state.start_x
+        local went_around_y = math.abs(final_y - state.start_y) > 1.5
+
+        t.ok(
+            dist_east > 2.0,
+            string.format(
+                "player should have moved east past the water strip; " ..
+                "start=(%.1f,%.1f) end=(%.1f,%.1f) dist_east=%.2f. " ..
+                "If dist_east<2, pathfinder returned unreachable or never walked.",
+                state.start_x, state.start_y, final_x, final_y, dist_east
+            )
+        )
+        -- Note whether they went around — this is informational, not a hard fail,
+        -- since the pathfinder might find a narrow gap or diagonal route.
+        if went_around_y then
+            test_print("[INFO] water_test: player routed around water (Y changed)")
+        else
+            test_print("[INFO] water_test: player went through gap without significant Y change")
+        end
+    end
+)
+
 async("unreachable_in_void",
     function(state)
         local player = get_player()
