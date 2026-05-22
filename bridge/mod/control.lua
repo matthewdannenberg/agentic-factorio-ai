@@ -554,7 +554,7 @@ function fa.get_exploration()
     local charted_chunks = 0
     local ok_iter = pcall(function()
         for chunk in player.surface.get_chunks() do
-            if player.force.is_chunk_charted(player.surface, chunk.position) then
+            if player.force.is_chunk_charted(player.surface, chunk) then
                 charted_chunks = charted_chunks + 1
             end
         end
@@ -582,7 +582,7 @@ function fa._player_table(player)
     local charted_chunks = 0
     pcall(function()
         for chunk in player.surface.get_chunks() do
-            if player.force.is_chunk_charted(player.surface, chunk.position) then
+            if player.force.is_chunk_charted(player.surface, chunk) then
                 charted_chunks = charted_chunks + 1
             end
         end

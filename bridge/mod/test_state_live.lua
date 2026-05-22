@@ -122,23 +122,22 @@ TS.suite("exploration", {
             tostring(parsed.charted_chunks))
     end,
 
-    get_chart_size_returns_number = function(t)
-        -- Directly verify what get_chart_size returns so we know how to use it.
+    charted_chunk_count_via_iterator = function(t)
+        -- Verified 2.x API: surface.get_chunks() + force.is_chunk_charted(surface, chunk).
+        -- get_chart_size() was removed; chunk.position is wrong (pass chunk directly).
         local player = get_player()
         t.ok(player and player.valid, "need a valid player")
-        local ok, val = pcall(function()
-            return player.force.get_chart_size(player.surface)
-        end)
-        t.ok(ok, "get_chart_size should not error; err=" .. tostring(val))
-        test_print("[INFO] get_chart_size type=" .. type(val) .. " val=" .. tostring(val))
-        if type(val) == "table" then
-            for k, v in pairs(val) do
-                test_print("[INFO]   " .. tostring(k) .. "=" .. tostring(v))
+        local count = 0
+        local ok = pcall(function()
+            for chunk in player.surface.get_chunks() do
+                if player.force.is_chunk_charted(player.surface, chunk) then
+                    count = count + 1
+                end
             end
-        end
-        t.is_number(val,
-            "get_chart_size must return a number in 2.x; got type=" .. type(val) ..
-            ". If it returns a table, fa._player_table charted_chunks logic needs updating.")
+        end)
+        t.ok(ok, "get_chunks/is_chunk_charted should not error")
+        t.ok(count > 0,
+            "should find charted chunks; got: " .. tostring(count))
     end,
 
     player_table_charted_chunks_matches_exploration = function(t)

@@ -344,6 +344,7 @@ TP.suite("resource_fluid_prototype", {
     end,
 
     crude_oil_is_infinite_resource = function(t)
+        -- 2.x: proto.infinite_resource is the correct field (mp.infinite is nil).
         local raw = fa.get_resource_prototype("crude-oil")
         local parsed = parse_json(raw)
         t.ok(parsed ~= nil, "must return valid JSON")
@@ -351,16 +352,8 @@ TP.suite("resource_fluid_prototype", {
             test_print("[SKIP] crude-oil not available: " .. tostring(parsed.reason))
             return
         end
-        -- Print what we got to aid diagnosis
-        test_print("[INFO] crude-oil infinite=" .. tostring(parsed.infinite)
-                   .. " is_fluid=" .. tostring(parsed.is_fluid)
-                   .. " category=" .. tostring(parsed.category))
-        t.is_bool(parsed.infinite,
-            "infinite must be boolean; got type=" .. type(parsed.infinite))
-        t.ok(parsed.infinite,
-            "crude-oil should be infinite (fluid resource); " ..
-            "if false, proto.infinite_resource may not be set in 2.x for fluid resources. " ..
-            "Check is_fluid=" .. tostring(parsed.is_fluid))
+        t.is_bool(parsed.infinite, "infinite must be boolean")
+        t.ok(parsed.infinite, "crude-oil should be infinite")
     end,
 
     invalid_resource_returns_error = function(t)
