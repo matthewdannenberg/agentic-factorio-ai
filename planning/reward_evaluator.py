@@ -135,7 +135,7 @@ class RewardEvaluator:
         start_tick: int,
     ) -> EvaluationResult:
         elapsed = max(0, tick - start_tick)
-        ns = self._build_namespace(wq, tick)
+        ns = self._build_namespace(wq, tick, elapsed)
 
         success = self._eval_bool(success_condition, ns, "success_condition")
         failure = self._eval_bool(failure_condition, ns, "failure_condition")
@@ -161,7 +161,7 @@ class RewardEvaluator:
             elapsed_ticks=elapsed,
         )
 
-    def _build_namespace(self, wq: "WorldQuery", tick: int) -> dict:
+    def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0) -> dict:
         if self._tracker is not None:
             production_rate = self._tracker.rate
         else:
@@ -184,6 +184,11 @@ class RewardEvaluator:
             # "state.X" forms remain valid for backwards compatibility.
             "state":     wq.state,
             "tick":      tick,
+            # elapsed_ticks: ticks since this goal was activated.
+            # Use instead of raw tick for time-based conditions so
+            # they are independent of absolute game clock.
+            # e.g. failure_condition="elapsed_ticks > 1200"
+            "elapsed_ticks": elapsed_ticks,
             # WorldQuery itself, for composable query use in conditions.
             "wq":        wq,
             # Inventory — NON-PROXIMAL
