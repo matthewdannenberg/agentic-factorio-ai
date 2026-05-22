@@ -138,56 +138,34 @@ local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
 local function request_movement_path(player)
     if not player or not player.valid or not player.character then return end
 
-    -- Build the collision mask as a keyed table {["layer-name"] = true},
-    -- which is the format request_path() accepts in Factorio 2.x.
-    -- The character prototype's collision_mask is a LuaCollisionMask userdata
-    -- whose keys are layer name strings — we iterate it with pairs() and build
-    -- the keyed table. Fallback to known layers if prototype access fails.
-    --
-    -- Important: do NOT pass an array of strings ({"layer1","layer2"}) — that
-    -- format is silently ignored by request_path, causing straight-line paths
-    -- through solid obstacles.
-    local collision_mask = {["player-layer"]=true, ["object-layer"]=true, ["water-tile"]=true}
-    local ok_mask, proto = pcall(function()
-        return player.character.prototype.collision_mask
-    end)
-    if ok_mask and proto then
-        local keyed = {}
-        local count = 0
-        local ok_iter = pcall(function()
-            for layer_name, _ in pairs(proto) do
-                if type(layer_name) == "string" then
-                    keyed[layer_name] = true
-                    count = count + 1
-                end
-            end
-        end)
-        if ok_iter and count > 0 then
-            collision_mask = keyed
-        end
-    end
+    -- Pass the CollisionMask prototype object directly. Confirmed by diagnostic:
+    --   request_path with raw proto: ok=true
+    --   request_path with proto.layers: error "Key 'layers' not found"
+    -- The API wants the full CollisionMask userdata, not its inner layers table.
+    -- The prototype's actual layers are: is_object, player, train — these ensure
+    -- the pathfinder routes around walls, trees, and other solid entities.
+    local collision_mask = player.character.prototype.collision_mask
 
-    local ok, id = pcall(function()
+    local ok, id_or_err = pcall(function()
         return player.surface.request_path({
-            bounding_box = {{-0.2, -0.2}, {0.2, 0.2}},
-            collision_mask = collision_mask,
-            start  = player.position,
-            goal   = movement_goal,
-            force  = player.force,
-            radius = ARRIVAL_THRESHOLD,
-            can_open_gates            = true,
-            path_resolution_modifier  = 0,
+            bounding_box             = {{-0.2, -0.2}, {0.2, 0.2}},
+            collision_mask           = collision_mask,
+            start                    = player.position,
+            goal                     = movement_goal,
+            force                    = player.force,
+            radius                   = ARRIVAL_THRESHOLD,
+            can_open_gates           = true,
+            path_resolution_modifier = 0,
         })
     end)
 
-    if ok and id then
-        path_request_id   = id
+    if ok and id_or_err then
+        path_request_id   = id_or_err
         movement_path     = nil
         path_waypoint_idx = 1
         path_unreachable  = false
     else
-        -- request_path unavailable or errored — fall back to direct walking.
-        -- This path is taken when the surface is not yet fully loaded.
+        log("fa.move_to: request_path failed: " .. tostring(id_or_err))
         movement_path     = {{position = movement_goal}}
         path_waypoint_idx = 1
         path_unreachable  = false
@@ -588,12 +566,22 @@ function fa._player_table(player)
         return player.force.get_chart_size(player.surface)
     end)
     if ok_cc and cc then charted_chunks = cc end
+    local mov_status = "idle"
+    if path_unreachable then
+        mov_status = "unreachable"
+    elseif path_request_id ~= nil then
+        mov_status = "pathing"
+    elseif movement_goal ~= nil or movement_path ~= nil then
+        mov_status = "walking"
+    end
+
     return {
-        position       = {x = player.position.x, y = player.position.y},
-        health         = player.character and player.character.health or 100.0,
-        inventory      = inventory_to_list(inv),
-        reachable      = fa._reachable_ids(player),
-        charted_chunks = charted_chunks,
+        position        = {x = player.position.x, y = player.position.y},
+        health          = player.character and player.character.health or 100.0,
+        inventory       = inventory_to_list(inv),
+        reachable       = fa._reachable_ids(player),
+        charted_chunks  = charted_chunks,
+        movement_status = mov_status,
     }
 end
 
@@ -1221,6 +1209,55 @@ function fa.move_to(position, pathfind)
     return ok_response()
 end
 
+-- Diagnostic: move_to without any collision_mask parameter.
+-- Used by test_movement_live.lua to determine whether the prototype
+-- collision_mask is causing the pathfinder to see everything as blocked.
+function fa.move_to_no_mask(position)
+    local player = get_player()
+    if not player or not player.valid or not player.character then
+        return err_response("no_character")
+    end
+    local dx = position.x - player.position.x
+    local dy = position.y - player.position.y
+    if math.abs(dx) < ARRIVAL_THRESHOLD and math.abs(dy) < ARRIVAL_THRESHOLD then
+        movement_goal    = nil
+        movement_path    = nil
+        path_request_id  = nil
+        path_unreachable = false
+        player.character.walking_state = {walking=false, direction=defines.direction.north}
+        return ok_response()
+    end
+    movement_goal     = {x = position.x, y = position.y}
+    movement_path     = nil
+    path_request_id   = nil
+    path_unreachable  = false
+    path_waypoint_idx = 1
+    local ok, id_or_err = pcall(function()
+        return player.surface.request_path({
+            bounding_box             = {{-0.2, -0.2}, {0.2, 0.2}},
+            -- collision_mask intentionally omitted
+            start                    = player.position,
+            goal                     = movement_goal,
+            force                    = player.force,
+            radius                   = ARRIVAL_THRESHOLD,
+            can_open_gates           = true,
+            path_resolution_modifier = 0,
+        })
+    end)
+    if ok and id_or_err then
+        path_request_id   = id_or_err
+        movement_path     = nil
+        path_waypoint_idx = 1
+        path_unreachable  = false
+    else
+        log("fa.move_to_no_mask: request_path failed: " .. tostring(id_or_err))
+        movement_path     = {{position = movement_goal}}
+        path_waypoint_idx = 1
+        path_unreachable  = false
+    end
+    return ok_response()
+end
+
 function fa.stop_movement()
     local player = get_player()
     if not player or not player.valid or not player.character then
@@ -1668,6 +1705,7 @@ end
 
 -- Testing: load suite and register as a remote command
 T = require("test_bridge_live")
+TM = require("test_movement_live")
 
 commands.add_command(
     "agent-test",
