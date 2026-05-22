@@ -245,6 +245,10 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # Emit StopMining on the first tick after reset() so any in-progress
         # Lua mining is halted before navigation or other subtasks begin.
         self._pending_stop_mining: bool = False
+        # Counts how many times exploration derivation has been attempted
+        # (including after escalation). Used to rotate waypoint direction so
+        # repeated stalls try different directions rather than the same one.
+        self._exploration_attempt: int = 0
 
     # ------------------------------------------------------------------
     # CoordinatorProtocol
@@ -274,6 +278,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         self._subtask_activated_at = 0
         self._derivation_failed = False
         self._pending_stop_mining = True
+        self._exploration_attempt = 0
 
         if seed_subtasks:
             for subtask in reversed(seed_subtasks):
@@ -439,7 +444,9 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         if goal_type == GOAL_TYPE_COLLECTION:
             return self._derive_collection(goal, wq, tick)
         elif goal_type == GOAL_TYPE_EXPLORATION:
-            return self._derive_exploration(goal, wq, tick)
+            result = self._derive_exploration(goal, wq, tick, self._exploration_attempt)
+            self._exploration_attempt += 1
+            return result
         elif goal_type == GOAL_TYPE_CLEAR:
             return self._derive_clear(goal, wq, tick)
         else:
@@ -545,6 +552,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         goal: Goal,
         wq: "WorldQuery",
         tick: int,
+        attempt: int = 0,
     ) -> Optional[ExecutionResult]:
         """
         Derive subtasks for an exploration goal.
@@ -565,7 +573,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
 
         # Determine the next unexplored waypoint in a simple grid pattern.
         player_pos = wq.player_position()
-        next_pos = _next_exploration_waypoint(player_pos, wq.charted_chunks, target_chunks)
+        next_pos = _next_exploration_waypoint(player_pos, wq.charted_chunks, target_chunks, attempt)
 
         # The subtask success condition is arrival at the waypoint — NOT the
         # goal's charted_chunks condition. The goal's chunk condition is already
@@ -714,6 +722,19 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             sibling_history=siblings,
             blackboard_snapshot=snapshot,
         )
+        # For exploration goals, a stuck subtask just means "that direction
+        # was blocked — try another". Return WAITING so the coordinator
+        # re-derives a new waypoint (in a rotated direction) on the next tick
+        # rather than propagating STUCK to the loop and failing the goal.
+        if getattr(goal, "type", "") == GOAL_TYPE_EXPLORATION:
+            log.info(
+                "Coordinator: exploration subtask stuck — re-deriving waypoint "
+                "(attempt %d)", self._exploration_attempt
+            )
+            self._derivation_failed = False
+            self._active_agent = None
+            return ExecutionResult(actions=[], status=ExecutionStatus.WAITING)
+
         return ExecutionResult(
             actions=[],
             status=ExecutionStatus.STUCK,
@@ -957,13 +978,14 @@ def _next_exploration_waypoint(
     player_pos: Position,
     current_chunks: int,
     target_chunks: int,
+    attempt: int = 0,
 ) -> Position:
     """
     Return the next waypoint position for a simple outward exploration pattern.
 
     Uses a concentric square spiral: each ring is 64 tiles (2 chunks) wide.
-    The pattern is stateless — given player position and current charted count,
-    the same waypoint is always returned (deterministic).
+    The `attempt` offset rotates the direction so repeated escalations (e.g.
+    stalls on obstacles) try different directions rather than the same one.
 
     This is a Phase 6 placeholder. Phase 9 will replace with a proper
     frontier-based exploration planner.
@@ -977,7 +999,7 @@ def _next_exploration_waypoint(
     # Starting east (not north) avoids the crashed ship at spawn, which is
     # always to the north in a default Factorio map. Phase 9 will replace
     # this with a proper frontier-based exploration planner.
-    direction = current_chunks % 4
+    direction = (current_chunks + attempt) % 4
     if direction == 0:
         return Position(player_pos.x + step, player_pos.y)   # east
     elif direction == 1:
