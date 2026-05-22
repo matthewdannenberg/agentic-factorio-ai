@@ -113,6 +113,10 @@ _DERIVABLE_TYPES = {
 # derived at tick 100 and one derived at tick 50,000 have different effective
 # timeouts. Both issues should be addressed together at Phase 8.
 _SUBTASK_TIMEOUT_TICKS = 18_000   # 5 minutes at 60 tps — adjust at Phase 8
+# Shorter timeout for pure navigation subtasks: if the player stalls on an
+# obstacle, we want to re-derive a new waypoint within ~30 seconds rather
+# than waiting the full 5-minute general timeout.
+_NAV_SUBTASK_TIMEOUT_TICKS = 1_800   # 30 seconds at 60 tps
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +358,17 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         if self._subtask_activated_at == 0:
             self._subtask_activated_at = tick
 
+        # Check for navigation stall signal — escalate immediately rather than
+        # waiting for the failure_condition timeout. The navigation agent writes
+        # this when it detects the player is stopped after the grace period.
+        observations = self._bb.read(category=EntryCategory.OBSERVATION, current_tick=tick)
+        if any(e.data.get("type") == "navigation_stalled" for e in observations):
+            log.warning(
+                "Coordinator: navigation stall detected on subtask %s — escalating",
+                active.id[:8],
+            )
+            return self._escalate(goal, tick)
+
         # Check success condition.
         if self._evaluate_condition(active.success_condition, wq, tick):
             log.info(
@@ -552,10 +567,21 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         player_pos = wq.player_position()
         next_pos = _next_exploration_waypoint(player_pos, wq.charted_chunks, target_chunks)
 
+        # The subtask success condition is arrival at the waypoint — NOT the
+        # goal's charted_chunks condition. The goal's chunk condition is already
+        # evaluated every tick by RewardEvaluator and will fire as soon as enough
+        # chunks are charted, regardless of where the player is. Using it as the
+        # subtask condition caused the subtask to only complete when charted_chunks
+        # reached the full target, meaning a single waypoint had to do all the
+        # work. Arrival-based success lets the coordinator re-derive a new waypoint
+        # after each leg, building up chunk coverage incrementally.
+        arrival_condition = (
+            f"is_at(Position({next_pos.x}, {next_pos.y}), 3.0)"
+        )
         exploration_subtask = Subtask(
-            description=f"Explore until {target_chunks} chunks charted",
-            success_condition=goal.success_condition,
-            failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS * 3}",
+            description=f"Walk to exploration waypoint ({next_pos.x:.0f}, {next_pos.y:.0f})",
+            success_condition=arrival_condition,
+            failure_condition=f"tick > {tick + _NAV_SUBTASK_TIMEOUT_TICKS}",
             parent_goal_id=goal.id,
             created_at=tick,
             derived_locally=True,

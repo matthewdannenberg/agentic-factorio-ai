@@ -204,14 +204,32 @@ class NavigationAgent(AgentProtocol):
         grace_elapsed = (tick - self._last_move_tick) >= _STALL_GRACE_TICKS
         is_stalled = grace_elapsed and self._is_stalled(pos)
 
-        should_issue = is_new_waypoint or not is_redundant or is_stalled
+        if is_stalled:
+            # Player hasn't moved since the last issued command and the grace
+            # period has elapsed. Re-issuing the same MoveTo would repeat the
+            # same path and stall again (e.g. tree or obstacle blocking the
+            # path).
+            # Signal the coordinator to escalate immediately rather than
+            # waiting for the subtask failure_condition timeout.
+            log.warning(
+                "NavigationAgent: stall after %d ticks at %s — "
+                "signalling coordinator to re-derive waypoint",
+                tick - self._last_move_tick,
+                pos,
+            )
+            blackboard.write(
+                category=EntryCategory.OBSERVATION,
+                scope=EntryScope.SUBTASK,
+                owner_agent=AGENT_ID,
+                created_at=tick,
+                data={"type": "navigation_stalled", "position": {"x": pos.x, "y": pos.y}},
+            )
+            self._last_position = pos
+            return [StopMovement()]
+
+        should_issue = is_new_waypoint or not is_redundant
 
         if should_issue:
-            if is_stalled and not is_new_waypoint:
-                log.debug(
-                    "NavigationAgent: stall detected after %d ticks, re-issuing",
-                    tick - self._last_move_tick,
-                )
             action = MoveTo(position=target_pos, pathfind=True)
             self._last_issued_waypoint_id = waypoint.id
             self._last_issued_target = target_pos

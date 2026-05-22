@@ -293,6 +293,83 @@ class TestNavigationAgentArrival(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# tick() — stall detection
+# ---------------------------------------------------------------------------
+
+class TestNavigationAgentStall(unittest.TestCase):
+
+    def test_stall_writes_navigation_stalled_observation(self):
+        """
+        When the player hasn't moved for _STALL_GRACE_TICKS after a MoveTo,
+        the agent writes a navigation_stalled observation so the coordinator
+        can escalate immediately rather than waiting for the timeout.
+        """
+        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        agent = NavigationAgent()
+        bb = Blackboard()
+        wq = _make_wq(player_pos=Position(0.0, 0.0))
+        ww = _make_mock_writer()
+        subtask = _make_subtask()
+        agent.activate(subtask, bb, wq)
+        bb.clear_all()
+
+        # First tick — issues MoveTo, records position.
+        _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
+        agent.tick(subtask, bb, wq, ww, tick=100)
+
+        # Advance tick past grace period without the player moving.
+        stall_tick = 100 + _STALL_GRACE_TICKS + 1
+        agent.tick(subtask, bb, wq, ww, tick=stall_tick)
+
+        observations = bb.read(category=EntryCategory.OBSERVATION, current_tick=stall_tick)
+        stall_obs = [e for e in observations if e.data.get("type") == "navigation_stalled"]
+        self.assertEqual(len(stall_obs), 1)
+
+    def test_stall_returns_stop_movement(self):
+        """On stall the agent returns StopMovement to halt any in-progress walking."""
+        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        agent = NavigationAgent()
+        bb = Blackboard()
+        wq = _make_wq(player_pos=Position(0.0, 0.0))
+        ww = _make_mock_writer()
+        subtask = _make_subtask()
+        agent.activate(subtask, bb, wq)
+        bb.clear_all()
+
+        _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
+        agent.tick(subtask, bb, wq, ww, tick=100)
+
+        stall_tick = 100 + _STALL_GRACE_TICKS + 1
+        actions = agent.tick(subtask, bb, wq, ww, tick=stall_tick)
+
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMovement)
+
+    def test_no_stall_if_player_moved(self):
+        """No stall signal when the player has moved since the last tick."""
+        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        agent = NavigationAgent()
+        bb = Blackboard()
+        wq_start = _make_wq(player_pos=Position(0.0, 0.0))
+        ww = _make_mock_writer()
+        subtask = _make_subtask()
+        agent.activate(subtask, bb, wq_start)
+        bb.clear_all()
+
+        _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
+        agent.tick(subtask, bb, wq_start, ww, tick=100)
+
+        # Player has moved — update position.
+        wq_moved = _make_wq(player_pos=Position(5.0, 0.0))
+        stall_tick = 100 + _STALL_GRACE_TICKS + 1
+        agent.tick(subtask, bb, wq_moved, ww, tick=stall_tick)
+
+        observations = bb.read(category=EntryCategory.OBSERVATION, current_tick=stall_tick)
+        stall_obs = [e for e in observations if e.data.get("type") == "navigation_stalled"]
+        self.assertEqual(len(stall_obs), 0)
+
+
+# ---------------------------------------------------------------------------
 # progress() and observe()
 # ---------------------------------------------------------------------------
 

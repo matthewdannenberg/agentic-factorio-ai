@@ -597,29 +597,115 @@ class TestCoordinatorExploration(unittest.TestCase):
         self.assertEqual(len(waypoints), 1)
 
     def test_exploration_success_condition_met(self):
+        """
+        Exploration subtask now uses arrival (is_at) as its success condition,
+        not charted_chunks. Place the player at the derived waypoint so the
+        coordinator sees is_at() == True and pops the subtask.
+
+        With charted_chunks=0, player at (0,0): _next_exploration_waypoint
+        returns (64, 0) (ring=1, step=64, direction east).
+        """
         coordinator = _make_coordinator()
         goal = _make_goal(
             goal_type=GOAL_TYPE_EXPLORATION,
             success_condition="charted_chunks >= 5",
             failure_condition="tick > 99999",
         )
-        # Already explored enough.
-        wq = _make_wq(charted_chunks=10)
+        wq_start = _make_wq(charted_chunks=0)
         ww = _make_mock_writer()
-        coordinator.reset(goal, wq)
+        coordinator.reset(goal, wq_start)
 
-        # First tick derives the subtask.
-        coordinator.tick(goal, wq, ww, tick=100)
+        # Tick 99 — drain the StopMining flush.
+        coordinator.tick(goal, wq_start, ww, tick=99)
 
-        # Second tick should see success condition met and complete the subtask.
-        result = coordinator.tick(goal, wq, ww, tick=101)
+        # Tick 100 — derive the exploration subtask (waypoint at (64, 0)).
+        coordinator.tick(goal, wq_start, ww, tick=100)
+        self.assertEqual(len(coordinator._ledger), 1)
+
+        # Tick 101 — player arrives at the waypoint; is_at((64,0)) is True.
+        wq_arrived = _make_wq(player_pos=Position(64.0, 0.0), charted_chunks=0)
+        result = coordinator.tick(goal, wq_arrived, ww, tick=101)
 
         self.assertIn(
             result.status,
             {ExecutionStatus.PROGRESSING, ExecutionStatus.WAITING},
         )
-        # Ledger should be empty (subtask was completed and popped).
+        # Subtask was completed and popped — ledger is empty.
         self.assertEqual(len(coordinator._ledger), 0)
+
+
+# ---------------------------------------------------------------------------
+# Navigation stall escalation
+# ---------------------------------------------------------------------------
+
+class TestCoordinatorNavigationStall(unittest.TestCase):
+
+    def test_navigation_stall_observation_triggers_immediate_escalation(self):
+        """
+        When the navigation agent writes a navigation_stalled observation,
+        the coordinator escalates immediately on the next tick without
+        waiting for the subtask failure_condition timeout.
+        """
+        registry = AgentRegistry()
+        nav = NavigationAgent()
+        registry.register(nav)
+
+        coordinator = _make_coordinator(registry)
+        goal = _make_goal(
+            goal_type=GOAL_TYPE_EXPLORATION,
+            success_condition="charted_chunks >= 10",
+            failure_condition="tick > 99999",
+        )
+        wq = _make_wq(charted_chunks=0)
+        ww = _make_mock_writer()
+        coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
+
+        # Derive the exploration subtask.
+        coordinator.tick(goal, wq, ww, tick=100)
+        self.assertEqual(len(coordinator._ledger), 1)
+
+        # Manually write a navigation_stalled observation as the nav agent would.
+        coordinator._bb.write(
+            category=EntryCategory.OBSERVATION,
+            scope=EntryScope.SUBTASK,
+            owner_agent="navigation",
+            created_at=101,
+            data={"type": "navigation_stalled", "position": {"x": 0.0, "y": 0.0}},
+        )
+
+        # Coordinator should escalate immediately, not wait for timeout.
+        result = coordinator.tick(goal, wq, ww, tick=101)
+
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+        self.assertIsNotNone(result.stuck_context)
+
+    def test_stall_escalation_has_failure_chain(self):
+        """Escalation from stall populates the failure_chain in StuckContext."""
+        coordinator = _make_coordinator()
+        goal = _make_goal(
+            goal_type=GOAL_TYPE_EXPLORATION,
+            success_condition="charted_chunks >= 10",
+            failure_condition="tick > 99999",
+        )
+        wq = _make_wq(charted_chunks=0)
+        ww = _make_mock_writer()
+        coordinator.reset(goal, wq)
+        _drain_stop(coordinator, goal, wq, ww)
+        coordinator.tick(goal, wq, ww, tick=100)
+
+        coordinator._bb.write(
+            category=EntryCategory.OBSERVATION,
+            scope=EntryScope.SUBTASK,
+            owner_agent="navigation",
+            created_at=101,
+            data={"type": "navigation_stalled", "position": {"x": 0.0, "y": 0.0}},
+        )
+
+        result = coordinator.tick(goal, wq, ww, tick=101)
+
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+        self.assertGreater(len(result.stuck_context.failure_chain), 0)
 
 
 if __name__ == "__main__":
