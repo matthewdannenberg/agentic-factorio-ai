@@ -992,15 +992,11 @@ def _next_exploration_waypoint(
     This is a Phase 6 placeholder. Phase 9 replaces with frontier-based
     exploration.
     """
-    # Target 2 chunks past the estimated charted frontier.
-    # Frontier radius ≈ sqrt(charted_chunks) chunks; each chunk = 32 tiles.
-    # This ensures the waypoint is always in uncharted territory regardless
-    # of how many chunks are already known.
-    # Minimum 96 tiles (3 chunks) so we always make meaningful progress
-    # from spawn even with the pre-generated area already charted.
-    frontier_chunks = math.sqrt(max(current_chunks, 1))
-    step = int((frontier_chunks + 2) * 32)
-    step = max(step, 96)
+    # Fixed step of 256 tiles (8 chunks) from origin. This is intentionally
+    # oversized to reliably clear any pre-generated spawn area on any map.
+    # The frontier-based planner in Phase 9 will replace this entirely.
+    # attempt offset adds 64 tiles per retry so repeated stalls push further.
+    step = 256 + (attempt // 4) * 64
 
     # Absolute coordinates from origin. Rotate direction by attempt so
     # repeated stalls (e.g. unreachable terrain) try different cardinals.

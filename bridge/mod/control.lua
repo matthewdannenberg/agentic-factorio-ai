@@ -547,11 +547,21 @@ function fa.get_exploration()
     if not player or not player.valid then
         return err_response("no_player")
     end
+    -- In Factorio 2.x, LuaForce.get_chart_size() was removed.
+    -- Count charted chunks by iterating surface.get_chunks(), which yields
+    -- every chunk the force has charted. This is O(charted chunks) but only
+    -- called when Python polls get_state, so the cost is acceptable.
     local charted_chunks = 0
-    local ok, val = pcall(function()
-        return player.force.get_chart_size(player.surface)
+    local ok_iter = pcall(function()
+        for chunk in player.surface.get_chunks() do
+            if player.force.is_chunk_charted(player.surface, chunk.position) then
+                charted_chunks = charted_chunks + 1
+            end
+        end
     end)
-    if ok and val then charted_chunks = val end
+    if not ok_iter then
+        charted_chunks = 0
+    end
     return safe_json({
         tick           = game.tick,
         charted_chunks = charted_chunks,
@@ -567,11 +577,16 @@ function fa._player_table(player)
     -- charted_chunks: total 32x32 chunks the force has revealed on this surface.
     -- Global to the force -- not scan-radius scoped. Grows monotonically.
     -- Sourced from LuaForce::get_chart_size(surface).
+    -- Count charted chunks via surface.get_chunks() (2.x replacement for
+    -- the removed LuaForce.get_chart_size()).
     local charted_chunks = 0
-    local ok_cc, cc = pcall(function()
-        return player.force.get_chart_size(player.surface)
+    pcall(function()
+        for chunk in player.surface.get_chunks() do
+            if player.force.is_chunk_charted(player.surface, chunk.position) then
+                charted_chunks = charted_chunks + 1
+            end
+        end
     end)
-    if ok_cc and cc then charted_chunks = cc end
     local mov_status = "idle"
     if path_unreachable then
         mov_status = "unreachable"
@@ -961,14 +976,45 @@ function fa.get_entity_prototype(entity_name)
     end)
     if ok_oi and oi then output_slots = oi end
 
+    -- Category: map entity type to KB EntityCategory string.
+    -- "smelting" for furnaces, "crafting" for assemblers, "storage" for chests, etc.
+    local category = "other"
+    local t = proto.type
+    if t == "furnace" then
+        category = "smelting"
+    elseif t == "assembling-machine" then
+        category = "crafting"
+    elseif t == "container" or t == "logistic-container" then
+        category = "storage"
+    elseif t == "transport-belt" or t == "underground-belt" or t == "splitter" then
+        category = "belt"
+    elseif t == "inserter" then
+        category = "inserter"
+    elseif t == "electric-pole" then
+        category = "power"
+    elseif t == "mining-drill" then
+        category = "mining"
+    elseif t == "lab" then
+        category = "lab"
+    end
+
+    -- inventory_size: total input slot count for containers.
+    local inventory_size = 0
+    local ok_inv, inv = pcall(function()
+        return proto.get_inventory_size(defines.inventory.chest) or 0
+    end)
+    if ok_inv and inv then inventory_size = inv end
+
     return safe_json({
         name             = proto.name,
         type             = proto.type,
+        category         = category,
         tile_width       = proto.tile_width  or 1,
         tile_height      = proto.tile_height or 1,
         has_recipe_slot  = has_recipe_slot,
         ingredient_slots = ingredient_slots,
         output_slots     = output_slots,
+        inventory_size   = inventory_size,
     })
 end
 
@@ -1008,7 +1054,14 @@ function fa.get_resource_prototype(resource_name)
     local is_infinite = false
     local ok_mp, mp = pcall(function() return proto.mineable_properties end)
     if ok_mp and mp then
-        is_infinite = mp.infinite or false
+        -- In 2.x, mp.infinite was removed. Check proto.infinite_resource instead,
+        -- falling back to mp.infinite for any remaining 1.x compatibility.
+        local ok_inf, inf = pcall(function() return proto.infinite_resource end)
+        if ok_inf and inf ~= nil then
+            is_infinite = inf
+        else
+            is_infinite = mp.infinite or false
+        end
         for _, product in ipairs(mp.products or {}) do
             if product.type == "fluid" then
                 is_fluid = true
@@ -1024,10 +1077,14 @@ function fa.get_resource_prototype(resource_name)
     end)
     if ok_ln and ln then display_name = ln end
 
+    -- category: "resource" for solid ores, "fluid-resource" for fluid patches
+    local category = is_fluid and "fluid-resource" or "resource"
+
     return safe_json({
         name         = proto.name,
+        category     = category,
         is_fluid     = is_fluid,
-        is_infinite  = is_infinite,
+        infinite     = is_infinite,   -- matches KnowledgeBase ResourceRecord.infinite field
         display_name = display_name,
     })
 end
@@ -1712,6 +1769,8 @@ end
 -- Testing: load suite and register as a remote command
 T = require("test_bridge_live")
 TM = require("test_movement_live")
+TS = require("test_state_live")
+TP = require("test_prototypes_live")
 
 commands.add_command(
     "agent-test",

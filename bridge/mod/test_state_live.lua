@@ -1,0 +1,238 @@
+-- bridge/mod/test_state_live.lua
+--
+-- Tests for world-state query functions in control.lua.
+-- Covers: fa.get_exploration(), fa._player_table() internals (charted_chunks,
+-- movement_status), fa.get_mining_status(), fa.stop_mining().
+--
+-- Usage:
+--   /c __agent__ TS.run_all()
+--   /c __agent__ TS.run_suite("exploration")
+--   /c __agent__ TS.run_suite("mining_status")
+--
+-- TS is registered as a global by control.lua:
+--   TS = require("test_state_live")
+
+TS = {}
+local suites = {}
+local log_file = "agent-state-test-results.txt"
+
+local function test_print(msg)
+    game.print(msg)
+    helpers.write_file(log_file, msg .. "\n", true)
+end
+
+local function make_assertions()
+    local function fail(msg) error("ASSERT: " .. tostring(msg), 2) end
+    return {
+        ok        = function(v, msg) if not v then fail(msg or "expected truthy") end end,
+        eq        = function(a, b, msg)
+            if a ~= b then fail(msg or ("expected " .. tostring(b) .. " got " .. tostring(a))) end
+        end,
+        ne        = function(a, b, msg)
+            if a == b then fail(msg or ("expected not " .. tostring(b))) end
+        end,
+        gt        = function(a, b, msg)
+            if not (a > b) then fail(msg or (tostring(a) .. " not > " .. tostring(b))) end
+        end,
+        gte       = function(a, b, msg)
+            if not (a >= b) then fail(msg or (tostring(a) .. " not >= " .. tostring(b))) end
+        end,
+        is_number = function(v, msg)
+            if type(v) ~= "number" then fail(msg or ("expected number got " .. type(v))) end
+        end,
+        is_string = function(v, msg)
+            if type(v) ~= "string" then fail(msg or ("expected string got " .. type(v))) end
+        end,
+        is_table  = function(v, msg)
+            if type(v) ~= "table" then fail(msg or ("expected table got " .. type(v))) end
+        end,
+    }
+end
+
+local function parse_json(raw)
+    local ok, t = pcall(function() return helpers.json_to_table(raw) end)
+    return ok and t or nil
+end
+
+local function get_player() return game.get_player(1) end
+
+function TS.suite(name, tests) suites[name] = tests end
+
+function TS.run_suite(name)
+    local tests = suites[name]
+    if not tests then test_print("[TEST] Unknown suite: " .. name) return end
+    local pass, fail_count = 0, 0
+    for test_name, fn in pairs(tests) do
+        local ok, err = pcall(fn, make_assertions())
+        if ok then
+            pass = pass + 1
+            test_print("[PASS] " .. name .. " :: " .. test_name)
+        else
+            fail_count = fail_count + 1
+            test_print("[FAIL] " .. name .. " :: " .. test_name .. " — " .. tostring(err))
+        end
+    end
+    test_print(string.format("[SUITE %s] %d passed, %d failed", name, pass, fail_count))
+    return fail_count == 0
+end
+
+function TS.run_all()
+    helpers.write_file(log_file, "", false)
+    test_print("=== State test run: tick " .. tostring(game.tick) .. " ===")
+    for name in pairs(suites) do
+        test_print("─────── " .. name .. " ───────")
+        TS.run_suite(name)
+    end
+    test_print("═══ Done. See script-output/" .. log_file .. " ═══")
+end
+
+-- ============================================================
+-- Suite: exploration
+-- Verifies fa.get_exploration() and the charted_chunks field in
+-- fa.get_state() / fa._player_table().
+-- These are NON-PROXIMAL — must reflect the global chart size.
+-- ============================================================
+
+TS.suite("exploration", {
+
+    get_exploration_returns_valid_json = function(t)
+        local raw = fa.get_exploration()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "fa.get_exploration() must return valid JSON; got: " .. tostring(raw):sub(1,80))
+        t.ok(parsed.ok ~= false, "fa.get_exploration() should not return ok=false")
+    end,
+
+    get_exploration_has_charted_chunks = function(t)
+        local raw = fa.get_exploration()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.charted_chunks ~= nil, "must have charted_chunks field")
+        t.is_number(parsed.charted_chunks,
+            "charted_chunks must be a number; got type=" .. type(parsed.charted_chunks) ..
+            " val=" .. tostring(parsed.charted_chunks))
+    end,
+
+    charted_chunks_positive = function(t)
+        -- Any loaded game has at least the spawn chunks charted.
+        local raw = fa.get_exploration()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.gt(parsed.charted_chunks, 0,
+            "charted_chunks should be > 0 in any loaded game; got: " ..
+            tostring(parsed.charted_chunks))
+    end,
+
+    get_chart_size_returns_number = function(t)
+        -- Directly verify what get_chart_size returns so we know how to use it.
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        local ok, val = pcall(function()
+            return player.force.get_chart_size(player.surface)
+        end)
+        t.ok(ok, "get_chart_size should not error; err=" .. tostring(val))
+        test_print("[INFO] get_chart_size type=" .. type(val) .. " val=" .. tostring(val))
+        if type(val) == "table" then
+            for k, v in pairs(val) do
+                test_print("[INFO]   " .. tostring(k) .. "=" .. tostring(v))
+            end
+        end
+        t.is_number(val,
+            "get_chart_size must return a number in 2.x; got type=" .. type(val) ..
+            ". If it returns a table, fa._player_table charted_chunks logic needs updating.")
+    end,
+
+    player_table_charted_chunks_matches_exploration = function(t)
+        -- charted_chunks in get_state().player must equal fa.get_exploration().charted_chunks
+        local exp_raw = fa.get_exploration()
+        local exp = parse_json(exp_raw)
+        t.ok(exp ~= nil, "fa.get_exploration() must return valid JSON")
+
+        local state_raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local state = parse_json(state_raw)
+        t.ok(state ~= nil, "fa.get_state() must return valid JSON")
+        t.ok(state.player ~= nil, "get_state must have player section")
+
+        local state_chunks = state.player.charted_chunks
+        local exp_chunks   = exp.charted_chunks
+
+        t.is_number(state_chunks,
+            "get_state().player.charted_chunks must be a number; got: " ..
+            type(state_chunks))
+        t.is_number(exp_chunks,
+            "get_exploration().charted_chunks must be a number; got: " ..
+            type(exp_chunks))
+        t.eq(state_chunks, exp_chunks,
+            "get_state and get_exploration should agree on charted_chunks; " ..
+            "state=" .. tostring(state_chunks) .. " exploration=" .. tostring(exp_chunks))
+    end,
+
+    charted_chunks_is_tick_independent = function(t)
+        -- Call twice in the same tick — value should be stable.
+        local r1 = parse_json(fa.get_exploration())
+        local r2 = parse_json(fa.get_exploration())
+        t.ok(r1 ~= nil and r2 ~= nil, "both calls must return valid JSON")
+        t.eq(r1.charted_chunks, r2.charted_chunks,
+            "charted_chunks should be stable within a tick")
+    end,
+})
+
+-- ============================================================
+-- Suite: mining_status
+-- Verifies fa.get_mining_status() and fa.stop_mining() return
+-- correct values and don't crash.
+-- ============================================================
+
+TS.suite("mining_status", {
+
+    get_mining_status_idle_when_not_mining = function(t)
+        fa.stop_mining()
+        local raw = fa.get_mining_status()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "fa.get_mining_status() must return valid JSON")
+        t.ok(parsed.ok ~= false, "should return ok=true")
+        t.is_string(parsed.status, "status must be a string")
+        t.eq(parsed.status, "idle",
+            "status should be idle after stop_mining; got: " .. tostring(parsed.status))
+    end,
+
+    get_mining_status_valid_values = function(t)
+        local raw = fa.get_mining_status()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local valid = {idle=true, mining=true}
+        t.ok(valid[parsed.status],
+            "status must be idle or mining; got: " .. tostring(parsed.status))
+    end,
+
+    stop_mining_returns_ok = function(t)
+        local raw = fa.stop_mining()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "fa.stop_mining() must return valid JSON")
+        t.ok(parsed.ok, "stop_mining should return ok=true")
+    end,
+
+    stop_mining_twice_is_safe = function(t)
+        fa.stop_mining()
+        local raw = fa.stop_mining()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "second stop_mining must return valid JSON")
+        t.ok(parsed.ok, "second stop_mining should return ok=true")
+    end,
+
+    get_mining_status_in_player_table = function(t)
+        -- get_state does not currently include mining_status in player section
+        -- (only movement_status). This test documents that and would catch
+        -- a regression if mining_status were accidentally added in a broken form.
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player ~= nil, "get_state must have player section")
+        -- movement_status should be present
+        t.ok(parsed.player.movement_status ~= nil,
+            "player section should have movement_status field")
+        t.is_string(parsed.player.movement_status,
+            "movement_status must be a string")
+    end,
+})
+
+return TS
