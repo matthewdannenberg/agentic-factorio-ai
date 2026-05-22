@@ -106,6 +106,14 @@ class StateParser:
                             If None, unknown names are still accepted — just not registered.
         """
         self._registry = resource_registry
+        self._last_movement_status: str = "idle"
+
+    @property
+    def movement_status(self) -> str:
+        """Most recently parsed movement status from fa.get_state player section.
+        Values: "idle" | "pathing" | "walking" | "unreachable"
+        """
+        return self._last_movement_status
 
     # ------------------------------------------------------------------
     # Public interface
@@ -240,6 +248,7 @@ class StateParser:
         inventory = self._parse_inventory(d.get("inventory", []))
         reachable = [int(x) for x in d.get("reachable", [])]
         charted_chunks = int(d.get("charted_chunks", 0))
+        self._last_movement_status = str(d.get("movement_status", "idle"))
         return PlayerState(
             position=pos,
             health=health,

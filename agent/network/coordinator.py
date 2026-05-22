@@ -992,13 +992,16 @@ def _next_exploration_waypoint(
     This is a Phase 6 placeholder. Phase 9 replaces with frontier-based
     exploration.
     """
-    # Waypoints are absolute from the world origin so each leg genuinely
-    # moves into new territory. Step size grows with charted chunk count —
-    # minimum 128 tiles (4 chunks) so we always leave charted territory.
+    # Step size: start at 96 tiles (3 chunks) — close enough that the target
+    # chunk is almost certainly already generated at spawn, so the pathfinder
+    # can find a route. Each ring adds 96 tiles as more of the map is revealed.
+    # The player walks toward the target, the map generates ahead of them, and
+    # subsequent legs can reach further.
     ring = max(1, int(math.sqrt(max(current_chunks, 1))))
-    step = 128 * ring   # tiles from origin
+    step = 96 * ring   # tiles from origin
 
-    # Rotate direction by attempt so repeated stalls try different cardinals.
+    # Absolute coordinates from origin. Rotate direction by attempt so
+    # repeated stalls (e.g. unreachable terrain) try different cardinals.
     # Starting east avoids the crashed ship which spawns north in default maps.
     direction = (current_chunks + attempt) % 4
     if direction == 0:

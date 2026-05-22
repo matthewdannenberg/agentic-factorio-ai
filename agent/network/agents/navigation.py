@@ -86,6 +86,13 @@ _REDUNDANT_THRESHOLD = 0.5
 # moving. At 60 tps and TICK_INTERVAL=10, 180 ticks ≈ 3 seconds of polls.
 _STALL_GRACE_TICKS = 180
 
+# Shorter grace when the player has never moved at all since the MoveTo was
+# issued. The pathfinder result arrives within a few game ticks — if the
+# player still hasn't moved after this many poll ticks, the path was almost
+# certainly returned as unreachable (ungenerated terrain, solid obstacle).
+# At 60 tps and TICK_INTERVAL=10, 30 ticks ≈ 0.5 seconds of polls.
+_UNREACHABLE_GRACE_TICKS = 30
+
 # Position change below this threshold (tiles) per tick → considered stalled.
 _STOPPED_THRESHOLD = 0.05
 
@@ -108,6 +115,7 @@ class NavigationAgent(AgentProtocol):
         self._last_issued_target: Optional[Position] = None
         self._last_move_tick: int = 0
         self._last_position: Optional[Position] = None
+        self._activate_position: Optional[Position] = None
 
     # ------------------------------------------------------------------
     # AgentProtocol
@@ -130,6 +138,7 @@ class NavigationAgent(AgentProtocol):
         self._last_issued_target = None
         self._last_move_tick = 0
         self._last_position = None
+        self._activate_position = wq.player_position()
 
         pos = wq.player_position()
         blackboard.write(
@@ -201,7 +210,15 @@ class NavigationAgent(AgentProtocol):
             return []
 
         is_redundant = self._is_redundant_target(target_pos)
-        grace_elapsed = (tick - self._last_move_tick) >= _STALL_GRACE_TICKS
+        # Use a shorter grace period if the player hasn't moved at all since
+        # activation — this catches pathfinder "unreachable" results quickly
+        # without waiting the full grace period.
+        never_moved = (
+            self._activate_position is not None
+            and self._is_same_position(pos, self._activate_position)
+        )
+        grace = _UNREACHABLE_GRACE_TICKS if never_moved else _STALL_GRACE_TICKS
+        grace_elapsed = (tick - self._last_move_tick) >= grace
         is_stalled = grace_elapsed and self._is_stalled(pos)
 
         if is_stalled:
@@ -341,4 +358,10 @@ class NavigationAgent(AgentProtocol):
             return False
         dx = current_pos.x - self._last_position.x
         dy = current_pos.y - self._last_position.y
+        return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
+
+    def _is_same_position(self, a: Position, b: Position) -> bool:
+        """True if two positions are within _STOPPED_THRESHOLD of each other."""
+        dx = a.x - b.x
+        dy = a.y - b.y
         return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
