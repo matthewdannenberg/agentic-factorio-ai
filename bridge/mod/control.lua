@@ -138,30 +138,32 @@ local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
 local function request_movement_path(player)
     if not player or not player.valid or not player.character then return end
 
-    -- Build the collision mask from the character prototype so we don't
-    -- hardcode layer names. In Factorio 2.x, LuaCollisionMask supports pairs()
-    -- iteration where keys are layer name strings.
+    -- Build the collision mask as a keyed table {["layer-name"] = true},
+    -- which is the format request_path() accepts in Factorio 2.x.
+    -- The character prototype's collision_mask is a LuaCollisionMask userdata
+    -- whose keys are layer name strings — we iterate it with pairs() and build
+    -- the keyed table. Fallback to known layers if prototype access fails.
     --
-    -- Fallback: if prototype iteration fails, use the known layers the character
-    -- collides with. "player-layer" alone is NOT sufficient — the crashed ship,
-    -- buildings, rocks, and walls are on "object-layer". Without it the pathfinder
-    -- computes a path straight through them, causing the character to walk into
-    -- obstacles and get stuck.
-    local collision_mask = {"player-layer", "object-layer", "water-tile"}
+    -- Important: do NOT pass an array of strings ({"layer1","layer2"}) — that
+    -- format is silently ignored by request_path, causing straight-line paths
+    -- through solid obstacles.
+    local collision_mask = {["player-layer"]=true, ["object-layer"]=true, ["water-tile"]=true}
     local ok_mask, proto = pcall(function()
         return player.character.prototype.collision_mask
     end)
     if ok_mask and proto then
-        local layers = {}
+        local keyed = {}
+        local count = 0
         local ok_iter = pcall(function()
             for layer_name, _ in pairs(proto) do
                 if type(layer_name) == "string" then
-                    table.insert(layers, layer_name)
+                    keyed[layer_name] = true
+                    count = count + 1
                 end
             end
         end)
-        if ok_iter and #layers > 0 then
-            collision_mask = layers
+        if ok_iter and count > 0 then
+            collision_mask = keyed
         end
     end
 
@@ -1142,14 +1144,10 @@ function fa.get_technology(tech_name)
         return err_response("unknown_technology: " .. tostring(tech_name))
     end
 
-    -- 2.x: prerequisites and effects moved from LuaTechnology to
-    -- LuaTechnology.prototype (LuaTechnologyPrototype).
     local proto = tech.prototype
 
     local prerequisites = {}
-    local ok_prereq, prereq_tbl = pcall(function()
-        return proto.prerequisites
-    end)
+    local ok_prereq, prereq_tbl = pcall(function() return proto.prerequisites end)
     if ok_prereq and prereq_tbl then
         for name, _ in pairs(prereq_tbl) do
             table.insert(prerequisites, name)
@@ -1157,14 +1155,9 @@ function fa.get_technology(tech_name)
     end
 
     local effects = {}
-    local ok_eff, eff_tbl = pcall(function()
-        return proto.effects
-    end)
+    local ok_eff, eff_tbl = pcall(function() return proto.effects end)
     if ok_eff and eff_tbl then
         for _, effect in ipairs(eff_tbl) do
-            -- 2.x TechnologyModifier: .type is the modifier type string.
-            -- For "unlock-recipe" modifiers, the recipe name is in .recipe.
-            -- For "give-item" modifiers, the item name is in .item.
             local entry = {type = effect.type}
             if effect.recipe then entry.recipe = effect.recipe end
             if effect.item   then entry.item   = effect.item   end
@@ -1172,7 +1165,6 @@ function fa.get_technology(tech_name)
         end
     end
 
-    -- requires_dlc: present on the prototype in 2.x (Space Age).
     local requires_dlc = false
     local ok_dlc, dlc_val = pcall(function() return proto.parameter end)
     if ok_dlc and dlc_val ~= nil then requires_dlc = dlc_val end
