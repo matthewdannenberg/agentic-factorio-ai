@@ -3,23 +3,24 @@ tests_in_game/03_exploration/test_explore_chunks.py
 
 Verifies that the exploration goal type drives the NavigationAgent to chart
 new chunks until the target is met.
+
+Uses new_charted_chunks (chunks revealed since goal activation) rather than
+charted_chunks (absolute total) so tests pass regardless of how many chunks
+were already charted before the test runs.
 """
 
 from llm.goal_source import GoalQueueEntry
 
 
-def test_explore_5_chunks(run_goal):
+def test_explore_5_new_chunks(run_goal):
     """
-    Chart at least 5 chunks. A fresh map starts with ~1 chunk charted around
-    spawn; the agent needs to walk outward to chart more.
-
-    5 chunks is intentionally modest — enough to verify the exploration
-    subtask derivation and navigation work, without requiring a long run.
+    Chart at least 5 new chunks. Uses new_charted_chunks so the test
+    requires genuine exploration regardless of prior map state.
     """
     entry = GoalQueueEntry(
-        description="Explore until 5 chunks charted",
-        success_condition="charted_chunks >= 5",
-        failure_condition="tick > 10800",   # 3 minutes
+        description="Explore until 5 new chunks charted",
+        success_condition="new.charted_chunks >= 5",
+        failure_condition="elapsed_ticks > 10800",   # 3 minutes
         goal_type="exploration",
     )
     stats, wq = run_goal(entry)
@@ -28,27 +29,23 @@ def test_explore_5_chunks(run_goal):
         f"Exploration goal did not complete "
         f"(completed={stats.goals_completed}, failed={stats.goals_failed})"
     )
-    assert wq.charted_chunks >= 5
 
 
 def test_explore_then_collect(run_goals):
     """
-    Explore first, then collect — verifies that after exploration the
-    resource_map is populated enough for a collection goal to succeed.
-
-    This is the closest we currently get to testing the "find then mine"
-    scenario deferred from Phase 6 planning.
+    Explore first (chart 5 new chunks), then collect — verifies that after
+    exploration the resource_map is populated enough for a collection goal.
     """
     explore_entry = GoalQueueEntry(
-        description="Explore until 5 chunks charted",
-        success_condition="charted_chunks >= 5",
-        failure_condition="tick > 10800",
+        description="Explore until 5 new chunks charted",
+        success_condition="new.charted_chunks >= 5",
+        failure_condition="elapsed_ticks > 10800",
         goal_type="exploration",
     )
     collect_entry = GoalQueueEntry(
         description="Collect 5 iron ore",
         success_condition="inventory('iron-ore') >= 5",
-        failure_condition="tick > 10800",
+        failure_condition="elapsed_ticks > 10800",
         goal_type="collection",
     )
     stats, wq = run_goals([explore_entry, collect_entry])
@@ -57,5 +54,4 @@ def test_explore_then_collect(run_goals):
         f"Expected 2 goals completed, got {stats.goals_completed} "
         f"(failed={stats.goals_failed}, stuck={stats.stuck_events})"
     )
-    assert wq.charted_chunks >= 5
     assert wq.inventory_count("iron-ore") >= 5

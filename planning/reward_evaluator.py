@@ -82,6 +82,76 @@ class EvaluationResult:
     elapsed_ticks: int = 0
 
 
+class _DeltaView:
+    """
+    Provides delta access to world state relative to a goal-activation snapshot.
+
+    Exposed in condition strings as the ``new`` namespace name:
+
+        new.charted_chunks >= 5          # scalar property delta via __getattr__
+        new.charted_tiles >= 5120        # any wq scalar property works automatically
+        new.inventory('iron-ore') >= 10  # parameterized — explicit method
+        new.resource_patches('coal') >= 1  # parameterized — explicit method
+        new.elapsed_ticks > 1200         # ticks since goal activation
+
+    Scalar wq properties get automatic delta support via __getattr__ — adding
+    a new property to WorldQuery requires no changes here. Only parameterized
+    lookups (inventory, resource_patches) need explicit methods.
+    """
+
+    def __init__(self, wq: "WorldQuery", snapshot: dict, elapsed_ticks: int = 0) -> None:
+        # Use object.__setattr__ to avoid triggering our own __getattr__
+        object.__setattr__(self, '_wq', wq)
+        object.__setattr__(self, '_snapshot', snapshot)
+        object.__setattr__(self, '_elapsed_ticks', elapsed_ticks)
+
+    def __getattr__(self, name: str):
+        """
+        Automatic delta for scalar WorldQuery properties.
+        new.charted_chunks → wq.charted_chunks - snapshot['charted_chunks']
+        Clamped to 0. Raises AttributeError if the wq property doesn't exist.
+        """
+        wq       = object.__getattribute__(self, '_wq')
+        snapshot = object.__getattribute__(self, '_snapshot')
+        try:
+            current = getattr(wq, name)
+        except AttributeError:
+            raise AttributeError(f"_DeltaView: no property {name!r} on WorldQuery")
+        if callable(current):
+            raise AttributeError(
+                f"_DeltaView: {name!r} is callable — use an explicit method instead"
+            )
+        baseline = snapshot.get(name, current)
+        try:
+            return max(0, current - baseline)
+        except TypeError:
+            # Non-numeric property — return raw value, delta doesn't apply
+            return current
+
+    @property
+    def tick(self) -> int:
+        """Ticks elapsed since goal activation (current_tick - start_tick).
+        Mirrors the top-level `tick` name: new.tick is the delta of tick.
+        """
+        return object.__getattribute__(self, '_elapsed_ticks')
+
+    def inventory(self, item: str) -> int:
+        """Net items of *item* collected since goal activation (clamped to 0)."""
+        wq       = object.__getattribute__(self, '_wq')
+        snapshot = object.__getattribute__(self, '_snapshot')
+        snap_inv = snapshot.get("inventory", {})
+        return max(0, wq.inventory_count(item)
+                   - snap_inv.get(item, wq.inventory_count(item)))
+
+    def resource_patches(self, resource_type: str) -> int:
+        """Resource patches of *resource_type* discovered since goal activation."""
+        wq       = object.__getattribute__(self, '_wq')
+        snapshot = object.__getattribute__(self, '_snapshot')
+        snap_rc  = snapshot.get("resource_counts", {})
+        current  = len(wq.resources_of_type(resource_type))
+        return max(0, current - snap_rc.get(resource_type, current))
+
+
 class RewardEvaluator:
     """
     Evaluates a Goal's conditions and RewardSpec against a live WorldQuery.
@@ -115,6 +185,7 @@ class RewardEvaluator:
         wq: "WorldQuery",
         tick: int,
         start_tick: int,
+        start_snapshot: Optional[dict] = None,
     ) -> EvaluationResult:
         return self.evaluate_conditions(
             success_condition=goal.success_condition,
@@ -123,6 +194,7 @@ class RewardEvaluator:
             wq=wq,
             tick=tick,
             start_tick=start_tick,
+            start_snapshot=start_snapshot,
         )
 
     def evaluate_conditions(
@@ -133,9 +205,10 @@ class RewardEvaluator:
         wq: "WorldQuery",
         tick: int,
         start_tick: int,
+        start_snapshot: Optional[dict] = None,
     ) -> EvaluationResult:
         elapsed = max(0, tick - start_tick)
-        ns = self._build_namespace(wq, tick, elapsed)
+        ns = self._build_namespace(wq, tick, elapsed, start_snapshot or {})
 
         success = self._eval_bool(success_condition, ns, "success_condition")
         failure = self._eval_bool(failure_condition, ns, "failure_condition")
@@ -161,7 +234,7 @@ class RewardEvaluator:
             elapsed_ticks=elapsed,
         )
 
-    def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0) -> dict:
+    def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0, start_snapshot: dict = None) -> dict:
         if self._tracker is not None:
             production_rate = self._tracker.rate
         else:
@@ -188,7 +261,13 @@ class RewardEvaluator:
             # Use instead of raw tick for time-based conditions so
             # they are independent of absolute game clock.
             # e.g. failure_condition="elapsed_ticks > 1200"
+            # elapsed_ticks: kept as a convenience alias for new.tick.
+            # Prefer new.tick for consistency with the delta framework.
             "elapsed_ticks": elapsed_ticks,
+            # Delta conditions — relative to goal activation snapshot.
+            # Access via the `new` object: new.charted_chunks, new.inventory('iron-ore'), etc.
+            # Adding a new delta only requires a method on _DeltaView — no per-item boilerplate.
+            "new": _DeltaView(wq, start_snapshot or {}, elapsed_ticks),
             # WorldQuery itself, for composable query use in conditions.
             "wq":        wq,
             # Inventory — NON-PROXIMAL

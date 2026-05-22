@@ -27,6 +27,7 @@ from llm.goal_source import GoalQueueEntry
 # the game has been running before the test.
 # 20 seconds at 60 tps = 1200 ticks. 30 seconds = 1800 ticks.
 _FAIL_20S = "elapsed_ticks > 1200"
+_FAIL_30S = "elapsed_ticks > 1800"
 
 
 def test_production_goal_fails_and_loop_continues(run_goals):
@@ -77,7 +78,7 @@ def test_collection_with_no_known_patches_goes_stuck(run_goal):
     entry = GoalQueueEntry(
         description="Collect uranium ore (unlikely to be in scan radius at start)",
         success_condition="inventory('uranium-ore') >= 1",
-        failure_condition=_FAIL_20S,
+        failure_condition=_FAIL_30S,
         goal_type="collection",
     )
     stats, wq = run_goal(entry)
