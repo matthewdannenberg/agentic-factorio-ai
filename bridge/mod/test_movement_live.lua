@@ -314,6 +314,24 @@ TM.suite("status_api", {
             test_print("[INFO] #proto = " .. tostring(count))
         end
 
+        -- Print the actual collision_mask we pass to request_path
+        local ok_json, json_out = pcall(function()
+            return helpers.table_to_json(proto)
+        end)
+        if ok_json and json_out then
+            test_print("[INFO] proto as JSON: " .. tostring(json_out):sub(1, 400))
+        else
+            -- proto is likely userdata; print what we can
+            test_print("[INFO] proto (tostring): " .. tostring(proto))
+            -- Try serialising just the layers sub-table
+            local ok_layers_json, layers_out = pcall(function()
+                return helpers.table_to_json(proto.layers)
+            end)
+            if ok_layers_json then
+                test_print("[INFO] proto.layers as JSON: " .. tostring(layers_out))
+            end
+        end
+
         -- Check what request_path actually expects by testing a minimal mask
         local ok_test, id = pcall(function()
             return player.surface.request_path({
@@ -338,6 +356,33 @@ TM.suite("status_api", {
             })
         end)
         test_print("[INFO] request_path with proto.layers: ok=" .. tostring(ok_test2) .. " id=" .. tostring(id2))
+    end,
+
+    move_to_sets_pathing_or_walking = function(t)
+        -- Directly test fa.move_to and immediately read internal state.
+        -- This distinguishes: (a) request_path succeeded → pathing or walking
+        --                     (b) request_path failed → direct-walk → walking immediately
+        --                     (c) move_to errored → idle
+        local player = get_player()
+        player.teleport({x = 10, y = 10})
+        fa.stop_movement()
+        fa.move_to({x = 20, y = 10}, true)
+        local raw = fa.get_movement_status()
+        local parsed = parse_json(raw)
+        test_print("[INFO] status after fa.move_to: " .. tostring(parsed and parsed.status))
+        test_print("[INFO] total_waypoints: " .. tostring(parsed and parsed.total_waypoints))
+        -- If status is "walking" with total_waypoints=1, it's the direct-walk fallback.
+        -- If status is "pathing", request_path succeeded and we're waiting for result.
+        -- If status is "idle", fa.move_to itself failed.
+        t.ok(
+            parsed and (parsed.status == "pathing" or parsed.status == "walking"),
+            "fa.move_to should result in pathing or walking; got: " ..
+            tostring(parsed and parsed.status)
+        )
+        if parsed and parsed.status == "walking" and parsed.total_waypoints == 1 then
+            test_print("[WARN] total_waypoints=1 suggests direct-walk fallback — request_path may have failed")
+        end
+        fa.stop_movement()
     end,
 
     get_state_includes_movement_status = function(t)
@@ -742,17 +787,22 @@ async("walking_after_path_received",
         player.teleport({x = 10, y = 10})
         fa.stop_movement()
         fa.move_to({x = 30, y = 10}, true)
-        state.start_x = player.position.x
-        state.start_y = player.position.y
+        state.start_x  = player.position.x
+        state.start_y  = player.position.y
+        state.start_tick = game.tick
     end,
     function(state, t)
         local raw = fa.get_movement_status()
         local parsed = parse_json(raw)
+        local elapsed = game.tick - (state.start_tick or 0)
+        test_print("[INFO] elapsed ticks=" .. tostring(elapsed)
+                   .. " status=" .. tostring(parsed and parsed.status)
+                   .. " waypoints=" .. tostring(parsed and parsed.total_waypoints))
         t.ok(parsed ~= nil, "get_movement_status() must return valid JSON")
         t.ok(
             parsed.status == "walking" or parsed.status == "idle",
-            "after several seconds, status should be walking or idle; got: " ..
-            tostring(parsed and parsed.status)
+            "status should be walking or idle after " .. tostring(elapsed) ..
+            " ticks; got: " .. tostring(parsed and parsed.status)
         )
     end
 )
@@ -850,6 +900,118 @@ async("move_no_collision_mask",
             string.format(
                 "move_no_collision_mask: dist=%.2f (should be >1 if pathfinder works without mask)",
                 dist
+            )
+        )
+    end
+)
+
+async("navigate_tree_maze",
+    -- A small maze of trees forcing the pathfinder to find a non-trivial route.
+    -- Layout (T=tree, .=open, S=start, G=goal, all relative to base (10,10)):
+    --
+    --   col:  10  11  12  13  14  15  16  17  18
+    --   row 8:  .   T   T   T   T   T   T   T   .
+    --   row 9:  .   T   .   .   .   .   .   T   .
+    --   row10:  S   T   .   T   T   T   .   T   G
+    --   row11:  .   T   .   .   .   .   .   T   .
+    --   row12:  .   T   T   T   T   T   T   T   .
+    --
+    -- The only route is through the gap at (12,9)→(12,11) or similar.
+    -- A straight-line path from S(10,10) to G(18,10) is blocked by the wall.
+    function(state)
+        local player = get_player()
+        player.teleport({x = 10, y = 10})
+        fa.stop_movement()
+
+        local base_x, base_y = 11, 8
+        state.trees = {}
+
+        -- Top and bottom horizontal walls
+        for dx = 0, 6 do
+            for _, dy in ipairs({0, 4}) do
+                local tree = player.surface.create_entity({
+                    name     = "tree-01",
+                    position = {x = base_x + dx, y = base_y + dy},
+                    force    = "neutral",
+                })
+                if tree and tree.valid then
+                    table.insert(state.trees, tree)
+                end
+            end
+        end
+
+        -- Left and right vertical walls (rows 1-3, leaving gap)
+        for dy = 1, 3 do
+            for _, dx in ipairs({0, 6}) do
+                local tree = player.surface.create_entity({
+                    name     = "tree-01",
+                    position = {x = base_x + dx, y = base_y + dy},
+                    force    = "neutral",
+                })
+                if tree and tree.valid then
+                    table.insert(state.trees, tree)
+                end
+            end
+        end
+
+        -- Internal baffle: a row of trees across the middle with a gap at top
+        -- Forces the path to go up then across then down
+        for dy = 2, 3 do
+            local tree = player.surface.create_entity({
+                name     = "tree-01",
+                position = {x = base_x + 3, y = base_y + dy},
+                force    = "neutral",
+            })
+            if tree and tree.valid then
+                table.insert(state.trees, tree)
+            end
+        end
+
+        state.start_x  = player.position.x
+        state.start_y  = player.position.y
+        state.start_tick = game.tick
+        state.tree_count = #state.trees
+
+        -- Goal is on the other side of the maze
+        fa.move_to({x = 18, y = 10}, true)
+
+        test_print("[INFO] tree_maze: placed " .. #state.trees .. " trees, moving to (18,10)")
+    end,
+    function(state, t)
+        local player = get_player()
+        local final_x = player.position.x
+        local final_y = player.position.y
+        local elapsed = game.tick - (state.start_tick or 0)
+        local status_raw = fa.get_movement_status()
+        local status = parse_json(status_raw)
+
+        -- Clean up trees regardless of result
+        local removed = 0
+        for _, tree in ipairs(state.trees or {}) do
+            if tree and tree.valid then
+                tree.destroy()
+                removed = removed + 1
+            end
+        end
+        fa.stop_movement()
+
+        test_print(string.format(
+            "[INFO] tree_maze: elapsed=%d status=%s pos=(%.1f,%.1f) removed=%d trees",
+            elapsed,
+            tostring(status and status.status),
+            final_x, final_y, removed
+        ))
+
+        -- Player should have moved meaningfully toward or past the goal
+        local dist_from_start = math.sqrt(
+            (final_x - state.start_x)^2 + (final_y - state.start_y)^2
+        )
+        t.ok(dist_from_start > 2.0,
+            string.format(
+                "player should have navigated through tree maze; " ..
+                "start=(%.1f,%.1f) end=(%.1f,%.1f) dist=%.2f. " ..
+                "dist<2 means pathfinder returned unreachable or character never moved.",
+                state.start_x, state.start_y, final_x, final_y, dist_from_start
             )
         )
     end

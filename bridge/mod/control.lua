@@ -138,13 +138,16 @@ local WAYPOINT_THRESHOLD = 0.6   -- tiles; advance to next waypoint
 local function request_movement_path(player)
     if not player or not player.valid or not player.character then return end
 
-    -- Pass the CollisionMask prototype object directly. Confirmed by diagnostic:
-    --   request_path with raw proto: ok=true
-    --   request_path with proto.layers: error "Key 'layers' not found"
-    -- The API wants the full CollisionMask userdata, not its inner layers table.
-    -- The prototype's actual layers are: is_object, player, train — these ensure
-    -- the pathfinder routes around walls, trees, and other solid entities.
-    local collision_mask = player.character.prototype.collision_mask
+    -- Collision mask: use only the "object" layer, which covers trees, rocks,
+    -- walls, buildings, and other solid obstacles. The character prototype's
+    -- actual layers (is_object, player, train) cause "unreachable" for normal
+    -- terrain because "player" layer blocks positions occupied by the player
+    -- entity itself. "object" is what the Factorio pathfinder uses for
+    -- standard unit movement around solid obstacles.
+    local collision_mask = {
+        layers = {object = true},
+        consider_tile_transitions = true,
+    }
 
     local ok, id_or_err = pcall(function()
         return player.surface.request_path({
