@@ -618,12 +618,13 @@ class TestCoordinatorExploration(unittest.TestCase):
         # Tick 99 — drain the StopMining flush.
         coordinator.tick(goal, wq_start, ww, tick=99)
 
-        # Tick 100 — derive the exploration subtask (waypoint at (64, 0)).
+        # Tick 100 — derive the exploration subtask (waypoint at (128, 0)).
         coordinator.tick(goal, wq_start, ww, tick=100)
         self.assertEqual(len(coordinator._ledger), 1)
 
-        # Tick 101 — player arrives at the waypoint; is_at((64,0)) is True.
-        wq_arrived = _make_wq(player_pos=Position(64.0, 0.0), charted_chunks=0)
+        # Tick 101 — player arrives at the waypoint; is_at((128,0)) is True.
+        # step = 128 * max(1, int(sqrt(max(0,1)))) = 128 * 1 = 128, direction 0 = east.
+        wq_arrived = _make_wq(player_pos=Position(128.0, 0.0), charted_chunks=0)
         result = coordinator.tick(goal, wq_arrived, ww, tick=101)
 
         self.assertIn(

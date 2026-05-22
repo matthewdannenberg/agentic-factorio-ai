@@ -981,33 +981,34 @@ def _next_exploration_waypoint(
     attempt: int = 0,
 ) -> Position:
     """
-    Return the next waypoint position for a simple outward exploration pattern.
+    Return the next waypoint for outward exploration from the world origin.
 
-    Uses a concentric square spiral: each ring is 64 tiles (2 chunks) wide.
-    The `attempt` offset rotates the direction so repeated escalations (e.g.
-    stalls on obstacles) try different directions rather than the same one.
+    Waypoints are absolute positions (not relative to player) so each leg
+    moves into genuinely new territory. Step grows with charted chunk count:
+    128 tiles (4 chunks) minimum, one ring wider per sqrt(chunks) increment.
+    The `attempt` offset rotates the cardinal direction so repeated stalls
+    try a different direction rather than retrying the same blocked path.
 
-    This is a Phase 6 placeholder. Phase 9 will replace with a proper
-    frontier-based exploration planner.
+    This is a Phase 6 placeholder. Phase 9 replaces with frontier-based
+    exploration.
     """
-    # Estimate how far out we need to go based on chunks already charted.
-    # Each ring of radius r covers roughly (2r)^2 / 1024 chunks.
-    ring = max(1, int(math.sqrt(current_chunks)))
-    step = 64 * ring  # tiles
+    # Waypoints are absolute from the world origin so each leg genuinely
+    # moves into new territory. Step size grows with charted chunk count —
+    # minimum 128 tiles (4 chunks) so we always leave charted territory.
+    ring = max(1, int(math.sqrt(max(current_chunks, 1))))
+    step = 128 * ring   # tiles from origin
 
-    # Emit a waypoint in an E→S→W→N pattern.
-    # Starting east (not north) avoids the crashed ship at spawn, which is
-    # always to the north in a default Factorio map. Phase 9 will replace
-    # this with a proper frontier-based exploration planner.
+    # Rotate direction by attempt so repeated stalls try different cardinals.
+    # Starting east avoids the crashed ship which spawns north in default maps.
     direction = (current_chunks + attempt) % 4
     if direction == 0:
-        return Position(player_pos.x + step, player_pos.y)   # east
+        return Position(step, 0.0)     # east
     elif direction == 1:
-        return Position(player_pos.x, player_pos.y + step)   # south
+        return Position(0.0, step)     # south
     elif direction == 2:
-        return Position(player_pos.x - step, player_pos.y)   # west
+        return Position(-step, 0.0)    # west
     else:
-        return Position(player_pos.x, player_pos.y - step)   # north
+        return Position(0.0, -step)    # north
 
 
 def _build_condition_namespace(wq: "WorldQuery", tick: int) -> dict:
