@@ -57,6 +57,7 @@ from world.state import Position
 if TYPE_CHECKING:
     from agent.blackboard import Blackboard
     from agent.subtask import Subtask
+    from world.knowledge import KnowledgeBase
     from world.query import WorldQuery
     from world.writer import WorldWriter
 
@@ -135,6 +136,7 @@ class MiningAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> None:
         """
         Called when a new subtask is assigned to this agent.
@@ -168,6 +170,7 @@ class MiningAgent(AgentProtocol):
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
+        kb: "KnowledgeBase",
     ) -> list[Action]:
         """
         One tick. Reads the active mining_task entry and executes it.
@@ -196,6 +199,7 @@ class MiningAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> dict:
         return {
             "agent": AGENT_ID,
@@ -212,6 +216,7 @@ class MiningAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> float:
         if self._subtask_kind == _SubtaskKind.CLEAR:
             total = len(self._clear_targets) + (1 if self._current_target else 0)

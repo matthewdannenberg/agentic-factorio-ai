@@ -246,6 +246,7 @@ class StateParser:
         pos = self._parse_position(d.get("position", {}))
         health = float(d.get("health", 100.0))
         inventory = self._parse_inventory(d.get("inventory", []))
+        inventory_size = int(d.get("inventory_size", 0))
         reachable = [int(x) for x in d.get("reachable", [])]
         charted_chunks = int(d.get("charted_chunks", 0))
         self._last_movement_status = str(d.get("movement_status", "idle"))
@@ -253,6 +254,7 @@ class StateParser:
             position=pos,
             health=health,
             inventory=inventory,
+            inventory_size=inventory_size,
             reachable=reachable,
             exploration=ExplorationState(charted_chunks=charted_chunks),
         )

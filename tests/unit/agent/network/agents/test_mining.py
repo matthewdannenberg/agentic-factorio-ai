@@ -121,7 +121,7 @@ def _drain_stop(agent, subtask, bb, wq, ww, tick=100):
     so tests can assert on the actual mining behaviour without noise.
     Returns the drained actions for tests that want to inspect them.
     """
-    return agent.tick(subtask, bb, wq, ww, tick=tick)
+    return agent.tick(subtask, bb, wq, ww, tick=tick, kb=None)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ class TestMiningAgentActivate(unittest.TestCase):
         agent._gather_issued_at = 500
         agent._last_inventory = {"iron-ore": 5}
 
-        agent.activate(_make_subtask(), Blackboard(), _make_wq())
+        agent.activate(_make_subtask(), Blackboard(), _make_wq(), None)
 
         self.assertEqual(agent._gather_resource_type, "")
         self.assertEqual(agent._gather_issued_at, 0)
@@ -149,7 +149,7 @@ class TestMiningAgentActivate(unittest.TestCase):
         agent._mine_issued_at = 200
         agent._current_target = _ClearTarget(entity_id=2, position=Position(1, 1))
 
-        agent.activate(_make_subtask(), Blackboard(), _make_wq())
+        agent.activate(_make_subtask(), Blackboard(), _make_wq(), None)
 
         self.assertEqual(agent._clear_targets, [])
         self.assertEqual(agent._mine_issued_at, 0)
@@ -158,7 +158,7 @@ class TestMiningAgentActivate(unittest.TestCase):
     def test_activate_stores_subtask(self):
         agent = MiningAgent()
         subtask = _make_subtask()
-        agent.activate(subtask, Blackboard(), _make_wq())
+        agent.activate(subtask, Blackboard(), _make_wq(), None)
         self.assertIs(agent._current_subtask, subtask)
 
 
@@ -174,10 +174,10 @@ class TestMiningAgentNoTask(unittest.TestCase):
         bb = Blackboard()
         wq = _make_wq()
         ww = _make_mock_writer()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         _drain_stop(agent, subtask, bb, wq, ww)
 
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(actions, [])
 
     def test_returns_empty_with_wrong_entry_type(self):
@@ -193,10 +193,10 @@ class TestMiningAgentNoTask(unittest.TestCase):
         )
         wq = _make_wq()
         ww = _make_mock_writer()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         _drain_stop(agent, subtask, bb, wq, ww)
 
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(actions, [])
 
 
@@ -212,12 +212,12 @@ class TestMiningAgentGather(unittest.TestCase):
         self.bb = Blackboard()
         self.wq = _make_wq()
         self.ww = _make_mock_writer()
-        self.agent.activate(self.subtask, self.bb, self.wq)
+        self.agent.activate(self.subtask, self.bb, self.wq, None)
         _drain_stop(self.agent, self.subtask, self.bb, self.wq, self.ww)
 
     def test_first_tick_emits_mine_resource(self):
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineResource)
         self.assertEqual(actions[0].resource, "iron-ore")
@@ -227,26 +227,26 @@ class TestMiningAgentGather(unittest.TestCase):
     def test_mine_resource_count_is_zero(self):
         """count=0 means mine until full/exhausted."""
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(actions[0].count, 0)
 
     def test_second_tick_within_grace_suppressed(self):
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         # Second tick — still within grace period.
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102, kb=None)
         self.assertEqual(actions, [])
 
     def test_stall_detected_after_grace_period(self):
         """After grace period, if inventory hasn't changed, re-issue."""
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
         # Issue at tick 100.
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100, kb=None)
         # Tick after grace period with unchanged inventory.
         from agent.network.agents.mining import _MINING_GRACE_TICKS
         tick_after_grace = 100 + _MINING_GRACE_TICKS + 1
         actions = self.agent.tick(
-            self.subtask, self.bb, self.wq, self.ww, tick=tick_after_grace
+            self.subtask, self.bb, self.wq, self.ww, tick=tick_after_grace, kb=None
         )
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineResource)
@@ -254,36 +254,36 @@ class TestMiningAgentGather(unittest.TestCase):
     def test_no_stall_if_inventory_changed(self):
         """If inventory changed during grace period, no re-issue after it."""
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100, kb=None)
         # Advance with ore in inventory.
         wq_with_ore = _make_wq(inventory_items={"iron-ore": 3})
         from agent.network.agents.mining import _MINING_GRACE_TICKS
         tick_after_grace = 100 + _MINING_GRACE_TICKS + 1
         actions = self.agent.tick(
-            self.subtask, self.bb, wq_with_ore, self.ww, tick=tick_after_grace
+            self.subtask, self.bb, wq_with_ore, self.ww, tick=tick_after_grace, kb=None
         )
         self.assertEqual(actions, [])
 
     def test_new_resource_type_always_reissues(self):
         """Changing resource type resets state and issues a new command."""
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
 
         # Replace blackboard entry with copper-ore task.
         self.bb.clear_all()
         _write_gather_task(self.bb, "copper-ore", 5.0, 5.0, tick=102)
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].resource, "copper-ore")
 
     def test_new_position_always_reissues(self):
         """Changing target position resets state and issues a new command."""
         _write_gather_task(self.bb, "iron-ore", 5.0, 5.0)
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
 
         self.bb.clear_all()
         _write_gather_task(self.bb, "iron-ore", 20.0, 20.0, tick=102)
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertAlmostEqual(actions[0].position.x, 20.0)
 
@@ -307,11 +307,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
-        agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
 
         # Target list should have 2 entities (the outside one excluded).
         # current_target uses one, remainder in _clear_targets.
@@ -325,11 +325,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_natural", _BBOX)
 
-        agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
 
         # Only the tree should be targeted; furnace is not natural.
         total = len(agent._clear_targets) + (1 if agent._current_target else 0)
@@ -343,11 +343,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
-        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineEntity)
         self.assertEqual(actions[0].entity_id, 1)
@@ -358,11 +358,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
-        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MoveTo)
 
@@ -373,18 +373,18 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq_both)
+        agent.activate(self.subtask, bb, wq_both, None)
         _drain_stop(agent, self.subtask, bb, wq_both, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
         # First tick — picks tree1 as current target.
-        agent.tick(self.subtask, bb, wq_both, self.ww, tick=100)
+        agent.tick(self.subtask, bb, wq_both, self.ww, tick=100, kb=None)
         self.assertIsNotNone(agent._current_target)
         first_id = agent._current_target.entity_id
 
         # tree1 disappears.
         wq_tree1_gone = _make_wq(entities=[tree2], reachable=[2])
-        agent.tick(self.subtask, bb, wq_tree1_gone, self.ww, tick=101)
+        agent.tick(self.subtask, bb, wq_tree1_gone, self.ww, tick=101, kb=None)
 
         # Current target should have advanced to tree2.
         if agent._current_target:
@@ -395,11 +395,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
-        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        actions = agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
         self.assertEqual(actions, [])
 
     def test_targets_sorted_by_distance(self):
@@ -411,11 +411,11 @@ class TestMiningAgentClear(unittest.TestCase):
 
         agent = MiningAgent()
         bb = Blackboard()
-        agent.activate(self.subtask, bb, wq)
+        agent.activate(self.subtask, bb, wq, None)
         _drain_stop(agent, self.subtask, bb, wq, self.ww)
         _write_clear_task(bb, "clear_all", _BBOX)
 
-        agent.tick(self.subtask, bb, wq, self.ww, tick=100)
+        agent.tick(self.subtask, bb, wq, self.ww, tick=100, kb=None)
         self.assertIsNotNone(agent._current_target)
         self.assertEqual(agent._current_target.entity_id, 1)
 
@@ -436,9 +436,9 @@ class TestMiningAgentStopMining(unittest.TestCase):
         bb = Blackboard()
         wq = _make_wq()
         ww = _make_mock_writer()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        actions = agent.tick(subtask, bb, wq, ww, tick=100)
+        actions = agent.tick(subtask, bb, wq, ww, tick=100, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMining)
 
@@ -449,10 +449,10 @@ class TestMiningAgentStopMining(unittest.TestCase):
         bb = Blackboard()
         wq = _make_wq()
         ww = _make_mock_writer()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        agent.tick(subtask, bb, wq, ww, tick=100)  # drains stop
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        agent.tick(subtask, bb, wq, ww, tick=100, kb=None)  # drains stop
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertNotIn(StopMining(), actions)
 
     def test_re_activate_triggers_another_stop(self):
@@ -463,11 +463,11 @@ class TestMiningAgentStopMining(unittest.TestCase):
         wq = _make_wq()
         ww = _make_mock_writer()
 
-        agent.activate(subtask, bb, wq)
-        agent.tick(subtask, bb, wq, ww, tick=100)  # drains first stop
+        agent.activate(subtask, bb, wq, None)
+        agent.tick(subtask, bb, wq, ww, tick=100, kb=None)  # drains first stop
 
-        agent.activate(subtask, bb, wq)  # re-activated (new subtask assigned)
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        agent.activate(subtask, bb, wq, None)  # re-activated (new subtask assigned)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMining)
 
@@ -478,15 +478,15 @@ class TestMiningAgentStopMining(unittest.TestCase):
         bb = Blackboard()
         wq = _make_wq()
         ww = _make_mock_writer()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         _write_gather_task(bb, "iron-ore", 5.0, 5.0)
 
-        actions = agent.tick(subtask, bb, wq, ww, tick=100)
+        actions = agent.tick(subtask, bb, wq, ww, tick=100, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMining)
 
         # Next tick should now mine.
-        actions2 = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions2 = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(len(actions2), 1)
         self.assertIsInstance(actions2[0], MineResource)
 
@@ -541,14 +541,14 @@ class TestMiningAgentProgressAndObserve(unittest.TestCase):
     def test_progress_zero_before_clear_starts(self):
         agent = MiningAgent()
         subtask = _make_subtask()
-        agent.activate(subtask, Blackboard(), _make_wq())
-        self.assertAlmostEqual(agent.progress(subtask, Blackboard(), _make_wq()), 0.0)
+        agent.activate(subtask, Blackboard(), _make_wq(), None)
+        self.assertAlmostEqual(agent.progress(subtask, Blackboard(), _make_wq(), None), 0.0)
 
     def test_progress_reflects_clear_completion(self):
         from agent.network.agents.mining import _ClearTarget, _SubtaskKind
         agent = MiningAgent()
         subtask = _make_subtask()
-        agent.activate(subtask, Blackboard(), _make_wq())
+        agent.activate(subtask, Blackboard(), _make_wq(), None)
 
         # Simulate: 3 targets total, 2 done, 1 remaining.
         agent._subtask_kind = _SubtaskKind.CLEAR
@@ -556,7 +556,7 @@ class TestMiningAgentProgressAndObserve(unittest.TestCase):
         agent._clear_targets = []   # 0 remaining after current
 
         # total=1 (current), done=0 → progress=0.
-        p = agent.progress(subtask, Blackboard(), _make_wq())
+        p = agent.progress(subtask, Blackboard(), _make_wq(), None)
         self.assertAlmostEqual(p, 0.0)
 
     def test_observe_contains_expected_keys(self):
@@ -564,9 +564,9 @@ class TestMiningAgentProgressAndObserve(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        obs = agent.observe(subtask, bb, wq)
+        obs = agent.observe(subtask, bb, wq, None)
         self.assertIn("agent", obs)
         self.assertIn("subtask_id", obs)
         self.assertIn("subtask_kind", obs)
@@ -578,9 +578,9 @@ class TestMiningAgentProgressAndObserve(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        obs = agent.observe(subtask, bb, wq)
+        obs = agent.observe(subtask, bb, wq, None)
         self.assertEqual(obs["subtask_id"], subtask.id[:8])
 
 

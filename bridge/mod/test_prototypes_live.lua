@@ -371,4 +371,87 @@ TP.suite("resource_fluid_prototype", {
     end,
 })
 
+-- ============================================================
+-- Suite: item_prototype
+-- Verifies fa.get_item_prototype() returns correct stack_size
+-- data for common items. Used by the KB items domain.
+-- ============================================================
+
+TP.suite("item_prototype", {
+
+    iron_plate_has_expected_fields = function(t)
+        local raw = fa.get_item_prototype("iron-plate")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil,
+            "fa.get_item_prototype('iron-plate') must return valid JSON; got: " ..
+            tostring(raw):sub(1, 80))
+        t.ok(parsed.ok ~= false,
+            "must not return ok=false; reason=" .. tostring(parsed.reason))
+        t.is_string(parsed.name, "name must be a string")
+        t.is_number(parsed.stack_size, "stack_size must be a number")
+        t.eq(parsed.name, "iron-plate", "name must match request")
+    end,
+
+    iron_plate_stack_size_correct = function(t)
+        -- Iron plate stacks to 100 in standard Factorio.
+        local raw = fa.get_item_prototype("iron-plate")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.ok ~= false, "must succeed")
+        t.eq(parsed.stack_size, 100,
+            "iron-plate stack_size should be 100; got " .. tostring(parsed.stack_size))
+    end,
+
+    iron_gear_wheel_stack_size_correct = function(t)
+        -- Iron gear wheel stacks to 100.
+        local raw = fa.get_item_prototype("iron-gear-wheel")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.ok ~= false, "must succeed")
+        t.eq(parsed.stack_size, 100,
+            "iron-gear-wheel stack_size should be 100; got " .. tostring(parsed.stack_size))
+    end,
+
+    electronic_circuit_stack_size_correct = function(t)
+        -- Electronic circuit stacks to 200.
+        local raw = fa.get_item_prototype("electronic-circuit")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.ok ~= false, "must succeed")
+        t.eq(parsed.stack_size, 200,
+            "electronic-circuit stack_size should be 200; got " .. tostring(parsed.stack_size))
+    end,
+
+    stack_size_is_positive_integer = function(t)
+        -- For any valid item, stack_size must be >= 1.
+        local items = {"iron-plate", "copper-plate", "coal", "stone",
+                       "iron-gear-wheel", "copper-cable", "electronic-circuit"}
+        for _, name in ipairs(items) do
+            local raw = fa.get_item_prototype(name)
+            local parsed = parse_json(raw)
+            if parsed and parsed.ok ~= false then
+                t.ok(parsed.stack_size >= 1,
+                    name .. " stack_size must be >= 1; got " ..
+                    tostring(parsed.stack_size))
+            end
+        end
+    end,
+
+    unknown_item_returns_error = function(t)
+        local raw = fa.get_item_prototype("this-item-does-not-exist-xyz")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for unknown item")
+        t.ok(not parsed.ok, "should return ok=false for unknown item")
+    end,
+
+    name_field_matches_request = function(t)
+        -- The returned name must echo back the requested item name.
+        local raw = fa.get_item_prototype("coal")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.ok ~= false, "must succeed")
+        t.eq(parsed.name, "coal", "name must match requested item")
+    end,
+})
+
 return TP

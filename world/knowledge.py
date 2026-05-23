@@ -225,6 +225,25 @@ class FluidRecord:
 
 
 @dataclass
+class ItemRecord:
+    name: str
+    stack_size: int
+    is_placeholder: bool
+
+    @classmethod
+    def placeholder(cls, name: str) -> "ItemRecord":
+        return cls(name=name, stack_size=1, is_placeholder=True)
+
+    @classmethod
+    def from_prototype_json(cls, name: str, data: dict) -> "ItemRecord":
+        return cls(
+            name=name,
+            stack_size=int(data.get("stack_size", 1)),
+            is_placeholder=False,
+        )
+
+
+@dataclass
 class IngredientRecord:
     name: str
     amount: float
@@ -354,6 +373,12 @@ class TechRecord:
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS items (
+    name           TEXT PRIMARY KEY,
+    stack_size     INTEGER NOT NULL DEFAULT 1,
+    is_placeholder INTEGER NOT NULL DEFAULT 1
+);
 
 CREATE TABLE IF NOT EXISTS entities (
     name             TEXT PRIMARY KEY,
@@ -492,6 +517,7 @@ class KnowledgeBase:
         self._fluids:    dict[str, FluidRecord]    = {}
         self._recipes:   dict[str, RecipeRecord]   = {}
         self._techs:     dict[str, TechRecord]     = {}
+        self._items:     dict[str, ItemRecord]     = {}
 
         self._load_all()
 
@@ -521,6 +547,7 @@ class KnowledgeBase:
         self._load_fluids()
         self._load_recipes()
         self._load_techs()
+        self._load_items()
 
     def _load_entities(self) -> None:
         for row in self._conn.execute("SELECT * FROM entities"):
@@ -621,9 +648,25 @@ class KnowledgeBase:
                 is_placeholder=bool(row["is_placeholder"]),
             )
 
+    def _load_items(self) -> None:
+        for row in self._conn.execute("SELECT * FROM items"):
+            r = ItemRecord(
+                name=row["name"],
+                stack_size=row["stack_size"],
+                is_placeholder=bool(row["is_placeholder"]),
+            )
+            self._items[r.name] = r
+
     # ------------------------------------------------------------------
     # Write to DB
     # ------------------------------------------------------------------
+
+    def _insert_item(self, r: ItemRecord) -> None:
+        self._conn.execute("""
+            INSERT OR REPLACE INTO items (name, stack_size, is_placeholder)
+            VALUES (?,?,?)
+        """, (r.name, r.stack_size, int(r.is_placeholder)))
+        self._conn.commit()
 
     def _insert_entity(self, r: EntityRecord) -> None:
         self._conn.execute("""
@@ -859,6 +902,51 @@ class KnowledgeBase:
         return dict(self._fluids)
 
     # ------------------------------------------------------------------
+    # Item registry
+    # ------------------------------------------------------------------
+
+    def ensure_item(self, name: str) -> ItemRecord:
+        """
+        Return the ItemRecord for *name*, querying Factorio if needed.
+
+        Used to look up stack_size for inventory-space precondition checks.
+        Falls back to a placeholder (stack_size=1) if the item is unknown —
+        this is the conservative safe default for slot-count arithmetic.
+        """
+        existing = self._items.get(name)
+        if existing is not None and not (existing.is_placeholder and self._query_fn):
+            return existing
+        record = self._discover_item(name)
+        self._items[name] = record
+        self._insert_item(record)
+        return record
+
+    def _discover_item(self, name: str) -> ItemRecord:
+        data = self._query("item", name)
+        if data is None:
+            return ItemRecord.placeholder(name)
+        try:
+            return ItemRecord.from_prototype_json(name, data)
+        except Exception as exc:
+            logger.warning("Item %r: failed to parse prototype: %s", name, exc)
+            return ItemRecord.placeholder(name)
+
+    def get_item(self, name: str) -> Optional[ItemRecord]:
+        return self._items.get(name)
+
+    def item_stack_size(self, name: str) -> int:
+        """
+        Return the stack size for *name*.
+
+        Calls ensure_item() so the value is fetched from Factorio on first
+        access and cached thereafter. Returns 1 (conservative) if unknown.
+        """
+        return self.ensure_item(name).stack_size
+
+    def all_items(self) -> dict[str, ItemRecord]:
+        return dict(self._items)
+
+    # ------------------------------------------------------------------
     # Recipe registry
     # ------------------------------------------------------------------
 
@@ -1009,10 +1097,10 @@ class KnowledgeBase:
         """
         if self._query_fn is None:
             return {"entities": 0, "resources": 0, "fluids": 0,
-                    "recipes": 0, "techs": 0}
+                    "recipes": 0, "techs": 0, "items": 0}
 
         counts = {"entities": 0, "resources": 0, "fluids": 0,
-                  "recipes": 0, "techs": 0}
+                  "recipes": 0, "techs": 0, "items": 0}
 
         for name in list(self._entities):
             if self._entities[name].is_placeholder:
@@ -1044,6 +1132,12 @@ class KnowledgeBase:
                 if not self._techs[name].is_placeholder:
                     counts["techs"] += 1
 
+        for name in list(self._items):
+            if self._items[name].is_placeholder:
+                self.ensure_item(name)
+                if not self._items[name].is_placeholder:
+                    counts["items"] += 1
+
         return counts
 
     def summary(self) -> dict:
@@ -1053,6 +1147,7 @@ class KnowledgeBase:
             "fluids":    len(self._fluids),
             "recipes":   len(self._recipes),
             "techs":     len(self._techs),
+            "items":     len(self._items),
             "data_dir":  str(self._dir),
             "db_path":   str(self._dir / _DB_NAME),
         }

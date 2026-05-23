@@ -118,6 +118,8 @@ def main() -> None:
     from bridge.rcon_client import RconClient
     from bridge.state_parser import StateParser
     from bridge.action_executor import ActionExecutor
+    from bridge.prototype_query import make_prototype_query_fn
+    from bridge.world_poller import WorldPoller
     from agent.blackboard import Blackboard
     from agent.subtask import SubtaskLedger
     from agent.self_model import SelfModel
@@ -128,6 +130,7 @@ def main() -> None:
     from agent.network.coordinator import RuleBasedCoordinator
     from agent.loop import FactorioLoop, LoopConfig
     from planning.reward_evaluator import RewardEvaluator
+    from world.knowledge import KnowledgeBase
 
     log.info("run.py: connecting to Factorio at %s:%d", args.host, args.port)
     client = RconClient(
@@ -139,6 +142,10 @@ def main() -> None:
 
     parser_inst = StateParser()
     executor = ActionExecutor(client)
+
+    # Knowledge base — persistent across runs, wired to Factorio via RCON.
+    kb = KnowledgeBase(data_dir="data/knowledge")
+    kb._query_fn = make_prototype_query_fn(client)
 
     # Agent network
     nav_agent   = NavigationAgent()
@@ -158,14 +165,23 @@ def main() -> None:
         blackboard=blackboard,
         ledger=ledger,
         self_model=sm,
+        kb=kb,
     )
 
     goal_queue = _build_goal_queue(args)
     evaluator  = RewardEvaluator()
 
+    poller = WorldPoller(
+        client=client,
+        local_scan=config.LOCAL_SCAN_RADIUS,
+        resource_scan=config.RESOURCE_SCAN_RADIUS,
+        item_scan=config.GROUND_ITEM_SCAN_RADIUS,
+    )
+
     loop = FactorioLoop(
         client=client,
         parser=parser_inst,
+        poller=poller,
         executor=executor,
         coordinator=coordinator,
         goal_source=goal_queue,

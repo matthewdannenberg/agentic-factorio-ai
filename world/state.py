@@ -326,6 +326,7 @@ class PlayerState:
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
     health: float = 100.0
     inventory: Inventory = field(default_factory=Inventory)
+    inventory_size: int = 0   # total slot count of the character main inventory
     reachable: list[int] = field(default_factory=list)
     exploration: ExplorationState = field(default_factory=ExplorationState)
 

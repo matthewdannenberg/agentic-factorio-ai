@@ -70,6 +70,41 @@ class TestStateParserFullParse(unittest.TestCase):
         state = self._parse(data)
         self.assertEqual(state.observed_at.get("player"), 200)
 
+    def test_player_inventory_size_parsed(self):
+        data = {"tick": 100, "player": {
+            "position": {"x": 0, "y": 0},
+            "inventory": [{"item": "iron-plate", "count": 10}],
+            "inventory_size": 80,
+            "reachable": [],
+        }}
+        state = self._parse(data)
+        self.assertEqual(state.player.inventory_size, 80)
+
+    def test_player_inventory_size_defaults_to_zero_when_absent(self):
+        # Older bridge responses without the field should not raise.
+        data = {"tick": 100, "player": {
+            "position": {"x": 0, "y": 0},
+            "inventory": [],
+            "reachable": [],
+        }}
+        state = self._parse(data)
+        self.assertEqual(state.player.inventory_size, 0)
+
+    def test_player_inventory_size_at_least_occupied_slots(self):
+        # Sanity: total size must not be less than the number of filled slots.
+        data = {"tick": 100, "player": {
+            "position": {"x": 0, "y": 0},
+            "inventory": [
+                {"item": "iron-ore", "count": 100},
+                {"item": "coal", "count": 50},
+            ],
+            "inventory_size": 80,
+            "reachable": [],
+        }}
+        state = self._parse(data)
+        self.assertGreaterEqual(state.player.inventory_size,
+                                len(state.player.inventory.slots))
+
     # --- entities -------------------------------------------------------------
 
     def test_entity_basic_fields(self):

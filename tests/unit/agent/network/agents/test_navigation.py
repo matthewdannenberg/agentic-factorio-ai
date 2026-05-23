@@ -89,7 +89,7 @@ class TestNavigationAgentActivate(unittest.TestCase):
         wq = _make_wq(player_pos=Position(3.0, 7.0))
         subtask = _make_subtask()
 
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
         obs = bb.read(category=EntryCategory.OBSERVATION, current_tick=100)
         self.assertEqual(len(obs), 1)
@@ -105,7 +105,7 @@ class TestNavigationAgentActivate(unittest.TestCase):
 
         bb = Blackboard()
         wq = _make_wq()
-        agent.activate(_make_subtask(), bb, wq)
+        agent.activate(_make_subtask(), bb, wq, None)
 
         self.assertEqual(agent._waypoints_completed, 0)
         self.assertEqual(agent._waypoints_total, 0)
@@ -116,7 +116,7 @@ class TestNavigationAgentActivate(unittest.TestCase):
         agent._last_issued_target = P(5.0, 5.0)
         agent._last_move_tick = 99
 
-        agent.activate(_make_subtask(), Blackboard(), _make_wq())
+        agent.activate(_make_subtask(), Blackboard(), _make_wq(), None)
 
         self.assertIsNone(agent._last_issued_target)
         self.assertEqual(agent._last_move_tick, 0)
@@ -134,29 +134,29 @@ class TestNavigationAgentTick(unittest.TestCase):
         self.wq = _make_wq(player_pos=Position(0.0, 0.0))
         self.ww = _make_mock_writer()
         self.subtask = _make_subtask()
-        self.agent.activate(self.subtask, self.bb, self.wq)
+        self.agent.activate(self.subtask, self.bb, self.wq, None)
         self.bb.clear_all()
 
     def test_returns_moveto_when_not_at_waypoint(self):
         _make_waypoint_entry(self.bb, target_pos=Position(50.0, 50.0))
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MoveTo)
         self.assertTrue(actions[0].pathfind)
 
     def test_moveto_target_is_waypoint_position(self):
         _make_waypoint_entry(self.bb, target_pos=Position(30.0, -10.0))
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertAlmostEqual(actions[0].position.x, 30.0)
         self.assertAlmostEqual(actions[0].position.y, -10.0)
 
     def test_returns_empty_when_no_waypoint(self):
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(actions, [])
 
     def test_writes_position_observation_every_tick(self):
-        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         pos_obs = [
             e for e in self.bb.read(current_tick=101)
             if e.data.get("type") == "player_position"
@@ -177,7 +177,7 @@ class TestNavigationAgentTick(unittest.TestCase):
                 "purpose": "SHOULD_NOT_CAUSE_BRANCH",
             },
         )
-        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MoveTo)
 
@@ -185,10 +185,10 @@ class TestNavigationAgentTick(unittest.TestCase):
         """Second tick to same target should not re-issue MoveTo."""
         _make_waypoint_entry(self.bb, target_pos=Position(50.0, 50.0))
         # First tick — issues MoveTo.
-        actions1 = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101)
+        actions1 = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=101, kb=None)
         self.assertEqual(len(actions1), 1)
         # Second tick same waypoint, position unchanged — suppressed.
-        actions2 = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102)
+        actions2 = self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=102, kb=None)
         self.assertEqual(actions2, [])
 
 
@@ -207,11 +207,11 @@ class TestNavigationAgentArrival(unittest.TestCase):
         wq = _make_wq(player_pos=Position(10.0, 10.0))
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         _make_waypoint_entry(bb, target_pos=Position(10.0, 10.0), tick=100)
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
 
         # Should return StopMovement on arrival.
         self.assertEqual(len(actions), 1)
@@ -225,11 +225,11 @@ class TestNavigationAgentArrival(unittest.TestCase):
         wq = _make_wq(player_pos=Position(10.0, 10.0))
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         _make_waypoint_entry(bb, target_pos=Position(10.0, 10.0), tick=100)
-        agent.tick(subtask, bb, wq, ww, tick=101)
+        agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
 
         reached = [
             e for e in bb.read(current_tick=101)
@@ -244,7 +244,7 @@ class TestNavigationAgentArrival(unittest.TestCase):
         wq = _make_wq(player_pos=Position(4.0, 5.0), reachable=[42], entities=[entity])
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         bb.write(
@@ -260,7 +260,7 @@ class TestNavigationAgentArrival(unittest.TestCase):
                 "purpose": "approach",
             },
         )
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMovement)
 
@@ -271,7 +271,7 @@ class TestNavigationAgentArrival(unittest.TestCase):
         wq = _make_wq(player_pos=Position(0.0, 0.0), reachable=[], entities=[entity])
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         bb.write(
@@ -287,7 +287,7 @@ class TestNavigationAgentArrival(unittest.TestCase):
                 "purpose": "approach",
             },
         )
-        actions = agent.tick(subtask, bb, wq, ww, tick=101)
+        actions = agent.tick(subtask, bb, wq, ww, tick=101, kb=None)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MoveTo)
 
@@ -310,16 +310,16 @@ class TestNavigationAgentStall(unittest.TestCase):
         wq = _make_wq(player_pos=Position(0.0, 0.0))
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         # First tick — issues MoveTo, records position.
         _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
-        agent.tick(subtask, bb, wq, ww, tick=100)
+        agent.tick(subtask, bb, wq, ww, tick=100, kb=None)
 
         # Advance tick past grace period without the player moving.
         stall_tick = 100 + _STALL_GRACE_TICKS + 1
-        agent.tick(subtask, bb, wq, ww, tick=stall_tick)
+        agent.tick(subtask, bb, wq, ww, tick=stall_tick, kb=None)
 
         observations = bb.read(category=EntryCategory.OBSERVATION, current_tick=stall_tick)
         stall_obs = [e for e in observations if e.data.get("type") == "navigation_stalled"]
@@ -333,14 +333,14 @@ class TestNavigationAgentStall(unittest.TestCase):
         wq = _make_wq(player_pos=Position(0.0, 0.0))
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         bb.clear_all()
 
         _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
-        agent.tick(subtask, bb, wq, ww, tick=100)
+        agent.tick(subtask, bb, wq, ww, tick=100, kb=None)
 
         stall_tick = 100 + _STALL_GRACE_TICKS + 1
-        actions = agent.tick(subtask, bb, wq, ww, tick=stall_tick)
+        actions = agent.tick(subtask, bb, wq, ww, tick=stall_tick, kb=None)
 
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMovement)
@@ -353,16 +353,16 @@ class TestNavigationAgentStall(unittest.TestCase):
         wq_start = _make_wq(player_pos=Position(0.0, 0.0))
         ww = _make_mock_writer()
         subtask = _make_subtask()
-        agent.activate(subtask, bb, wq_start)
+        agent.activate(subtask, bb, wq_start, None)
         bb.clear_all()
 
         _make_waypoint_entry(bb, target_pos=Position(50.0, 50.0))
-        agent.tick(subtask, bb, wq_start, ww, tick=100)
+        agent.tick(subtask, bb, wq_start, ww, tick=100, kb=None)
 
         # Player has moved — update position.
         wq_moved = _make_wq(player_pos=Position(5.0, 0.0))
         stall_tick = 100 + _STALL_GRACE_TICKS + 1
-        agent.tick(subtask, bb, wq_moved, ww, tick=stall_tick)
+        agent.tick(subtask, bb, wq_moved, ww, tick=stall_tick, kb=None)
 
         observations = bb.read(category=EntryCategory.OBSERVATION, current_tick=stall_tick)
         stall_obs = [e for e in observations if e.data.get("type") == "navigation_stalled"]
@@ -377,7 +377,7 @@ class TestNavigationAgentProgress(unittest.TestCase):
 
     def _agent_with_subtask(self):
         agent = NavigationAgent()
-        agent.activate(_make_subtask(), Blackboard(), _make_wq())
+        agent.activate(_make_subtask(), Blackboard(), _make_wq(), None)
         return agent
 
     def test_progress_zero_with_no_waypoints(self):
@@ -385,7 +385,7 @@ class TestNavigationAgentProgress(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        self.assertAlmostEqual(agent.progress(subtask, bb, wq), 0.0)
+        self.assertAlmostEqual(agent.progress(subtask, bb, wq, None), 0.0)
 
     def test_progress_one_when_all_complete(self):
         agent = self._agent_with_subtask()
@@ -394,7 +394,7 @@ class TestNavigationAgentProgress(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        self.assertAlmostEqual(agent.progress(subtask, bb, wq), 1.0)
+        self.assertAlmostEqual(agent.progress(subtask, bb, wq, None), 1.0)
 
     def test_progress_fraction(self):
         agent = self._agent_with_subtask()
@@ -403,7 +403,7 @@ class TestNavigationAgentProgress(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        self.assertAlmostEqual(agent.progress(subtask, bb, wq), 0.25)
+        self.assertAlmostEqual(agent.progress(subtask, bb, wq, None), 0.25)
 
 
 class TestNavigationAgentObserve(unittest.TestCase):
@@ -413,9 +413,9 @@ class TestNavigationAgentObserve(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq(player_pos=Position(12.0, -3.0))
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        obs = agent.observe(subtask, bb, wq)
+        obs = agent.observe(subtask, bb, wq, None)
         self.assertIn("player_position", obs)
         self.assertAlmostEqual(obs["player_position"]["x"], 12.0)
         self.assertAlmostEqual(obs["player_position"]["y"], -3.0)
@@ -425,11 +425,11 @@ class TestNavigationAgentObserve(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
         agent._waypoints_completed = 3
         agent._waypoints_total = 5
 
-        obs = agent.observe(subtask, bb, wq)
+        obs = agent.observe(subtask, bb, wq, None)
         self.assertEqual(obs["waypoints_completed"], 3)
         self.assertEqual(obs["waypoints_total"], 5)
 
@@ -438,9 +438,9 @@ class TestNavigationAgentObserve(unittest.TestCase):
         subtask = _make_subtask()
         bb = Blackboard()
         wq = _make_wq()
-        agent.activate(subtask, bb, wq)
+        agent.activate(subtask, bb, wq, None)
 
-        obs = agent.observe(subtask, bb, wq)
+        obs = agent.observe(subtask, bb, wq, None)
         self.assertIn("subtask_id", obs)
         self.assertEqual(obs["subtask_id"], subtask.id[:8])
 

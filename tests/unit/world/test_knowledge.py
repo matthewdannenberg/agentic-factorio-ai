@@ -26,6 +26,7 @@ from world.knowledge import (
     EntityRecord,
     FluidRecord,
     IngredientRecord,
+    ItemRecord,
     KnowledgeBase,
     ProductRecord,
     RecipeRecord,
@@ -926,5 +927,126 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 self.assertIsNotNone(rec)
                 self.assertFalse(rec.is_placeholder)
                 self.assertIn("assembling-machine-1", rec.unlocks_recipes)
+
+
+# ===========================================================================
+# Item registry
+# ===========================================================================
+
+def _item_json(name="iron-plate", stack_size=100) -> str:
+    return json.dumps({"name": name, "stack_size": stack_size, "is_hidden": False})
+
+
+class TestItemRegistry(unittest.TestCase):
+
+    def test_ensure_placeholder_when_no_query_fn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                rec = kb.ensure_item("iron-plate")
+                self.assertTrue(rec.is_placeholder)
+                self.assertEqual(rec.stack_size, 1)  # conservative default
+
+    def test_ensure_with_query_fn_parses_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                rec = kb.ensure_item("iron-plate")
+                self.assertFalse(rec.is_placeholder)
+                self.assertEqual(rec.stack_size, 100)
+                self.assertEqual(rec.name, "iron-plate")
+
+    def test_different_stack_sizes(self):
+        def _qfn(domain, name):
+            sizes = {"iron-plate": 100, "coal": 50, "nuclear-fuel": 1,
+                     "electronic-circuit": 200}
+            return _item_json(name, sizes.get(name, 100))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=_qfn, tmp_dir=tmp) as kb:
+                self.assertEqual(kb.ensure_item("iron-plate").stack_size, 100)
+                self.assertEqual(kb.ensure_item("coal").stack_size, 50)
+                self.assertEqual(kb.ensure_item("nuclear-fuel").stack_size, 1)
+                self.assertEqual(kb.ensure_item("electronic-circuit").stack_size, 200)
+
+    def test_item_stack_size_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                self.assertEqual(kb.item_stack_size("iron-plate"), 100)
+
+    def test_item_stack_size_returns_one_for_unknown(self):
+        # No query_fn → placeholder → stack_size defaults to 1 (conservative).
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                self.assertEqual(kb.item_stack_size("completely-unknown-item"), 1)
+
+    def test_ensure_idempotent(self):
+        call_count = [0]
+
+        def _qfn(domain, name):
+            call_count[0] += 1
+            return _item_json(name, 100)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=_qfn, tmp_dir=tmp) as kb:
+                kb.ensure_item("iron-plate")
+                kb.ensure_item("iron-plate")
+                self.assertEqual(call_count[0], 1)
+
+    def test_get_returns_none_for_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                self.assertIsNone(kb.get_item("not-known"))
+
+    def test_get_returns_record_after_ensure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 50), tmp_dir=tmp) as kb:
+                kb.ensure_item("coal")
+                rec = kb.get_item("coal")
+                self.assertIsNotNone(rec)
+                self.assertEqual(rec.stack_size, 50)
+
+    def test_all_items_returns_known(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                kb.ensure_item("iron-plate")
+                kb.ensure_item("copper-plate")
+                all_items = kb.all_items()
+                self.assertIn("iron-plate", all_items)
+                self.assertIn("copper-plate", all_items)
+
+    def test_item_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                kb.ensure_item("iron-plate")
+
+            with _kb(tmp_dir=tmp) as kb:
+                rec = kb.get_item("iron-plate")
+                self.assertIsNotNone(rec)
+                self.assertFalse(rec.is_placeholder)
+                self.assertEqual(rec.stack_size, 100)
+
+    def test_summary_includes_items_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                kb.ensure_item("iron-plate")
+                summary = kb.summary()
+                self.assertIn("items", summary)
+                self.assertEqual(summary["items"], 1)
+
+    def test_enrich_placeholders_resolves_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Session 1: create placeholder offline.
+            with _kb(tmp_dir=tmp) as kb:
+                rec = kb.ensure_item("iron-plate")
+                self.assertTrue(rec.is_placeholder)
+
+            # Session 2: enrich with live query_fn.
+            with _kb(query_fn=lambda d, n: _item_json(n, 100), tmp_dir=tmp) as kb:
+                counts = kb.enrich_placeholders()
+                self.assertEqual(counts["items"], 1)
+                rec = kb.get_item("iron-plate")
+                self.assertFalse(rec.is_placeholder)
+                self.assertEqual(rec.stack_size, 100)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

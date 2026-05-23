@@ -17,11 +17,13 @@ only what they need to do from the active Subtask and the blackboard.
 Rules
 -----
 - Pure interface. No learning logic. No game interaction.
-- Agents receive the active Subtask, the blackboard, and WorldQuery on every
-  tick; they do not hold references to any of these between ticks (except the
-  subtask stored in activate() for context).
+- Agents receive the active Subtask, the blackboard, WorldQuery, and
+  KnowledgeBase on every tick; they do not hold references to any of these
+  between ticks (except the subtask stored in activate() for context).
 - Agents return a list of Actions from tick(). The coordinator assembles the
   final ExecutionResult.
+- kb is provided to all methods for consistency. Agents that don't need it
+  (navigation, mining) simply ignore it.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from bridge.actions import Action
 if TYPE_CHECKING:
     from agent.blackboard import Blackboard
     from agent.subtask import Subtask
+    from world.knowledge import KnowledgeBase
     from world.query import WorldQuery
     from world.writer import WorldWriter
 
@@ -43,7 +46,7 @@ class AgentProtocol:
 
     Methods
     -------
-    activate(subtask, blackboard, wq)
+    activate(subtask, blackboard, wq, kb)
         Called once when a new subtask is assigned to this agent. The agent
         configures its internal state relative to the subtask and may write
         initial observations to the blackboard. Does not return anything.
@@ -52,18 +55,18 @@ class AgentProtocol:
         the subtask is pushed to the top of the ledger), not at goal start.
         Each new subtask triggers a fresh activate() call.
 
-    tick(subtask, blackboard, wq, ww, tick) -> list[Action]
+    tick(subtask, blackboard, wq, ww, tick, kb) -> list[Action]
         Called every poll cycle while this agent owns the active subtask.
         The agent reads WorldQuery and the blackboard, writes observations
         and reservations to the blackboard, and returns its candidate action
         list. The coordinator selects from and orders the returned actions.
 
-    observe(subtask, blackboard, wq) -> dict
+    observe(subtask, blackboard, wq, kb) -> dict
         Return a flat dict of named observations from this agent's current
         internal state. Called by the coordinator to build the combined
         observation for examination and progress tracking.
 
-    progress(subtask, blackboard, wq) -> float
+    progress(subtask, blackboard, wq, kb) -> float
         Return an estimate of progress toward the current subtask in
         [0.0, 1.0]. Derived from the agent's internal state, not from
         RewardEvaluator. The coordinator aggregates progress across subtasks.
@@ -74,6 +77,7 @@ class AgentProtocol:
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> None:
         raise NotImplementedError
 
@@ -84,6 +88,7 @@ class AgentProtocol:
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
+        kb: "KnowledgeBase",
     ) -> list[Action]:
         raise NotImplementedError
 
@@ -92,6 +97,7 @@ class AgentProtocol:
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> dict:
         raise NotImplementedError
 
@@ -100,5 +106,6 @@ class AgentProtocol:
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> float:
         raise NotImplementedError

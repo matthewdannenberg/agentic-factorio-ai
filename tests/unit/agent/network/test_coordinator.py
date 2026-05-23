@@ -21,6 +21,7 @@ from agent.network.agents.navigation import NavigationAgent
 from agent.self_model import SelfModel
 from agent.subtask import Subtask, SubtaskLedger, SubtaskStatus
 from planning.goal import Goal, GoalStatus, Priority, RewardSpec
+from world.knowledge import KnowledgeBase
 from world.state import (
     ExplorationState,
     Inventory,
@@ -36,6 +37,12 @@ from world.query import WorldQuery
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _make_kb() -> KnowledgeBase:
+    """Return an in-memory KnowledgeBase with no query_fn (offline/test mode)."""
+    import tempfile, os
+    tmp = tempfile.mkdtemp()
+    return KnowledgeBase(data_dir=tmp)
 
 def _make_goal(
     goal_type: str = GOAL_TYPE_COLLECTION,
@@ -94,7 +101,8 @@ def _make_coordinator(registry: AgentRegistry = None) -> RuleBasedCoordinator:
     bb = Blackboard()
     ledger = SubtaskLedger()
     sm = SelfModel()
-    return RuleBasedCoordinator(registry=reg, blackboard=bb, ledger=ledger, self_model=sm)
+    kb = _make_kb()
+    return RuleBasedCoordinator(registry=reg, blackboard=bb, ledger=ledger, self_model=sm, kb=kb)
 
 
 def _make_mock_writer():
@@ -480,10 +488,10 @@ class TestCoordinatorAgentSelection(unittest.TestCase):
             def __init__(self, name):
                 super().__init__()
                 self._name = name
-            def tick(self, subtask, bb, wq, ww, tick):
+            def tick(self, subtask, bb, wq, ww, tick, kb=None):
                 ticked.append(self._name)
                 return []
-            def activate(self, subtask, bb, wq): pass
+            def activate(self, subtask, bb, wq, kb=None): pass
 
         agent_a = _RecordingAgent("A")
         agent_b = _RecordingAgent("B")

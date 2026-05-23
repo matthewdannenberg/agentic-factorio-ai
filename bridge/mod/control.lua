@@ -600,6 +600,7 @@ function fa._player_table(player)
         position        = {x = player.position.x, y = player.position.y},
         health          = player.character and player.character.health or 100.0,
         inventory       = inventory_to_list(inv),
+        inventory_size  = inv and #inv or 0,
         reachable       = fa._reachable_ids(player),
         charted_chunks  = charted_chunks,
         movement_status = mov_status,
@@ -1039,6 +1040,20 @@ function fa.get_fluid_prototype(fluid_name)
         fuel_value            = fuel_value,
         emissions_multiplier  = proto.emissions_multiplier or 1.0,
         is_hidden             = proto.hidden or false,
+    })
+end
+
+-- Returns item prototype properties — primarily stack_size.
+-- Used by the KB to determine how many items fit in one inventory slot.
+function fa.get_item_prototype(item_name)
+    local proto = prototypes.item[item_name]
+    if not proto then
+        return err_response("unknown_item_prototype: " .. tostring(item_name))
+    end
+    return safe_json({
+        name        = proto.name,
+        stack_size  = proto.stack_size or 1,
+        is_hidden   = proto.hidden or false,
     })
 end
 

@@ -231,6 +231,70 @@ TS.suite("mining_status", {
             "player section should have movement_status field")
         t.is_string(parsed.player.movement_status,
             "movement_status must be a string")
+        -- inventory_size should be present
+        t.ok(parsed.player.inventory_size ~= nil,
+            "player section should have inventory_size field")
+        t.is_number(parsed.player.inventory_size,
+            "inventory_size must be a number")
+    end,
+})
+
+-- ============================================================
+-- Suite: inventory_size
+-- Verifies that _player_table() reports the total character
+-- inventory slot count via the new inventory_size field.
+-- ============================================================
+
+TS.suite("inventory_size", {
+
+    inventory_size_present_in_get_state = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player ~= nil, "must have player section")
+        t.ok(parsed.player.inventory_size ~= nil,
+            "player must have inventory_size field")
+    end,
+
+    inventory_size_is_positive_integer = function(t)
+        -- The character main inventory is always at least 1 slot in any
+        -- loaded game. Standard character inventory is 80 slots.
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local sz = parsed.player.inventory_size
+        t.is_number(sz, "inventory_size must be a number; got " .. type(sz))
+        t.gt(sz, 0, "inventory_size must be > 0; got " .. tostring(sz))
+    end,
+
+    inventory_size_at_least_as_large_as_occupied_slots = function(t)
+        -- The total slot count must never be less than the number of
+        -- occupied slots the inventory list reports.
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local sz = parsed.player.inventory_size
+        local occupied = 0
+        if type(parsed.player.inventory) == "table" then
+            for _ in pairs(parsed.player.inventory) do
+                occupied = occupied + 1
+            end
+        end
+        t.ok(sz >= occupied,
+            "inventory_size (" .. tostring(sz) ..
+            ") must be >= occupied slots (" .. tostring(occupied) .. ")")
+    end,
+
+    inventory_size_stable_across_calls = function(t)
+        -- Total slot count should not change between two back-to-back calls
+        -- (nothing in these tests resizes the inventory).
+        local r1 = parse_json(fa.get_state({radius=4, resource_radius=32, item_radius=4}))
+        local r2 = parse_json(fa.get_state({radius=4, resource_radius=32, item_radius=4}))
+        t.ok(r1 ~= nil and r2 ~= nil, "both calls must return valid JSON")
+        t.eq(r1.player.inventory_size, r2.player.inventory_size,
+            "inventory_size should be stable; got " ..
+            tostring(r1.player.inventory_size) .. " then " ..
+            tostring(r2.player.inventory_size))
     end,
 })
 

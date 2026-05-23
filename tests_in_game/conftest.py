@@ -262,6 +262,7 @@ def _execute_goals(
         blackboard=blackboard,
         ledger=ledger,
         self_model=sm,
+        kb=kb,
     )
 
     queue     = GoalQueue(entries)

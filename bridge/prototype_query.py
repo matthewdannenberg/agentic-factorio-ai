@@ -35,6 +35,7 @@ _DOMAIN_TO_LUA_FN: dict[str, str] = {
     "fluid":    "fa.get_fluid_prototype",
     "recipe":   "fa.get_recipe_prototype",
     "tech":     "fa.get_technology",
+    "item":     "fa.get_item_prototype",
 }
 
 

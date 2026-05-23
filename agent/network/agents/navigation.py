@@ -66,6 +66,7 @@ from world.state import Position
 if TYPE_CHECKING:
     from agent.blackboard import Blackboard
     from agent.subtask import Subtask
+    from world.knowledge import KnowledgeBase
     from world.query import WorldQuery
     from world.writer import WorldWriter
 
@@ -126,6 +127,7 @@ class NavigationAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> None:
         """
         Called when a new subtask is assigned to this agent.
@@ -164,6 +166,7 @@ class NavigationAgent(AgentProtocol):
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
+        kb: "KnowledgeBase",
     ) -> list[Action]:
         """
         One navigation tick. Returns at most one action.
@@ -262,6 +265,7 @@ class NavigationAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> dict:
         pos = wq.player_position()
         return {
@@ -278,6 +282,7 @@ class NavigationAgent(AgentProtocol):
         subtask: "Subtask",
         blackboard: "Blackboard",
         wq: "WorldQuery",
+        kb: "KnowledgeBase",
     ) -> float:
         if self._waypoints_total == 0:
             return 0.0

@@ -186,9 +186,11 @@ T.suite("state_queries", {
         t.has_key(p.position, "y")
         t.has_key(p, "health")
         t.has_key(p, "inventory")
+        t.has_key(p, "inventory_size")
         t.has_key(p, "reachable")
         t.is_number(p.health)
         t.is_table(p.inventory)
+        t.is_number(p.inventory_size)
         t.is_table(p.reachable)
     end,
 

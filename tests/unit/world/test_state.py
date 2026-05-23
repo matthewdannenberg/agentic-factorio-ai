@@ -93,6 +93,27 @@ class TestInventory(unittest.TestCase):
         self.assertFalse(Inventory(slots=[InventorySlot("coal", 1)]).is_empty())
 
 
+class TestPlayerState(unittest.TestCase):
+
+    def test_inventory_size_defaults_to_zero(self):
+        ps = PlayerState()
+        self.assertEqual(ps.inventory_size, 0)
+
+    def test_inventory_size_set_explicitly(self):
+        ps = PlayerState(inventory_size=80)
+        self.assertEqual(ps.inventory_size, 80)
+
+    def test_inventory_size_independent_of_inventory_contents(self):
+        # inventory_size is the total slot count; it does not change
+        # when items are added or removed from the inventory object.
+        ps = PlayerState(
+            inventory=Inventory(slots=[InventorySlot("coal", 50)]),
+            inventory_size=80,
+        )
+        self.assertEqual(ps.inventory_size, 80)
+        self.assertEqual(ps.inventory.count("coal"), 50)
+
+
 class TestWorldStateBasics(unittest.TestCase):
     def _ws(self) -> WorldState:
         return WorldState(

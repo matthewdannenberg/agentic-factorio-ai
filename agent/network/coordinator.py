@@ -75,6 +75,7 @@ from world.state import Position
 if TYPE_CHECKING:
     from agent.network.registry import AgentRegistry
     from agent.self_model import SelfModelProtocol
+    from world.knowledge import KnowledgeBase
     from world.query import WorldQuery
     from world.writer import WorldWriter
 
@@ -228,11 +229,13 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         blackboard: Blackboard,
         ledger: SubtaskLedger,
         self_model: "SelfModelProtocol",
+        kb: "KnowledgeBase",
     ) -> None:
         self._registry = registry
         self._bb = blackboard
         self._ledger = ledger
         self._sm = self_model
+        self._kb = kb
         self._current_goal: Optional[Goal] = None
         self._active_agent = None   # the single agent owning the current subtask
         # Tick at which the current active subtask was activated (for timeout).
@@ -291,7 +294,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             if first is not None:
                 self._active_agent = self._select_agent(goal)
                 if self._active_agent is not None:
-                    self._active_agent.activate(first, self._bb, wq)
+                    self._active_agent.activate(first, self._bb, wq, self._kb)
             log.info(
                 "Coordinator reset with %d seed subtasks for goal %s",
                 len(seed_subtasks),
@@ -355,7 +358,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             if first is not None:
                 self._active_agent = self._select_agent(goal)
                 if self._active_agent is not None:
-                    self._active_agent.activate(first, self._bb, wq)
+                    self._active_agent.activate(first, self._bb, wq, self._kb)
 
         # --- Evaluate active subtask ---
         active = self._ledger.peek()
@@ -393,7 +396,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             if next_subtask is not None:
                 self._active_agent = self._select_agent(goal)
                 if self._active_agent is not None:
-                    self._active_agent.activate(next_subtask, self._bb, wq)
+                    self._active_agent.activate(next_subtask, self._bb, wq, self._kb)
                 self._write_waypoint_for_subtask(next_subtask, wq, tick)
             else:
                 self._active_agent = None
@@ -422,7 +425,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             return self._escalate(goal, tick)
 
         # --- Tick the active agent ---
-        actions = self._tick_active_agent(active, self._bb, wq, ww, tick)
+        actions = self._tick_active_agent(active, self._bb, wq, ww, tick, self._kb)
 
         return ExecutionResult(
             actions=actions,
@@ -809,6 +812,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
+        kb: "KnowledgeBase",
     ) -> list:
         """
         Tick the single agent that owns the current active subtask.
@@ -820,7 +824,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         if self._active_agent is None:
             return []
         try:
-            return self._active_agent.tick(subtask, blackboard, wq, ww, tick)
+            return self._active_agent.tick(subtask, blackboard, wq, ww, tick, kb)
         except Exception:
             log.exception("Active agent %s raised during tick", self._active_agent)
             return []
