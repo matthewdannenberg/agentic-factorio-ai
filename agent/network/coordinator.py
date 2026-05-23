@@ -239,7 +239,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # PLACEHOLDER — see _SUBTASK_TIMEOUT_TICKS comment above.
         self._subtask_activated_at: int = 0
         self._goal_start_tick: int = 0
-        self._goal_start_snapshot: dict = {}
+        self._goal_start_snapshot: Optional["WorldQuery"] = None
         # Set to True when _derive_subtasks fails so we don't re-attempt
         # derivation on every subsequent tick (which would spam STUCK events).
         # Cleared by reset() when a new goal starts.
@@ -495,9 +495,15 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # Two subtasks: approach (navigation agent) then gather (mining agent).
         # Push gather first (suspended), approach second (activates immediately).
         # Call-stack semantics: last pushed = first executed.
+        # Use an absolute inventory threshold for the gather subtask rather
+        # than goal.success_condition verbatim. This handles new.inventory()
+        # goals correctly: the subtask needs to know when to stop mining,
+        # expressed as a concrete absolute count.
+        current_count = wq.inventory_count(resource_type)
+        gather_target = current_count + target_count
         gather_subtask = Subtask(
             description=f"Gather {target_count} {resource_type}",
-            success_condition=goal.success_condition,
+            success_condition=f"inventory('{resource_type}') >= {gather_target}",
             failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS}",
             parent_goal_id=goal.id,
             created_at=tick,
@@ -749,13 +755,13 @@ class RuleBasedCoordinator(CoordinatorProtocol):
     # Agent selection and ticking
     # ------------------------------------------------------------------
 
-    def set_start_snapshot(self, snapshot: dict) -> None:
+    def set_start_snapshot(self, start_wq: "WorldQuery") -> None:
         """
-        Called by the loop immediately after reset() to provide the world-state
-        snapshot captured at goal activation. Used to populate the `new` delta
-        object in condition namespaces.
+        Called by the loop immediately after reset() to provide a WorldQuery
+        snapshot taken at goal activation. Used to populate the `new` delta
+        object in subtask condition namespaces.
         """
-        self._goal_start_snapshot = snapshot
+        self._goal_start_snapshot = start_wq
 
     def _select_agent(self, goal: Goal):
         """
@@ -964,11 +970,16 @@ class RuleBasedCoordinator(CoordinatorProtocol):
 
 def _parse_collection_condition(condition: str):
     """
-    Parse "inventory('iron-ore') >= 50" → ("iron-ore", 50).
-    Returns (None, None) if the condition doesn't match expected format.
+    Parse collection goal success conditions into (resource_type, target_count).
+
+    Handles both forms:
+        "inventory('iron-ore') >= 50"     -> ("iron-ore", 50)
+        "new.inventory('iron-ore') >= 5"  -> ("iron-ore", 5)
+
+    Returns (None, None) if neither form matches.
     """
-    import re
-    m = re.search(r"inventory\(['\"]([^'\"]+)['\"]\)\s*>=\s*(\d+)", condition)
+    import re as _re
+    m = _re.search(r"(?:new\.)?inventory\(['\"]([^'\"]+)['\"]\)\s*>=\s*(\d+)", condition)
     if m:
         return m.group(1), int(m.group(2))
     return None, None
@@ -1024,7 +1035,7 @@ def _next_exploration_waypoint(
         return Position(0.0, -step)    # north
 
 
-def _build_condition_namespace(wq: "WorldQuery", tick: int, start_tick: int = 0, start_snapshot: dict = None) -> dict:
+def _build_condition_namespace(wq: "WorldQuery", tick: int, start_tick: int = 0, start_wq: "WorldQuery" = None) -> dict:
     """
     Build the eval namespace for subtask condition evaluation.
 
@@ -1045,7 +1056,7 @@ def _build_condition_namespace(wq: "WorldQuery", tick: int, start_tick: int = 0,
     def is_reachable(entity_id: int) -> bool:
         return _is_reachable(entity_id, wq)
 
-    ns = build_core_namespace(wq, tick, start_tick, start_snapshot)
+    ns = build_core_namespace(wq, tick, start_tick, start_wq)
     ns["__builtins__"] = safe_builtins()
 
     # Coordinator-specific extras: positional predicates for navigation

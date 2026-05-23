@@ -818,107 +818,126 @@ class TestXC_Compound(unittest.TestCase):
 # DV — Delta / new object conditions
 # ===========================================================================
 
-def _ev_with_snap(success="False", failure="False", state=None,
-                  tick=0, start_tick=0, snapshot=None):
+def _make_start_wq(charted_chunks=0, iron_ore=0, resource_patches=None):
+    from world.state import ExplorationState
+    ws = WorldState(
+        player=PlayerState(
+            position=Position(0.0, 0.0),
+            inventory=Inventory(slots=(
+                [InventorySlot("iron-ore", iron_ore)] if iron_ore else []
+            )),
+            exploration=ExplorationState(charted_chunks=charted_chunks),
+        ),
+        resource_map=resource_patches or [],
+    )
+    ws._rebuild_entity_indices()
+    return WorldQuery(ws)
+
+
+def _ev_with_snap(success="False", failure="False", wq=None,
+                  start_wq=None, tick=0, start_tick=0):
     ev = RewardEvaluator()
+    if wq is None:
+        wq = _wq()
     return ev.evaluate_conditions(
         success_condition=success,
         failure_condition=failure,
         spec=RewardSpec(),
-        wq=_wq(state),
+        wq=wq,
         tick=tick,
         start_tick=start_tick,
-        start_snapshot=snapshot or {},
+        start_wq=start_wq or wq,
     )
 
 
 class TestDV_DeltaView(unittest.TestCase):
 
     def test_DV_001_new_charted_chunks(self):
-        ws = _ws_with_chart(15)
-        r = _ev_with_snap("new.charted_chunks >= 5", state=ws,
-                          snapshot={"charted_chunks": 10})
+        start = _make_start_wq(charted_chunks=10)
+        wq    = _ws_with_chart(15)
+        r = _ev_with_snap("new.charted_chunks >= 5", wq=WorldQuery(wq), start_wq=WorldQuery(_ws_with_chart(10)))
         self.assertTrue(r.success)
 
     def test_DV_002_new_charted_chunks_not_met(self):
-        ws = _ws_with_chart(12)
-        r = _ev_with_snap("new.charted_chunks >= 5", state=ws,
-                          snapshot={"charted_chunks": 10})
+        r = _ev_with_snap("new.charted_chunks >= 5",
+                          wq=WorldQuery(_ws_with_chart(12)),
+                          start_wq=WorldQuery(_ws_with_chart(10)))
         self.assertFalse(r.success)
 
     def test_DV_003_new_charted_chunks_clamped(self):
-        ws = _ws_with_chart(5)
-        r = _ev_with_snap("new.charted_chunks == 0", state=ws,
-                          snapshot={"charted_chunks": 10})
+        r = _ev_with_snap("new.charted_chunks == 0",
+                          wq=WorldQuery(_ws_with_chart(5)),
+                          start_wq=WorldQuery(_ws_with_chart(10)))
         self.assertTrue(r.success)
 
     def test_DV_004_new_inventory(self):
-        ws = WorldState(player=PlayerState(
+        start = _make_start_wq(iron_ore=5)
+        end_wq = WorldQuery(WorldState(player=PlayerState(
             position=Position(0, 0),
             inventory=Inventory(slots=[InventorySlot("iron-ore", 15)]),
-        ))
-        r = _ev_with_snap("new.inventory('iron-ore') >= 10", state=ws,
-                          snapshot={"inventory": {"iron-ore": 5}})
+        )))
+        r = _ev_with_snap("new.inventory('iron-ore') >= 10", wq=end_wq, start_wq=start)
         self.assertTrue(r.success)
 
     def test_DV_005_new_inventory_no_gain(self):
-        ws = WorldState(player=PlayerState(
+        wq = WorldQuery(WorldState(player=PlayerState(
             position=Position(0, 0),
             inventory=Inventory(slots=[InventorySlot("iron-ore", 5)]),
-        ))
-        r = _ev_with_snap("new.inventory('iron-ore') == 0", state=ws,
-                          snapshot={"inventory": {"iron-ore": 5}})
+        )))
+        r = _ev_with_snap("new.inventory('iron-ore') == 0", wq=wq, start_wq=wq)
         self.assertTrue(r.success)
 
     def test_DV_006_new_resource_patches(self):
-        ws = WorldState(resource_map=[
+        start = _make_start_wq(resource_patches=[
+            ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
+        ])
+        end_wq = _make_start_wq(resource_patches=[
             ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
             ResourcePatch("iron-ore", Position(200, 100), 30000, 20),
         ])
-        r = _ev_with_snap("new.resource_patches('iron-ore') >= 1", state=ws,
-                          snapshot={"resource_counts": {"iron-ore": 1}})
+        r = _ev_with_snap("new.resource_patches('iron-ore') >= 1",
+                          wq=end_wq, start_wq=start)
         self.assertTrue(r.success)
 
     def test_DV_007_new_tick(self):
-        r = _ev_with_snap("new.tick >= 400",
-                          tick=500, start_tick=100)
+        wq = _wq()
+        r = _ev_with_snap("new.tick >= 400", wq=wq, start_wq=wq, tick=500, start_tick=100)
         self.assertTrue(r.success)
 
     def test_DV_008_new_tick_matches_elapsed_ticks_alias(self):
-        """new.tick and elapsed_ticks alias should agree."""
-        r = _ev_with_snap(
-            "new.tick == elapsed_ticks",
-            tick=500, start_tick=100,
-        )
+        wq = _wq()
+        r = _ev_with_snap("new.tick == elapsed_ticks", wq=wq, start_wq=wq,
+                          tick=500, start_tick=100)
         self.assertTrue(r.success)
 
-    def test_DV_009_empty_snapshot_all_deltas_zero(self):
-        """With no snapshot, all deltas are 0 regardless of current state."""
-        ws = _ws_with_chart(100)
-        r = _ev_with_snap("new.charted_chunks == 0", state=ws, snapshot={})
+    def test_DV_009_no_delta_when_same_state(self):
+        wq = WorldQuery(_ws_with_chart(100))
+        r = _ev_with_snap("new.charted_chunks == 0", wq=wq, start_wq=wq)
         self.assertTrue(r.success)
 
     def test_DV_010_elapsed_ticks_alias(self):
         """elapsed_ticks is kept as a convenience alias for new.tick."""
-        r = _ev("elapsed_ticks >= 400", tick=500, start_tick=100)
+        wq = _wq()
+        r = _ev_with_snap("elapsed_ticks >= 400", wq=wq, start_wq=wq,
+                          tick=500, start_tick=100)
         self.assertTrue(r.success)
 
     def test_DV_011_elapsed_ticks_alias_as_failure(self):
-        """elapsed_ticks alias works in failure conditions."""
-        r = _ev(failure="elapsed_ticks > 1200", tick=500, start_tick=100)
-        self.assertFalse(r.failure)  # 400 ticks elapsed, not > 1200
+        wq = _wq()
+        r = _ev_with_snap(failure="elapsed_ticks > 1200", wq=wq, start_wq=wq,
+                          tick=500, start_tick=100)
+        self.assertFalse(r.failure)
 
     def test_DV_012_elapsed_ticks_alias_fires(self):
-        r = _ev(failure="elapsed_ticks > 1200", tick=1400, start_tick=100)
-        self.assertTrue(r.failure)  # 1300 ticks elapsed, > 1200
+        wq = _wq()
+        r = _ev_with_snap(failure="elapsed_ticks > 1200", wq=wq, start_wq=wq,
+                          tick=1400, start_tick=100)
+        self.assertTrue(r.failure)
 
     def test_DV_013_new_charted_tiles_via_getattr(self):
-        """__getattr__ on _DeltaView delegates to wq for scalar properties."""
-        ws = _ws_with_chart(15)
-        # charted_tiles = charted_chunks * 1024
-        # current=15360, baseline=10*1024=10240, delta=5120
-        r = _ev_with_snap("new.charted_tiles >= 5120", state=ws,
-                          snapshot={"charted_tiles": 10240})
+        r = _ev_with_snap("new.charted_tiles >= 5120",
+                          wq=WorldQuery(_ws_with_chart(15)),
+                          start_wq=WorldQuery(_ws_with_chart(10)))
         self.assertTrue(r.success)
 
 

@@ -45,7 +45,7 @@ def test_collect_5_iron_ore_total(run_goal):
     still works correctly alongside the new framework.
     """
     entry = GoalQueueEntry(
-        description="Have 10 iron ore total",
+        description="Have 5 iron ore total",
         success_condition="inventory('iron-ore') >= 5",
         failure_condition="new.tick > 10800",
         goal_type="collection",

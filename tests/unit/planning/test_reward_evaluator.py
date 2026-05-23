@@ -19,6 +19,29 @@ from world.query import WorldQuery
 from world.state import Inventory, InventorySlot, PlayerState, Position, ResourcePatch, WorldState
 from tests.fixtures import make_world_query
 
+def _make_start_wq(
+    charted_chunks: int = 0,
+    inventory: dict = None,
+    resource_patches: list = None,
+) -> WorldQuery:
+    """Build a WorldQuery representing world state at goal activation."""
+    from world.state import ExplorationState
+    ws = WorldState(
+        player=PlayerState(
+            position=Position(0.0, 0.0),
+            inventory=Inventory(slots=[
+                InventorySlot(item, count)
+                for item, count in (inventory or {}).items()
+            ]),
+            exploration=ExplorationState(charted_chunks=charted_chunks),
+        ),
+        resource_map=resource_patches or [],
+    )
+    ws._rebuild_entity_indices()
+    return WorldQuery(ws)
+
+
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -250,14 +273,24 @@ class TestRewardEvaluatorNamespace(unittest.TestCase):
 
 
 class TestRewardEvaluatorDeltaView(unittest.TestCase):
-    """Tests for the `new` delta namespace object."""
+    """Tests for the `new` delta namespace object (WorldQuery-based)."""
 
     def setUp(self):
         self.ev = RewardEvaluator()
 
-    def _eval_with_snapshot(self, success, snapshot, wq=None, tick=0, start_tick=0):
-        if wq is None:
-            wq = make_world_query()
+    def _make_wq(self, charted_chunks=0, iron_ore=0, resource_patches=None):
+        from world.state import ExplorationState
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            inventory=Inventory(slots=(
+                [InventorySlot("iron-ore", iron_ore)] if iron_ore else []
+            )),
+            exploration=ExplorationState(charted_chunks=charted_chunks),
+        ), resource_map=resource_patches or [])
+        ws._rebuild_entity_indices()
+        return WorldQuery(ws)
+
+    def _eval_with_start(self, success, wq, start_wq=None, tick=0, start_tick=0):
         return self.ev.evaluate_conditions(
             success_condition=success,
             failure_condition="False",
@@ -265,83 +298,55 @@ class TestRewardEvaluatorDeltaView(unittest.TestCase):
             wq=wq,
             tick=tick,
             start_tick=start_tick,
-            start_snapshot=snapshot,
+            start_wq=start_wq or wq,
         )
 
     def test_new_charted_chunks_delta(self):
-        from world.state import ExplorationState
-        ws = WorldState(player=PlayerState(
-            position=Position(0, 0),
-            exploration=ExplorationState(charted_chunks=15),
-        ))
-        snapshot = {"charted_chunks": 10}
-        result = self._eval_with_snapshot(
-            "new.charted_chunks >= 5", snapshot, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+        start_wq = self._make_wq(charted_chunks=10)
+        wq       = self._make_wq(charted_chunks=15)
+        r = self._eval_with_start("new.charted_chunks >= 5", wq, start_wq)
+        self.assertTrue(r.success)
 
-    def test_new_charted_chunks_clamped_to_zero(self):
-        from world.state import ExplorationState
-        ws = WorldState(player=PlayerState(
-            position=Position(0, 0),
-            exploration=ExplorationState(charted_chunks=5),
-        ))
-        snapshot = {"charted_chunks": 10}  # snapshot higher than current
-        result = self._eval_with_snapshot(
-            "new.charted_chunks == 0", snapshot, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+    def test_new_charted_chunks_clamped(self):
+        start_wq = self._make_wq(charted_chunks=10)
+        wq       = self._make_wq(charted_chunks=5)
+        r = self._eval_with_start("new.charted_chunks == 0", wq, start_wq)
+        self.assertTrue(r.success)
 
     def test_new_inventory_delta(self):
-        ws = WorldState(player=PlayerState(
-            position=Position(0, 0),
-            inventory=Inventory(slots=[InventorySlot("iron-ore", 15)]),
-        ))
-        snapshot = {"inventory": {"iron-ore": 5}}
-        result = self._eval_with_snapshot(
-            "new.inventory('iron-ore') >= 10", snapshot, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+        start_wq = self._make_wq(iron_ore=5)
+        wq       = self._make_wq(iron_ore=15)
+        r = self._eval_with_start("new.inventory('iron-ore') >= 10", wq, start_wq)
+        self.assertTrue(r.success)
 
-    def test_new_inventory_no_snapshot_returns_zero(self):
-        ws = WorldState(player=PlayerState(
-            position=Position(0, 0),
-            inventory=Inventory(slots=[InventorySlot("iron-ore", 15)]),
-        ))
-        # No inventory in snapshot → baseline = current → delta = 0
-        result = self._eval_with_snapshot(
-            "new.inventory('iron-ore') == 0", {}, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+    def test_new_inventory_not_at_start_baseline_zero(self):
+        """Player had 0 iron at goal start — all 15 count as new."""
+        start_wq = self._make_wq(iron_ore=0)
+        wq       = self._make_wq(iron_ore=15)
+        r = self._eval_with_start("new.inventory('iron-ore') == 15", wq, start_wq)
+        self.assertTrue(r.success)
 
     def test_new_elapsed_ticks(self):
-        result = self._eval_with_snapshot(
-            "new.tick >= 400", {}, tick=500, start_tick=100
-        )
-        self.assertTrue(result.success)
+        wq = self._make_wq()
+        r = self._eval_with_start("new.tick >= 400", wq, tick=500, start_tick=100)
+        self.assertTrue(r.success)
 
     def test_new_resource_patches_delta(self):
-        ws = WorldState(resource_map=[
-            ResourcePatch("iron-ore", Position(100, 100), 50000, 30),
-            ResourcePatch("iron-ore", Position(200, 100), 30000, 20),
-        ])
-        snapshot = {"resource_counts": {"iron-ore": 1}}
-        result = self._eval_with_snapshot(
-            "new.resource_patches('iron-ore') >= 1", snapshot, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+        start_patches = [ResourcePatch("iron-ore", Position(10, 10), 5000, 20)]
+        end_patches   = [
+            ResourcePatch("iron-ore", Position(10, 10), 5000, 20),
+            ResourcePatch("iron-ore", Position(20, 20), 3000, 15),
+        ]
+        start_wq = self._make_wq(resource_patches=start_patches)
+        wq       = self._make_wq(resource_patches=end_patches)
+        r = self._eval_with_start("new.resource_patches('iron-ore') >= 1", wq, start_wq)
+        self.assertTrue(r.success)
 
-    def test_new_empty_snapshot_uses_current_as_baseline(self):
-        """With no snapshot, all deltas are 0 — goal appears to need no new work."""
-        from world.state import ExplorationState
-        ws = WorldState(player=PlayerState(
-            position=Position(0, 0),
-            exploration=ExplorationState(charted_chunks=100),
-        ))
-        result = self._eval_with_snapshot(
-            "new.charted_chunks == 0", {}, wq=WorldQuery(ws)
-        )
-        self.assertTrue(result.success)
+    def test_no_delta_when_same_state(self):
+        """start_wq == wq → all deltas are 0."""
+        wq = self._make_wq(charted_chunks=100, iron_ore=50)
+        r = self._eval_with_start("new.charted_chunks == 0 and new.inventory('iron-ore') == 0", wq, wq)
+        self.assertTrue(r.success)
 
 
 if __name__ == "__main__":

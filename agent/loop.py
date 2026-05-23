@@ -154,6 +154,7 @@ class FactorioLoop:
         # Per-goal tracking
         self._active_goal: Optional[Goal] = None
         self._goal_start_tick: int = 0
+        self._goal_start_snapshot: Optional["WorldQuery"] = None
         self._stuck_count: int = 0
 
         self._stats = LoopStats()
@@ -244,7 +245,7 @@ class FactorioLoop:
 
         # 3. Evaluate goal conditions.
         eval_result = self._evaluator.evaluate(
-            goal, self._wq, tick, self._goal_start_tick
+            goal, self._wq, tick, self._goal_start_tick, self._goal_start_snapshot
         )
 
         if eval_result.success:
@@ -274,6 +275,28 @@ class FactorioLoop:
         # 7. Sleep until next poll.
         time.sleep(self._cfg.tick_interval / 60.0)
 
+    def _snapshot_world_query(self) -> "WorldQuery":
+        """
+        Capture a snapshot of current world state at goal activation time.
+
+        Returns a WorldQuery wrapping a shallow copy of the current WorldState.
+        Shallow copy is safe because WorldWriter replaces whole sub-objects
+        (player, entities, resource_map, etc.) rather than mutating them in
+        place — so the snapshot's sub-object references remain stable.
+
+        Used by _DeltaView to compute delta conditions (new.inventory,
+        new.charted_chunks, etc.) relative to goal activation state.
+        """
+        import copy
+        state_copy = copy.copy(self._state)
+        wq_snapshot = WorldQuery(state_copy)
+        log.debug(
+            "FactorioLoop: goal snapshot taken — charted_chunks=%s iron-ore=%s",
+            wq_snapshot.charted_chunks,
+            wq_snapshot.inventory_count("iron-ore"),
+        )
+        return wq_snapshot
+
     def _poll_world(self) -> None:
         """Poll Factorio for a world state snapshot and integrate it."""
         raw = self._poller.poll()
@@ -302,10 +325,12 @@ class FactorioLoop:
         goal.activate(tick=self._state.tick)
         self._active_goal = goal
         self._goal_start_tick = self._state.tick
+        self._goal_start_snapshot = self._snapshot_world_query()
         self._stuck_count = 0
         self._stats.goals_attempted += 1
 
         self._coordinator.reset(goal, self._wq)
+        self._coordinator.set_start_snapshot(self._goal_start_snapshot)
         log.info(
             "FactorioLoop: goal activated — %s [%s]",
             goal.description, getattr(goal, "type", "?"),
@@ -367,6 +392,7 @@ class FactorioLoop:
                 len(seed_subtasks),
             )
             self._coordinator.reset(goal, self._wq, seed_subtasks=seed_subtasks)
+            self._coordinator.set_start_snapshot(self._goal_start_snapshot)
         elif self._stuck_count >= self._cfg.max_stuck_retries:
             log.warning(
                 "FactorioLoop: max stuck retries reached — failing goal %s",

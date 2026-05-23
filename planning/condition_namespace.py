@@ -44,33 +44,41 @@ class _DeltaView:
     """
     Provides delta access to world state relative to a goal-activation snapshot.
 
-    Exposed in condition strings as the ``new`` namespace name:
+    Exposed in condition strings as the ``new`` namespace name::
 
-        new.charted_chunks >= 5          # scalar property delta via __getattr__
-        new.charted_tiles >= 5120        # any wq scalar property works automatically
-        new.inventory('iron-ore') >= 10  # parameterized — explicit method
-        new.resource_patches('coal') >= 1  # parameterized — explicit method
-        new.elapsed_ticks > 1200         # ticks since goal activation
+        new.tick >= 1200                    # ticks since goal activation
+        new.charted_chunks >= 5            # chunks revealed this goal
+        new.charted_tiles >= 5120          # auto via __getattr__
+        new.inventory('iron-ore') >= 10    # ore collected this goal
+        new.resource_patches('coal') >= 1  # patches found this goal
 
-    Scalar wq properties get automatic delta support via __getattr__ — adding
-    a new property to WorldQuery requires no changes here. Only parameterized
-    lookups (inventory, resource_patches) need explicit methods.
+    The snapshot is a shallow copy of WorldState taken at goal activation.
+    Since WorldWriter replaces whole sub-objects (never mutates them in place),
+    the snapshot's sub-objects remain stable after it is taken.
+
+    Scalar WorldQuery properties get automatic delta support via __getattr__ —
+    adding a new property to WorldQuery requires no changes here. Only
+    parameterised lookups (inventory, resource_patches) need explicit methods.
     """
 
-    def __init__(self, wq: "WorldQuery", snapshot: dict, elapsed_ticks: int = 0) -> None:
-        # Use object.__setattr__ to avoid triggering our own __getattr__
+    def __init__(
+        self,
+        wq: "WorldQuery",
+        start_wq: "WorldQuery",
+        elapsed_ticks: int = 0,
+    ) -> None:
         object.__setattr__(self, '_wq', wq)
-        object.__setattr__(self, '_snapshot', snapshot)
+        object.__setattr__(self, '_start_wq', start_wq)
         object.__setattr__(self, '_elapsed_ticks', elapsed_ticks)
 
     def __getattr__(self, name: str):
         """
         Automatic delta for scalar WorldQuery properties.
-        new.charted_chunks → wq.charted_chunks - snapshot['charted_chunks']
-        Clamped to 0. Raises AttributeError if the wq property doesn't exist.
+        new.charted_chunks → wq.charted_chunks - start_wq.charted_chunks
+        Clamped to 0. Raises AttributeError if wq doesn't have the property.
         """
         wq       = object.__getattribute__(self, '_wq')
-        snapshot = object.__getattribute__(self, '_snapshot')
+        start_wq = object.__getattribute__(self, '_start_wq')
         try:
             current = getattr(wq, name)
         except AttributeError:
@@ -79,12 +87,11 @@ class _DeltaView:
             raise AttributeError(
                 f"_DeltaView: {name!r} is callable — use an explicit method instead"
             )
-        baseline = snapshot.get(name, current)
         try:
+            baseline = getattr(start_wq, name)
             return max(0, current - baseline)
-        except TypeError:
-            # Non-numeric property — return raw value, delta doesn't apply
-            return current
+        except (TypeError, AttributeError):
+            return current  # non-numeric or missing on start_wq — return raw
 
     @property
     def tick(self) -> int:
@@ -96,26 +103,22 @@ class _DeltaView:
     def inventory(self, item: str) -> int:
         """Net items of *item* collected since goal activation (clamped to 0)."""
         wq       = object.__getattribute__(self, '_wq')
-        snapshot = object.__getattribute__(self, '_snapshot')
-        snap_inv = snapshot.get("inventory", {})
-        return max(0, wq.inventory_count(item)
-                   - snap_inv.get(item, wq.inventory_count(item)))
+        start_wq = object.__getattribute__(self, '_start_wq')
+        return max(0, wq.inventory_count(item) - start_wq.inventory_count(item))
 
     def resource_patches(self, resource_type: str) -> int:
         """Resource patches of *resource_type* discovered since goal activation."""
         wq       = object.__getattribute__(self, '_wq')
-        snapshot = object.__getattribute__(self, '_snapshot')
-        snap_rc  = snapshot.get("resource_counts", {})
-        current  = len(wq.resources_of_type(resource_type))
-        return max(0, current - snap_rc.get(resource_type, current))
-
+        start_wq = object.__getattribute__(self, '_start_wq')
+        return max(0, len(wq.resources_of_type(resource_type))
+                      - len(start_wq.resources_of_type(resource_type)))
 
 
 def build_core_namespace(
     wq: "WorldQuery",
     tick: int,
     start_tick: int = 0,
-    start_snapshot: Optional[dict] = None,
+    start_wq: Optional["WorldQuery"] = None,
 ) -> dict:
     """
     Build the shared core namespace used by all condition evaluators.
@@ -125,7 +128,7 @@ def build_core_namespace(
     wq            : WorldQuery for the current world state.
     tick          : Current game tick.
     start_tick    : Game tick when the current goal was activated.
-    start_snapshot: World-state snapshot captured at goal activation,
+    start_wq: World-state snapshot captured at goal activation,
                     used to populate the `new` delta object.
 
     Returns a dict suitable for passing to eval(). Does NOT include
@@ -135,7 +138,8 @@ def build_core_namespace(
     are added by the caller after receiving this dict.
     """
     elapsed_ticks = max(0, tick - start_tick)
-    snapshot = start_snapshot or {}
+    # If no start_wq provided, use wq itself as baseline → all deltas = 0
+    effective_start_wq = start_wq if start_wq is not None else wq
 
     return {
         # ----------------------------------------------------------------
@@ -161,7 +165,7 @@ def build_core_namespace(
         # new.inventory(item) → items collected this goal
         # new.resource_patches(type) → patches found this goal
         # ----------------------------------------------------------------
-        "new": _DeltaView(wq, snapshot, elapsed_ticks),
+        "new": _DeltaView(wq, effective_start_wq, elapsed_ticks),
 
         # ----------------------------------------------------------------
         # Inventory — NON-PROXIMAL

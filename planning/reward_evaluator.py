@@ -115,7 +115,7 @@ class RewardEvaluator:
         wq: "WorldQuery",
         tick: int,
         start_tick: int,
-        start_snapshot: Optional[dict] = None,
+        start_wq: Optional["WorldQuery"] = None,
     ) -> EvaluationResult:
         return self.evaluate_conditions(
             success_condition=goal.success_condition,
@@ -124,7 +124,7 @@ class RewardEvaluator:
             wq=wq,
             tick=tick,
             start_tick=start_tick,
-            start_snapshot=start_snapshot,
+            start_wq=start_wq,
         )
 
     def evaluate_conditions(
@@ -135,10 +135,10 @@ class RewardEvaluator:
         wq: "WorldQuery",
         tick: int,
         start_tick: int,
-        start_snapshot: Optional[dict] = None,
+        start_wq: Optional["WorldQuery"] = None,
     ) -> EvaluationResult:
         elapsed = max(0, tick - start_tick)
-        ns = self._build_namespace(wq, tick, elapsed, start_snapshot or {})
+        ns = self._build_namespace(wq, tick, elapsed, start_wq)
 
         success = self._eval_bool(success_condition, ns, "success_condition")
         failure = self._eval_bool(failure_condition, ns, "failure_condition")
@@ -164,7 +164,7 @@ class RewardEvaluator:
             elapsed_ticks=elapsed,
         )
 
-    def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0, start_snapshot: dict = None) -> dict:
+    def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0, start_wq: "WorldQuery" = None) -> dict:
         from planning.condition_namespace import build_core_namespace, safe_builtins
 
         if self._tracker is not None:
@@ -186,7 +186,7 @@ class RewardEvaluator:
         # elapsed_ticks, new, wq, state, research, entities, builtins...).
         # start_tick is back-computed from elapsed_ticks.
         start_tick = tick - elapsed_ticks
-        ns = build_core_namespace(wq, tick, start_tick, start_snapshot)
+        ns = build_core_namespace(wq, tick, start_tick, start_wq)
         ns["__builtins__"] = safe_builtins()
 
         # RewardEvaluator extras — richer world-state access not needed in
