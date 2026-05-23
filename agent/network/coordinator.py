@@ -238,6 +238,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # Tick at which the current active subtask was activated (for timeout).
         # PLACEHOLDER — see _SUBTASK_TIMEOUT_TICKS comment above.
         self._subtask_activated_at: int = 0
+        self._goal_start_tick: int = 0
+        self._goal_start_snapshot: dict = {}
         # Set to True when _derive_subtasks fails so we don't re-attempt
         # derivation on every subsequent tick (which would spam STUCK events).
         # Cleared by reset() when a new goal starts.
@@ -279,6 +281,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         self._derivation_failed = False
         self._pending_stop_mining = True
         self._exploration_attempt = 0
+        self._goal_start_tick = wq.tick
+        self._goal_start_snapshot = {}  # populated by loop via set_start_snapshot()
 
         if seed_subtasks:
             for subtask in reversed(seed_subtasks):
@@ -745,6 +749,14 @@ class RuleBasedCoordinator(CoordinatorProtocol):
     # Agent selection and ticking
     # ------------------------------------------------------------------
 
+    def set_start_snapshot(self, snapshot: dict) -> None:
+        """
+        Called by the loop immediately after reset() to provide the world-state
+        snapshot captured at goal activation. Used to populate the `new` delta
+        object in condition namespaces.
+        """
+        self._goal_start_snapshot = snapshot
+
     def _select_agent(self, goal: Goal):
         """
         Select the agent that will own the current active subtask.
@@ -828,7 +840,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         if not condition:
             return False
         try:
-            ns = _build_condition_namespace(wq, tick)
+            ns = _build_condition_namespace(wq, tick, self._goal_start_tick, self._goal_start_snapshot)
             return bool(eval(condition, {"__builtins__": {}}, ns))  # noqa: S307
         except Exception as exc:
             log.debug(
@@ -1012,21 +1024,20 @@ def _next_exploration_waypoint(
         return Position(0.0, -step)    # north
 
 
-def _build_condition_namespace(wq: "WorldQuery", tick: int) -> dict:
+def _build_condition_namespace(wq: "WorldQuery", tick: int, start_tick: int = 0, start_snapshot: dict = None) -> dict:
     """
-    Build a minimal eval namespace for subtask condition evaluation.
+    Build the eval namespace for subtask condition evaluation.
 
-    Mirrors the key entries from RewardEvaluator's namespace. Only the
-    subset needed for Phase 6 subtask conditions is included.
+    Starts from the shared core (planning.condition_namespace.build_core_namespace)
+    and adds coordinator-specific positional predicates: is_at, is_reachable,
+    Position. These are needed for navigation subtask success conditions but
+    are not part of the general goal condition namespace.
 
-    Positional preconditions (is_at, is_reachable) are included so that
-    navigation subtask success conditions can be evaluated directly by the
-    coordinator without any side-channel blackboard signals.
+    Any entry added to build_core_namespace is automatically available here
+    without any changes to this function.
     """
+    from planning.condition_namespace import build_core_namespace, safe_builtins
     from agent.preconditions import is_at as _is_at, is_reachable as _is_reachable
-
-    def inventory(item: str) -> int:
-        return wq.inventory_count(item)
 
     def is_at(pos: Position, tolerance: float = 1.5) -> bool:
         return _is_at(pos, wq, tolerance)
@@ -1034,23 +1045,14 @@ def _build_condition_namespace(wq: "WorldQuery", tick: int) -> dict:
     def is_reachable(entity_id: int) -> bool:
         return _is_reachable(entity_id, wq)
 
-    return {
-        "inventory":        inventory,
-        "is_at":            is_at,
-        "is_reachable":     is_reachable,
-        "Position":         Position,
-        "charted_chunks":   wq.charted_chunks,
-        "charted_tiles":    wq.charted_tiles,
-        "charted_area_km2": wq.charted_area_km2,
-        "tick":             tick,
-        "wq":               wq,
-        "state":            wq.state,
-        "True": True,
-        "False": False,
-        "len": len,
-        "any": any,
-        "all": all,
-        "sum": sum,
-        "min": min,
-        "max": max,
-    }
+    ns = build_core_namespace(wq, tick, start_tick, start_snapshot)
+    ns["__builtins__"] = safe_builtins()
+
+    # Coordinator-specific extras: positional predicates for navigation
+    # subtask success conditions (is_at, is_reachable, Position).
+    ns.update({
+        "is_at":       is_at,
+        "is_reachable": is_reachable,
+        "Position":    Position,
+    })
+    return ns
