@@ -32,16 +32,19 @@ appropriate agent. Agents never receive or inspect the Goal object.
 **Phases 1-6 complete.**
 The full end-to-end pipeline is implemented and running against a live Factorio
 instance. The agent can navigate, gather resources, explore, and clear terrain.
+All in-game tests pass, including Factorio 2.x compatibility fixes and delta-based
+condition evaluation (`new.inventory()`, `new.charted_chunks()`).
 Phase 7 (construction agent and observation/reward infrastructure) is next.
 
 ```
 [✅] Core dataclasses       128 tests passing
-[✅] Bridge / Lua mod        80+ tests passing
+[✅] Bridge / Lua mod        80+ tests passing (4 Lua test suites: T/TM/TS/TP)
 [✅] World model            200+ tests passing
-[✅] Planning layer         ~170 tests passing
+[✅] Planning layer         ~200 tests passing (condition_namespace, DeltaView)
 [✅] WorldQuery/Writer refactor — all tests passing
 [✅] Phase 5  — Execution layer foundation   179 tests passing
 [✅] Phase 6  — Navigation, mining, rule-based coordinator, run loop
+[✅] Phase 6+ — Factorio 2.x compatibility; delta conditions; all in-game tests pass
 [ ] Phase 7  — Construction agent, observation and reward infrastructure
 [ ] Phase 8  — Production agent (RL)
 [ ] Phase 9  — Spatial-logistics agent (RL)
@@ -74,11 +77,33 @@ only — never Goals.
 **Game interaction** — the Factorio mod (`bridge/mod/control.lua`) exposes a
 persistent-state movement and mining system driven by `on_tick` handlers. The
 `fa.move_to()` function uses Factorio's built-in pathfinder (`surface.request_path`)
-and drives `walking_state` every game tick via a dispatcher. `fa.mine_resource()`
-and `fa.mine_entity()` similarly maintain `mining_state` every tick and auto-advance
-through resource tiles. The Python bridge speaks to this mod exclusively via RCON.
+with a collision mask covering `object` and `water_tile` layers so the character
+routes around trees, walls, and water. `fa.mine_resource()` and `fa.mine_entity()`
+similarly maintain `mining_state` every tick. The Python bridge speaks to this mod
+exclusively via RCON.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation.
+
+## Writing Goal Conditions
+
+Goal conditions should use **relative conditions** rather than absolute game state
+where possible. The `new` object and `elapsed_ticks` alias give access to deltas
+since goal activation:
+
+```python
+# Collect 5 new iron ore (works regardless of prior inventory)
+success_condition="new.inventory('iron-ore') >= 5"
+
+# 3 minutes since this goal activated (not absolute game clock)
+failure_condition="elapsed_ticks > 10800"   # or: new.tick > 10800
+
+# Explore 5 new chunks (works regardless of prior charted count)
+success_condition="new.charted_chunks >= 5"
+```
+
+See [`REWARD_NAMESPACE.md`](REWARD_NAMESPACE.md) for the complete namespace
+reference and [`CONDITION_SCOPE.md`](CONDITION_SCOPE.md) for proximal vs
+non-proximal guidance.
 
 ## Running the Agent
 
@@ -88,9 +113,9 @@ python run.py
 
 # Single inline goal
 python run.py --goal-type collection \
-              --success "inventory('iron-ore') >= 10" \
-              --failure "tick > 18000" \
-              --description "Collect 10 iron ore"
+              --success "new.inventory('iron-ore') >= 10" \
+              --failure "elapsed_ticks > 18000" \
+              --description "Collect 10 new iron ore"
 
 # Load a recorded goal sequence
 python run.py --goals runs/my_goals.json
@@ -109,7 +134,7 @@ pytest tests/
 
 # Specific layer
 pytest tests/unit/agent/ -v
-pytest tests/unit/llm/ -v
+pytest tests/unit/planning/ -v   # includes condition_namespace tests
 ```
 
 ### In-game tests — Factorio required
@@ -130,13 +155,31 @@ In-game tests skip automatically if RCON is unreachable. Live log streaming is
 configured in `pytest.ini` — add `--log-cli-level DEBUG` for full coordinator
 and agent output.
 
+### Lua-side tests — Factorio console required
+
+Four test suites can be run directly from the Factorio in-game console. These test
+the bridge interface without any Python involvement and are the fastest way to
+diagnose Factorio API issues:
+
+```
+/c __agent__ T.run_all()           # state queries, action commands, edge cases
+/c __agent__ TM.run_suite("status_api")    # movement status API
+/c __agent__ TM.async_start("player_actually_moves")
+# wait 5 seconds
+/c __agent__ TM.async_finish("player_actually_moves")
+/c __agent__ TS.run_all()          # exploration (charted_chunks), mining status
+/c __agent__ TP.run_all()          # prototype queries (entities, recipes, tech)
+```
+
+Results are written to `script-output/` in the Factorio data directory.
+
 ## Project Structure
 
 ```
 factorio-agent/
 ├── bridge/          # RCON interface, Lua mod, state parser, action executor
 ├── world/           # WorldState, WorldQuery, WorldWriter, KnowledgeBase
-├── planning/        # GoalTree, RewardEvaluator, ResourceAllocator
+├── planning/        # GoalTree, RewardEvaluator, condition_namespace, ResourceAllocator
 ├── agent/
 │   ├── execution_protocol.py  # ExecutionLayerProtocol, ExecutionResult, StuckContext
 │   ├── blackboard.py          # Shared working memory for agents
@@ -173,10 +216,10 @@ factorio-agent/
 
 ```bash
 # Linux / Mac
-cp -r bridge/mod ~/.factorio/mods/factorio-agent_0.1.0
+cp -r bridge/mod ~/.factorio/mods/agent_0.1.0
 
 # Windows
-xcopy bridge\mod "%APPDATA%\Factorio\mods\factorio-agent_0.1.0" /E /I
+xcopy bridge\mod "%APPDATA%\Factorio\mods\agent_0.1.0" /E /I
 ```
 
 Enable the mod in Factorio's mod manager before starting a game, or add it
