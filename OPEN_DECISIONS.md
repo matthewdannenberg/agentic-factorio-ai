@@ -245,6 +245,55 @@ production lines, wattage for power grids, etc.).
 
 ---
 
+## OD-8 — Agent Architecture: Thin Protocol vs Behavioral Composition
+
+**Question:** Is the current thin `AgentProtocol` + single-responsibility agent design
+the right long-term architecture, or should agents be able to compose reusable
+behavioral units internally?
+
+**What we know:**
+- The current design keeps `AgentProtocol` minimal (`activate`, `tick`, `observe`,
+  `progress`) and delegates multi-step goal decomposition entirely to the coordinator,
+  which derives sequential subtasks each handled by a single-responsibility agent.
+- This is clean and testable through Phases 6–7. The coordinator owns all routing
+  logic; agents are small and focused.
+- The "fat base class" alternative (moving shared implementation into `AgentProtocol`
+  and having subclasses override) is almost certainly worse — the things different
+  agents need are qualitatively different, not just different quantities of the same
+  thing. The RL agents in particular (production, spatial-logistics) will need
+  observation spaces, policy networks, and replay buffers that have nothing in common
+  with rule-based navigation state.
+- A middle path — **behavioral composition** — was identified as the likely right
+  answer at scale: a `behaviors/` module containing `NavigationBehavior`,
+  `MiningBehavior`, etc., which agents can hold references to and delegate tick logic
+  into. The agent's `tick()` becomes a state machine over these behaviors rather than
+  monolithic logic. Behaviors are only extracted when reused by ≥2 agents or when
+  their internal complexity (stall detection, grace periods, state machines) justifies
+  isolation in its own right.
+
+**What is undecided:**
+- Whether the coordinator-derives-subtasks pattern will remain clean as goal types
+  proliferate, or whether construction and production agents will need to handle
+  multi-step internal sequences (navigate-then-place, navigate-then-mine-then-craft)
+  that don't decompose naturally into atomic coordinator-derived subtasks.
+- Whether RL agents that need to navigate *and* act will benefit from a unified
+  observation space (requiring a single agent that composes behaviors) vs the current
+  sequential-subtask model (which splits the observation across two agents).
+- The exact interface for behavioral units if they are introduced — they need access
+  to blackboard, WorldQuery, and KnowledgeBase, making them substantial objects rather
+  than lightweight helpers.
+
+**When this becomes relevant:** The construction agent (Phase 7) is the first test.
+If writing it requires reimplementing navigation logic, or if the coordinator's
+construction derivation becomes complex because construction has multi-step structure
+that doesn't decompose cleanly into atomic subtasks, that is the signal to introduce
+the behavioral composition layer before proceeding to Phase 8.
+
+**Where the decision lives:** `agent/network/agent_protocol.py` and the agent
+implementations. A `behaviors/` module would live at `agent/network/behaviors/`.
+
+---
+
 ## Decision log
 
 | ID | Decision | Date | Notes |
