@@ -367,6 +367,53 @@ def has_inventory_space(
     return slots_needed <= free_slots
 
 
+def post_crafting_inventory(
+    item: str,
+    count: int,
+    inventory: dict[str, int],
+    kb: "KnowledgeBase",
+) -> dict[str, int]:
+    """
+    Return the player inventory after queuing *count* units of *item* for crafting.
+
+    Runs the same DFS that ``can_reach_count`` uses, so existing higher-tier
+    items in inventory are consumed directly rather than re-crafted. For example,
+    if the player has 3 gears and needs 5 total, only 2 are crafted (consuming
+    4 plates), not 5 (10 plates).
+
+    Parameters
+    ----------
+    item      : Output item name (e.g. "iron-gear-wheel").
+    count     : Number of units to craft.
+    inventory : Current inventory as ``{item_name: count}``. Not mutated.
+    kb        : KnowledgeBase for recipe lookups.
+
+    Returns a new dict representing the inventory after all ingredient
+    consumption. Items not consumed are included unchanged. If no
+    hand-craftable recipe is found, returns a copy of *inventory* unmodified.
+    """
+    # Compute post-consumption inventory by subtracting ingredient costs.
+    # Use the first hand-craftable recipe — the same one can_reach_count used.
+    post = dict(inventory)
+    recipes = _hand_craftable_recipes(item, kb)
+    if recipes:
+        recipe = recipes[0]
+        yield_per_run = sum(
+            p.amount * p.probability
+            for p in recipe.products
+            if p.name == item and not p.is_fluid
+        )
+        if yield_per_run > 0:
+            have = post.get(item, 0)
+            still_needed = max(0, count - have)
+            runs_needed = math.ceil(still_needed / yield_per_run)
+            for ingredient in recipe.ingredients:
+                if not ingredient.is_fluid:
+                    cost = math.ceil(ingredient.amount * runs_needed)
+                    post[ingredient.name] = max(0, post.get(ingredient.name, 0) - cost)
+    return post
+
+
 def check_crafting_preconditions(
     item: str,
     count: int,
@@ -377,7 +424,7 @@ def check_crafting_preconditions(
     Return ``(can_craft, has_space)`` for crafting *count* units of *item*.
 
     Combines ``can_reach_count`` and ``has_inventory_space`` in a single call,
-    computing the post-consumption inventory once for both checks.
+    using ``post_crafting_inventory`` to compute the post-consumption state.
 
     Parameters
     ----------
@@ -394,11 +441,6 @@ def check_crafting_preconditions(
                 once ingredients are consumed. Always False when can_craft is
                 False — no point checking space if we can't craft.
 
-    The post-consumption inventory is derived by subtracting the total
-    ingredient cost (across all recipe runs needed) from the current inventory.
-    This is correct because Factorio consumes all ingredients the moment
-    crafting is queued.
-
     Note: ``has_space`` uses ``PlayerState.inventory_size`` from *wq*. If the
     bridge has not yet reported this value (it will be 0), ``has_space`` returns
     False conservatively.
@@ -412,25 +454,7 @@ def check_crafting_preconditions(
     for slot in wq.state.player.inventory.slots:
         current[slot.item] = current.get(slot.item, 0) + slot.count
 
-    # Compute post-consumption inventory by subtracting ingredient costs.
-    # Use the first hand-craftable recipe — the same one can_reach_count used.
-    post = dict(current)
-    recipes = _hand_craftable_recipes(item, kb)
-    if recipes:
-        recipe = recipes[0]
-        yield_per_run = sum(
-            p.amount * p.probability
-            for p in recipe.products
-            if p.name == item and not p.is_fluid
-        )
-        if yield_per_run > 0:
-            have = current.get(item, 0)
-            still_needed = max(0, count - have)
-            runs_needed = math.ceil(still_needed / yield_per_run)
-            for ingredient in recipe.ingredients:
-                if not ingredient.is_fluid:
-                    cost = math.ceil(ingredient.amount * runs_needed)
-                    post[ingredient.name] = max(0, post.get(ingredient.name, 0) - cost)
+    post = post_crafting_inventory(item,count,current,kb)
 
     total_slots = wq.state.player.inventory_size
     space = has_inventory_space(item, count, post, total_slots, kb)

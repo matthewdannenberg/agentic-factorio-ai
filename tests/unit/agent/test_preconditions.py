@@ -20,6 +20,7 @@ from agent.preconditions import (
     has_inventory_space,
     is_at,
     is_reachable,
+    post_crafting_inventory,
     valid_actions,
 )
 from bridge.actions import (
@@ -1504,6 +1505,88 @@ class TestCheckCraftingPreconditions(unittest.TestCase):
         )
         wq = self._wq({"iron-plate": 2}, inventory_size=1)
         can_craft, has_space = check_crafting_preconditions("iron-gear-wheel", 1, wq, kb)
+        self.assertTrue(can_craft)
+        self.assertTrue(has_space)
+
+
+# ---------------------------------------------------------------------------
+# post_crafting_inventory — unit tests for the shared helper
+# ---------------------------------------------------------------------------
+
+class TestPostCraftingInventoryPreconditions(unittest.TestCase):
+    """
+    Unit tests for post_crafting_inventory() as defined in agent.preconditions.
+
+    These cover the helper's contract from the preconditions module's
+    perspective. Crafting-agent-specific tests live in test_crafting.py.
+    """
+
+    def _gear_recipe(self):
+        return _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+        )
+
+    def _kb(self):
+        return _KBStub({"iron-gear-wheel": [self._gear_recipe()]})
+
+    def test_returns_post_consumption_inventory(self):
+        post = post_crafting_inventory(
+            "iron-gear-wheel", 2, {"iron-plate": 10}, self._kb()
+        )
+        # 2 gears × 2 plates = 4 consumed; 6 remain.
+        self.assertEqual(post.get("iron-plate"), 6)
+
+    def test_existing_output_reduces_ingredient_cost(self):
+        # 3 gears already — only 2 more crafted (4 plates consumed).
+        post = post_crafting_inventory(
+            "iron-gear-wheel", 5,
+            {"iron-gear-wheel": 3, "iron-plate": 10},
+            self._kb(),
+        )
+        self.assertEqual(post.get("iron-plate"), 6)
+        self.assertEqual(post.get("iron-gear-wheel"), 0)
+
+    def test_does_not_mutate_input(self):
+        inventory = {"iron-plate": 10}
+        original = dict(inventory)
+        post_crafting_inventory("iron-gear-wheel", 2, inventory, self._kb())
+        self.assertEqual(inventory, original)
+
+    def test_unknown_recipe_returns_copy(self):
+        inventory = {"iron-plate": 10}
+        post = post_crafting_inventory("unknown-item", 5, inventory, _KBStub({}))
+        self.assertEqual(post, inventory)
+        self.assertIsNot(post, inventory)  # must be a copy, not the same object
+
+    def test_check_crafting_preconditions_uses_correct_post_inventory(self):
+        """
+        check_crafting_preconditions passes the right post-inventory to
+        has_inventory_space. Verify the space check accounts for freed slots.
+        """
+        gear = _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+        )
+        kb = _KBStub(
+            {"iron-gear-wheel": [gear]},
+            stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100},
+        )
+        from world.state import WorldState, Inventory, InventorySlot
+        from world.query import WorldQuery
+        state = WorldState(tick=0)
+        state.player.inventory = Inventory(slots=[
+            InventorySlot(item="iron-plate", count=2)
+        ])
+        state.player.inventory_size = 1  # single slot
+        state._rebuild_entity_indices()
+        wq = WorldQuery(state)
+        # 1 slot, 2 plates → craft 1 gear (consumes both plates → frees slot → gear fits).
+        can_craft, has_space = check_crafting_preconditions(
+            "iron-gear-wheel", 1, wq, kb
+        )
         self.assertTrue(can_craft)
         self.assertTrue(has_space)
 

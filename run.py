@@ -127,6 +127,7 @@ def main() -> None:
     from agent.network.registry import AgentRegistry
     from agent.network.agents.navigation import NavigationAgent
     from agent.network.agents.mining import MiningAgent
+    from agent.network.agents.crafting import CraftingAgent
     from agent.network.coordinator import RuleBasedCoordinator
     from agent.loop import FactorioLoop, LoopConfig
     from planning.reward_evaluator import RewardEvaluator
@@ -150,10 +151,12 @@ def main() -> None:
     # Agent network
     nav_agent   = NavigationAgent()
     mine_agent  = MiningAgent()
+    craft_agent = CraftingAgent()
 
     registry = AgentRegistry()
     registry.register(nav_agent)
     registry.register(mine_agent)
+    registry.register(craft_agent)
 
     blackboard = Blackboard()
     ledger     = SubtaskLedger()

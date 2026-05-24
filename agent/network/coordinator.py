@@ -20,6 +20,7 @@ Goal type vocabulary (stable across phases — appear in behavioral memory):
     GOAL_TYPE_CONSTRUCTION = "construction"
     GOAL_TYPE_EXPLORATION  = "exploration"
     GOAL_TYPE_RESEARCH     = "research"
+    GOAL_TYPE_CRAFTING     = "crafting"
 
 Subtask derivation for "collection"
 ------------------------------------
@@ -92,12 +93,14 @@ GOAL_TYPE_CONSTRUCTION = "construction"
 GOAL_TYPE_EXPLORATION  = "exploration"
 GOAL_TYPE_RESEARCH     = "research"
 GOAL_TYPE_CLEAR        = "clear_region"
+GOAL_TYPE_CRAFTING     = "crafting"
 
 # Goal types the Phase 6 coordinator can derive subtask trees for.
 _DERIVABLE_TYPES = {
     GOAL_TYPE_COLLECTION,
     GOAL_TYPE_EXPLORATION,
     GOAL_TYPE_CLEAR,
+    GOAL_TYPE_CRAFTING,
 }
 
 # Subtask failure timeout: if a subtask's explicit failure_condition has not
@@ -456,6 +459,8 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             return result
         elif goal_type == GOAL_TYPE_CLEAR:
             return self._derive_clear(goal, wq, tick)
+        elif goal_type == GOAL_TYPE_CRAFTING:
+            return self._derive_crafting(goal, wq, tick)
         else:
             return self._stuck_at_goal_level(goal, tick)
 
@@ -687,6 +692,191 @@ class RuleBasedCoordinator(CoordinatorProtocol):
             "Derived clear subtask: %s in %s", clear_mode, bbox
         )
         return None
+
+    def _derive_crafting(
+        self,
+        goal: Goal,
+        wq: "WorldQuery",
+        tick: int,
+    ) -> Optional[ExecutionResult]:
+        """
+        Derive a subtask for a crafting goal.
+
+        Parses the item name and target count from the goal's
+        success_condition ("inventory('iron-gear-wheel') >= 10"), then
+        checks crafting preconditions before deriving the subtask.
+
+        The success condition on the derived subtask uses ingredient
+        depletion rather than output arrival, so it fires as soon as
+        Factorio accepts the crafting queue — not when crafting completes.
+        This lets subsequent subtasks begin immediately while crafting
+        finishes in the background.
+
+        Returns None on success, STUCK if ingredients are insufficient or
+        the item is not hand-craftable.
+        """
+        from agent.preconditions import check_crafting_preconditions
+
+        item, target_count = _parse_collection_condition(goal.success_condition)
+        if item is None:
+            log.warning(
+                "Cannot parse crafting condition: %s", goal.success_condition
+            )
+            return self._stuck_at_goal_level(goal, tick)
+
+        # Check whether ingredients are available and inventory has space.
+        can_craft, has_space = check_crafting_preconditions(
+            item, target_count, wq, self._kb
+        )
+        if not can_craft:
+            log.warning(
+                "Crafting goal for %dx %s: insufficient ingredients — returning STUCK",
+                target_count, item,
+            )
+            return self._stuck_at_goal_level(goal, tick)
+        if not has_space:
+            log.warning(
+                "Crafting goal for %dx %s: insufficient inventory space — returning STUCK",
+                target_count, item,
+            )
+            return self._stuck_at_goal_level(goal, tick)
+
+        # Determine recipe name. Use the first hand-craftable recipe found.
+        recipe_name = item   # default: recipe name matches item name
+        recipes = self._kb.recipes_for_product(item)
+        handcraft = next(
+            (r for r in recipes
+             if not r.is_placeholder
+             and r.category == "crafting"
+             and "character" in r.made_in),
+            None,
+        )
+        if handcraft:
+            recipe_name = handcraft.name
+
+        # Compute ingredient cost for the success condition.
+        # The success condition fires when the constraining ingredient has been
+        # consumed — i.e. its count drops by the expected amount. We use the
+        # most expensive single ingredient as the proxy (largest absolute cost).
+        ingredient_cost = self._compute_crafting_cost(item, recipe_name, target_count, wq)
+
+        success_condition = self._crafting_success_condition(
+            item, target_count, ingredient_cost, wq
+        )
+
+        # Build expected post-crafting inventory for the agent's stall detection.
+        # The agent reads this directly from the INTENTION entry so it needs no
+        # KB access to compute ingredient costs itself.
+        from agent.preconditions import post_crafting_inventory
+        current: dict[str, int] = {}
+        for slot in wq.state.player.inventory.slots:
+            current[slot.item] = current.get(slot.item, 0) + slot.count
+        expected_post = post_crafting_inventory(item, target_count, current, self._kb)
+
+        craft_subtask = Subtask(
+            description=f"Craft {target_count}x {item}",
+            success_condition=success_condition,
+            failure_condition=f"tick > {tick + _SUBTASK_TIMEOUT_TICKS}",
+            parent_goal_id=goal.id,
+            created_at=tick,
+            derived_locally=True,
+        )
+        craft_subtask.agent_hint = "crafting"
+        craft_subtask.craft_item = item
+        craft_subtask.craft_recipe = recipe_name
+        craft_subtask.craft_count = target_count
+        craft_subtask.craft_expected_post = expected_post
+
+        self._ledger.push(craft_subtask)
+
+        # Write the crafting_task INTENTION for the crafting agent.
+        # expected_post_inventory is included so the agent can perform stall
+        # detection without any KB lookups.
+        self._bb.write(
+            category=EntryCategory.INTENTION,
+            scope=EntryScope.SUBTASK,
+            owner_agent="coordinator",
+            created_at=tick,
+            data={
+                "type": "crafting_task",
+                "targets": [
+                    {
+                        "item": item,
+                        "recipe": recipe_name,
+                        "count": target_count,
+                    }
+                ],
+                "expected_post_inventory": expected_post,
+            },
+        )
+
+        log.info(
+            "Derived crafting subtask: %dx %s (recipe=%s)",
+            target_count, item, recipe_name,
+        )
+        return None
+
+    def _compute_crafting_cost(
+        self,
+        item: str,
+        recipe_name: str,
+        count: int,
+        wq: "WorldQuery",
+    ) -> dict[str, int]:
+        """
+        Return the actual ingredient units consumed from the player's current
+        inventory when crafting *count* of *item*.
+
+        Uses post_crafting_inventory() and diffs against current inventory.
+        """
+        from agent.preconditions import post_crafting_inventory
+
+        current: dict[str, int] = {}
+        for slot in wq.state.player.inventory.slots:
+            current[slot.item] = current.get(slot.item, 0) + slot.count
+
+        post = post_crafting_inventory(item, count, current, self._kb)
+        return {
+            inv_item: max(0, before - post.get(inv_item, 0))
+            for inv_item, before in current.items()
+            if before > post.get(inv_item, before)
+        }
+
+    def _crafting_success_condition(
+        self,
+        item: str,
+        count: int,
+        ingredient_cost: dict[str, int],
+        wq: "WorldQuery",
+    ) -> str:
+        """
+        Build the success condition for a craft_items subtask.
+
+        Preferred: ingredient depletion. The constraining ingredient (highest
+        absolute cost) is monitored; the condition fires when its inventory
+        count drops by the expected amount. This is near-instantaneous since
+        Factorio consumes ingredients when crafting is queued.
+
+        Fallback: output accumulation. Used when the recipe is unknown or
+        has no solid ingredients (e.g. purely from sub-crafted items already
+        in inventory). Less immediate but always correct.
+        """
+        if ingredient_cost:
+            # Pick the ingredient with the highest cost as the proxy.
+            proxy = max(ingredient_cost, key=ingredient_cost.__getitem__)
+            cost = ingredient_cost[proxy]
+            current = wq.inventory_count(proxy)
+            threshold = current - cost
+            # Guard with staleness so a stale snapshot doesn't fire early.
+            return (
+                f"staleness('player') is not None and "
+                f"staleness('player') < 300 and "
+                f"inventory('{proxy}') <= {threshold}"
+            )
+        else:
+            # Fall back to output arrival (slower but safe).
+            current = wq.inventory_count(item)
+            return f"inventory('{item}') >= {current + count}"
 
     # ------------------------------------------------------------------
     # Escalation
@@ -956,6 +1146,37 @@ class RuleBasedCoordinator(CoordinatorProtocol):
                     "task_type": "gather_resource",
                     "resource_type": resource_type,
                     "target_position": {"x": pos.x, "y": pos.y},
+                },
+            )
+
+        elif hint == "crafting":
+            craft_item: str = getattr(subtask, "craft_item", "")
+            craft_recipe: str = getattr(subtask, "craft_recipe", craft_item)
+            craft_count: int = getattr(subtask, "craft_count", 0)
+            craft_expected_post: dict = getattr(subtask, "craft_expected_post", {})
+
+            if not craft_item or craft_count <= 0:
+                log.warning(
+                    "Crafting subtask %s missing craft_item or craft_count",
+                    subtask.id[:8],
+                )
+                return
+
+            self._bb.write(
+                category=EntryCategory.INTENTION,
+                scope=EntryScope.SUBTASK,
+                owner_agent="coordinator",
+                created_at=tick,
+                data={
+                    "type": "crafting_task",
+                    "targets": [
+                        {
+                            "item": craft_item,
+                            "recipe": craft_recipe,
+                            "count": craft_count,
+                        }
+                    ],
+                    "expected_post_inventory": craft_expected_post,
                 },
             )
 

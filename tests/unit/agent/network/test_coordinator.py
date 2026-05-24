@@ -6,12 +6,15 @@ Unit tests for the RuleBasedCoordinator in agent/network/coordinator.py.
 All tests run without a live Factorio instance.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from agent.blackboard import Blackboard, EntryCategory, EntryScope
 from agent.execution_protocol import ExecutionStatus
 from agent.network.coordinator import (
     GOAL_TYPE_COLLECTION,
+    GOAL_TYPE_CRAFTING,
     GOAL_TYPE_EXPLORATION,
     GOAL_TYPE_PRODUCTION,
     RuleBasedCoordinator,
@@ -21,7 +24,12 @@ from agent.network.agents.navigation import NavigationAgent
 from agent.self_model import SelfModel
 from agent.subtask import Subtask, SubtaskLedger, SubtaskStatus
 from planning.goal import Goal, GoalStatus, Priority, RewardSpec
-from world.knowledge import KnowledgeBase
+from world.knowledge import (
+    IngredientRecord,
+    KnowledgeBase,
+    ProductRecord,
+    RecipeRecord,
+)
 from world.state import (
     ExplorationState,
     Inventory,
@@ -40,9 +48,62 @@ from world.query import WorldQuery
 
 def _make_kb() -> KnowledgeBase:
     """Return an in-memory KnowledgeBase with no query_fn (offline/test mode)."""
-    import tempfile, os
     tmp = tempfile.mkdtemp()
     return KnowledgeBase(data_dir=tmp)
+
+
+def _make_real_kb_with_gear_recipe() -> KnowledgeBase:
+    """
+    KnowledgeBase pre-populated with an iron-gear-wheel recipe.
+    Used by crafting derivation tests that need the full coordinator code path.
+    """
+    kb = KnowledgeBase(data_dir=Path(tempfile.mkdtemp()))
+    ing = IngredientRecord(name="iron-plate", amount=2.0, is_fluid=False)
+    prod = ProductRecord(
+        name="iron-gear-wheel", amount=1.0, probability=1.0, is_fluid=False
+    )
+    recipe = RecipeRecord(
+        name="iron-gear-wheel",
+        category="crafting",
+        crafting_time=0.5,
+        ingredients=[ing],
+        products=[prod],
+        made_in=["character", "assembling-machine-1"],
+        enabled_by_default=True,
+        is_placeholder=False,
+    )
+    kb._recipes["iron-gear-wheel"] = recipe
+    kb._insert_recipe(recipe)
+    return kb
+
+
+def _make_crafting_coordinator(kb: KnowledgeBase | None = None) -> RuleBasedCoordinator:
+    """Coordinator wired with *kb* and an otherwise empty registry."""
+    if kb is None:
+        kb = KnowledgeBase(data_dir=Path(tempfile.mkdtemp()))
+    return RuleBasedCoordinator(
+        registry=AgentRegistry(),
+        blackboard=Blackboard(),
+        ledger=SubtaskLedger(),
+        self_model=SelfModel(),
+        kb=kb,
+    )
+
+
+def _make_crafting_goal(
+    success_condition: str = "inventory('iron-gear-wheel') >= 2",
+    failure_condition: str = "tick > 99999",
+) -> Goal:
+    g = Goal(
+        description="Craft some gears",
+        priority=Priority.NORMAL,
+        success_condition=success_condition,
+        failure_condition=failure_condition,
+        reward_spec=RewardSpec(),
+    )
+    g.type = GOAL_TYPE_CRAFTING
+    g.activate(tick=0)
+    return g
 
 def _make_goal(
     goal_type: str = GOAL_TYPE_COLLECTION,
@@ -68,6 +129,7 @@ def _make_wq(
     inventory_items: dict = None,
     charted_chunks: int = 0,
     tick: int = 100,
+    inventory_size: int = 80,
 ) -> WorldQuery:
     state = WorldState(tick=tick, entities=[])
     state.player.position = player_pos or Position(0.0, 0.0)
@@ -78,6 +140,7 @@ def _make_wq(
     if resource_patches:
         state.resource_map = resource_patches
     state.player.exploration = ExplorationState(charted_chunks=charted_chunks)
+    state.player.inventory_size = inventory_size
     state._rebuild_entity_indices()
     return WorldQuery(state)
 
@@ -765,6 +828,188 @@ class TestCoordinatorNavigationStall(unittest.TestCase):
         # derivation, not during escalation — escalation just clears the ledger).
         # The next re-derivation tick will increment it to 2.
         self.assertGreaterEqual(coordinator._exploration_attempt, 1)
+
+
+# ---------------------------------------------------------------------------
+# tick() — crafting goal derivation
+# ---------------------------------------------------------------------------
+
+class TestCoordinatorCraftingDerivation(unittest.TestCase):
+
+    def _run(self, kb, inventory_items, inventory_size=80,
+             success_condition="inventory('iron-gear-wheel') >= 2"):
+        coord = _make_crafting_coordinator(kb)
+        goal = _make_crafting_goal(success_condition=success_condition)
+        wq = _make_wq(inventory_items=inventory_items, inventory_size=inventory_size)
+        ww = _make_mock_writer()
+        coord.reset(goal, wq)
+        return coord.tick(goal, wq, ww, tick=100), coord
+
+    def test_derives_single_craft_subtask(self):
+        kb = _make_real_kb_with_gear_recipe()
+        result, coord = self._run(kb, {"iron-plate": 10})
+        self.assertNotEqual(result.status, ExecutionStatus.STUCK)
+        self.assertEqual(len(coord._ledger), 1)
+
+    def test_derived_subtask_has_crafting_agent_hint(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        subtask = coord._ledger.peek()
+        self.assertIsNotNone(subtask)
+        self.assertEqual(getattr(subtask, "agent_hint", None), "crafting")
+
+    def test_derived_subtask_has_craft_attributes(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        subtask = coord._ledger.peek()
+        self.assertEqual(getattr(subtask, "craft_item", None), "iron-gear-wheel")
+        self.assertEqual(getattr(subtask, "craft_recipe", None), "iron-gear-wheel")
+        self.assertEqual(getattr(subtask, "craft_count", None), 2)
+
+    def test_crafting_task_intention_written(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        intentions = coord._bb.read(
+            category=EntryCategory.INTENTION, current_tick=100
+        )
+        crafting = [e for e in intentions if e.data.get("type") == "crafting_task"]
+        self.assertEqual(len(crafting), 1)
+
+    def test_intention_targets_match_derived_subtask(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        intentions = coord._bb.read(
+            category=EntryCategory.INTENTION, current_tick=100
+        )
+        entry = next(
+            e for e in intentions if e.data.get("type") == "crafting_task"
+        )
+        targets = entry.data.get("targets", [])
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["item"], "iron-gear-wheel")
+        self.assertEqual(targets[0]["count"], 2)
+
+    def test_intention_contains_expected_post_inventory(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        intentions = coord._bb.read(
+            category=EntryCategory.INTENTION, current_tick=100
+        )
+        entry = next(
+            e for e in intentions if e.data.get("type") == "crafting_task"
+        )
+        # expected_post_inventory must be present so the agent needs no KB.
+        self.assertIn("expected_post_inventory", entry.data)
+        post = entry.data["expected_post_inventory"]
+        # 2 gears × 2 plates = 4 consumed; started with 10 → 6 remain.
+        self.assertEqual(post.get("iron-plate"), 6)
+
+    def test_stuck_when_condition_unparseable(self):
+        kb = _make_real_kb_with_gear_recipe()
+        coord = _make_crafting_coordinator(kb)
+        goal = _make_crafting_goal(success_condition="tick > 99999")
+        wq = _make_wq(inventory_items={"iron-plate": 10})
+        ww = _make_mock_writer()
+        coord.reset(goal, wq)
+        result = coord.tick(goal, wq, ww, tick=100)
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+
+    def test_stuck_when_insufficient_ingredients(self):
+        kb = _make_real_kb_with_gear_recipe()
+        result, _ = self._run(kb, {"iron-plate": 0})
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+
+    def test_stuck_when_inventory_size_zero(self):
+        kb = _make_real_kb_with_gear_recipe()
+        result, _ = self._run(kb, {"iron-plate": 10}, inventory_size=0)
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+
+    def test_success_condition_uses_ingredient_depletion(self):
+        kb = _make_real_kb_with_gear_recipe()
+        _, coord = self._run(kb, {"iron-plate": 10})
+        subtask = coord._ledger.peek()
+        # Ingredient depletion condition references iron-plate with <=.
+        self.assertIn("iron-plate", subtask.success_condition)
+        self.assertIn("<=", subtask.success_condition)
+
+    def test_goal_type_crafting_constant(self):
+        self.assertEqual(GOAL_TYPE_CRAFTING, "crafting")
+
+    def test_production_goal_still_returns_stuck(self):
+        """Crafting derivation must not affect other goal types."""
+        kb = _make_real_kb_with_gear_recipe()
+        coord = _make_crafting_coordinator(kb)
+        goal = Goal(
+            description="Production goal",
+            priority=Priority.NORMAL,
+            success_condition="inventory('iron-plate') >= 50",
+            failure_condition="tick > 99999",
+            reward_spec=RewardSpec(),
+        )
+        goal.type = GOAL_TYPE_PRODUCTION
+        goal.activate(tick=0)
+        wq = _make_wq(inventory_items={"iron-plate": 10})
+        ww = _make_mock_writer()
+        coord.reset(goal, wq)
+        result = coord.tick(goal, wq, ww, tick=100)
+        self.assertEqual(result.status, ExecutionStatus.STUCK)
+
+
+class TestCoordinatorWriteWaypointCrafting(unittest.TestCase):
+
+    def test_write_waypoint_writes_crafting_task_intention(self):
+        kb = _make_real_kb_with_gear_recipe()
+        coord = _make_crafting_coordinator(kb)
+        subtask = Subtask(
+            description="Craft 3x iron-gear-wheel",
+            success_condition="inventory('iron-plate') <= 4",
+            failure_condition="tick > 99999",
+            parent_goal_id="g1",
+            created_at=100,
+            derived_locally=True,
+        )
+        subtask.agent_hint = "crafting"
+        subtask.craft_item = "iron-gear-wheel"
+        subtask.craft_recipe = "iron-gear-wheel"
+        subtask.craft_count = 3
+        subtask.craft_expected_post = {"iron-plate": 4}
+
+        wq = _make_wq(inventory_items={"iron-plate": 10})
+        coord._write_waypoint_for_subtask(subtask, wq, tick=100)
+
+        intentions = coord._bb.read(
+            category=EntryCategory.INTENTION, current_tick=100
+        )
+        crafting = [e for e in intentions if e.data.get("type") == "crafting_task"]
+        self.assertEqual(len(crafting), 1)
+        targets = crafting[0].data.get("targets", [])
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["item"], "iron-gear-wheel")
+        self.assertEqual(targets[0]["count"], 3)
+        self.assertEqual(
+            crafting[0].data.get("expected_post_inventory"),
+            {"iron-plate": 4},
+        )
+
+    def test_write_waypoint_no_entry_when_craft_item_missing(self):
+        kb = _make_real_kb_with_gear_recipe()
+        coord = _make_crafting_coordinator(kb)
+        subtask = Subtask(
+            description="Broken crafting subtask",
+            success_condition="True",
+            failure_condition="tick > 99999",
+            parent_goal_id="g1",
+            created_at=100,
+            derived_locally=True,
+        )
+        subtask.agent_hint = "crafting"
+        # No craft_item / craft_count attributes — should log warning, not crash.
+        coord._write_waypoint_for_subtask(subtask, _make_wq(), tick=100)
+        intentions = coord._bb.read(
+            category=EntryCategory.INTENTION, current_tick=100
+        )
+        crafting = [e for e in intentions if e.data.get("type") == "crafting_task"]
+        self.assertEqual(len(crafting), 0)
 
 
 if __name__ == "__main__":

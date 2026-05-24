@@ -245,12 +245,15 @@ def _execute_goals(
     backwards compatibility with existing tests.
     """
     # Fresh per-run components.
-    nav_agent  = NavigationAgent()
-    mine_agent = MiningAgent()
+    from agent.network.agents.crafting import CraftingAgent
+    nav_agent   = NavigationAgent()
+    mine_agent  = MiningAgent()
+    craft_agent = CraftingAgent()
 
     registry = AgentRegistry()
     registry.register(nav_agent)
     registry.register(mine_agent)
+    registry.register(craft_agent)
 
     blackboard = Blackboard()
     ledger     = SubtaskLedger()
