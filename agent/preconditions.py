@@ -115,31 +115,27 @@ def can_reach_count(
     target_count: int,
     wq: "WorldQuery",
     kb: "KnowledgeBase",
-) -> bool:
+) -> tuple[bool, int]:
     """
-    True if the player already has *target_count* of *item* in inventory, or
-    can reach that count by hand-crafting the deficit using items currently in
-    inventory (recursively).
+    Return ``(reachable, achievable)`` where *reachable* is True if the player
+    already has *target_count* of *item* in inventory or can reach that count by
+    hand-crafting the deficit, and *achievable* is the maximum count the player
+    can actually produce.
 
-    This asks "can we get to target_count?" not "can we craft one?". If the
-    player already has 40 of 50 needed, this checks whether the remaining 10
-    can be hand-crafted.
+    On success: ``(True, target_count)``.
+    On failure: ``(False, N)`` where N < target_count is the highest count
+    reachable given current inventory (0 if nothing at all is possible).
+
+    The achievable count is found by binary search over [0, target_count - 1]
+    so the cost is O(log(target_count)) recursive DFS calls rather than one.
+    Each call gets a fresh budget copy so budget mutations don't leak between
+    iterations.
 
     Hand-craftable means:
       - The recipe's category is "crafting" (the player character's category),
         AND "character" appears in the recipe's made_in list.
       - Recipes requiring machines (furnaces, assemblers, centrifuges, etc.)
         are never considered hand-craftable.
-
-    Implementation: depth-first search over the recipe graph.
-
-    A mutable budget dict (copy of player inventory) and a mutable visited set
-    (items currently on the active DFS path) are passed through the recursion.
-    Both are restored on backtrack, so each independent path through the recipe
-    graph sees a clean slate for items it didn't personally consume or visit.
-    This prevents the same resource being double-counted across sibling branches
-    (e.g. iron-plate consumed both directly and via gears) while still cutting
-    off genuine cycles within a single path.
 
     Parameters
     ----------
@@ -152,8 +148,23 @@ def can_reach_count(
     for slot in wq.state.player.inventory.slots:
         budget[slot.item] = budget.get(slot.item, 0) + slot.count
 
-    visited: set[str] = set()
-    return _can_reach_recursive(item, target_count, kb, budget, visited)
+    def _try(count: int) -> bool:
+        return _can_reach_recursive(item, count, kb, dict(budget), set())
+
+    if _try(target_count):
+        return True, target_count
+
+    # Binary search for the maximum achievable count in [0, target_count - 1].
+    lo, hi, best = 0, target_count - 1, 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if mid == 0 or _try(mid):
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return False, best
 
 
 def _hand_craftable_recipes(
@@ -272,6 +283,160 @@ def _recipe_can_cover(
     return True
 
 
+def _cached_stack_size(item: str, kb: "KnowledgeBase") -> int:
+    """
+    Return the stack size for *item* from the KnowledgeBase.
+
+    Uses ``ensure_item()`` so the value is fetched from Factorio on first
+    access and cached thereafter. Returns 1 (conservative) only if the item
+    is genuinely unknown to the game — i.e. ``ensure_item`` produced a
+    placeholder because the prototype query returned nothing.
+    """
+    return kb.ensure_item(item).stack_size
+
+
+def has_inventory_space(
+    item: str,
+    count: int,
+    inventory: dict[str, int],
+    total_slots: int,
+    kb: "KnowledgeBase",
+) -> bool:
+    """
+    True if *count* units of *item* will fit in the player's inventory after
+    ingredients have already been consumed.
+
+    Parameters
+    ----------
+    item        : The output item name (e.g. "iron-gear-wheel").
+    count       : Number of units expected to arrive in inventory.
+    inventory   : Current inventory as ``{item_name: count, ...}``, typically
+                  *after* ingredient costs have been subtracted so that freed
+                  slots are already accounted for. Items with count <= 0 are
+                  treated as absent. Negative values are treated as 0.
+    total_slots : Total inventory slot count for the player
+                  (from ``PlayerState.inventory_size``).
+    kb          : KnowledgeBase for stack-size lookups.
+
+    Returns False (conservatively) if *total_slots* is 0, which indicates the
+    bridge hasn't yet reported inventory size for this player.
+
+    Slot accounting
+    ---------------
+    Factorio inventory slots are type-homogeneous: each slot holds up to
+    ``stack_size`` units of one item type.
+
+    1. Count currently occupied slots from *post_consumption_inventory*,
+       including the slots already holding existing units of *item*.
+       Unknown items default to stack_size=1 — worst case, one slot each.
+    2. Compute free slots = total_slots - occupied.
+    3. Compute how many of *count* new units absorb into the partial stack
+       of *item* already present (if any). This does NOT free a slot — the
+       slot is already counted as occupied; it just holds more units.
+    4. Compute how many additional fresh slots the overflow beyond the
+       partial stack requires.
+    5. Return True iff slots_needed_for_overflow <= free_slots.
+    """
+    if total_slots <= 0:
+        return False
+
+    stack_size = _cached_stack_size(item, kb)
+    existing = max(0, inventory.get(item, 0))
+
+    # Occupied slots across all items, including existing units of the output
+    # item. The partial stack is NOT subtracted — it is already "taken".
+    occupied = 0
+    for inv_item, inv_count in inventory.items():
+        if inv_count <= 0:
+            continue
+        ss = _cached_stack_size(inv_item, kb)
+        occupied += math.ceil(inv_count / ss)
+
+    free_slots = total_slots - occupied
+
+    # Space available in the last partial stack of *item* already present.
+    # (stack_size - existing % stack_size) % stack_size gives 0 when the
+    # existing count is 0 or exactly fills a stack — both correctly signal
+    # that a fresh slot is needed.
+    partial_space = (stack_size - existing % stack_size) % stack_size
+
+    # Units that need fresh slots beyond the partial stack.
+    overflow = max(0, count - partial_space)
+    slots_needed = math.ceil(overflow / stack_size) if overflow > 0 else 0
+
+    return slots_needed <= free_slots
+
+
+def check_crafting_preconditions(
+    item: str,
+    count: int,
+    wq: "WorldQuery",
+    kb: "KnowledgeBase",
+) -> tuple[bool, bool]:
+    """
+    Return ``(can_craft, has_space)`` for crafting *count* units of *item*.
+
+    Combines ``can_reach_count`` and ``has_inventory_space`` in a single call,
+    computing the post-consumption inventory once for both checks.
+
+    Parameters
+    ----------
+    item  : Output item name (e.g. "iron-gear-wheel").
+    count : Number of units to craft.
+    wq    : Current WorldQuery (inventory, slot count).
+    kb    : KnowledgeBase (recipes, stack sizes).
+
+    Returns
+    -------
+    can_craft : True if the player has (or can hand-craft) sufficient
+                ingredients for *count* units of *item*.
+    has_space : True if the player's inventory will have room for the output
+                once ingredients are consumed. Always False when can_craft is
+                False — no point checking space if we can't craft.
+
+    The post-consumption inventory is derived by subtracting the total
+    ingredient cost (across all recipe runs needed) from the current inventory.
+    This is correct because Factorio consumes all ingredients the moment
+    crafting is queued.
+
+    Note: ``has_space`` uses ``PlayerState.inventory_size`` from *wq*. If the
+    bridge has not yet reported this value (it will be 0), ``has_space`` returns
+    False conservatively.
+    """
+    craftable, _ = can_reach_count(item, count, wq, kb)
+    if not craftable:
+        return False, False
+
+    # Build current inventory dict.
+    current: dict[str, int] = {}
+    for slot in wq.state.player.inventory.slots:
+        current[slot.item] = current.get(slot.item, 0) + slot.count
+
+    # Compute post-consumption inventory by subtracting ingredient costs.
+    # Use the first hand-craftable recipe — the same one can_reach_count used.
+    post = dict(current)
+    recipes = _hand_craftable_recipes(item, kb)
+    if recipes:
+        recipe = recipes[0]
+        yield_per_run = sum(
+            p.amount * p.probability
+            for p in recipe.products
+            if p.name == item and not p.is_fluid
+        )
+        if yield_per_run > 0:
+            have = current.get(item, 0)
+            still_needed = max(0, count - have)
+            runs_needed = math.ceil(still_needed / yield_per_run)
+            for ingredient in recipe.ingredients:
+                if not ingredient.is_fluid:
+                    cost = math.ceil(ingredient.amount * runs_needed)
+                    post[ingredient.name] = max(0, post.get(ingredient.name, 0) - cost)
+
+    total_slots = wq.state.player.inventory_size
+    space = has_inventory_space(item, count, post, total_slots, kb)
+    return True, space
+
+
 # ---------------------------------------------------------------------------
 # Building / placement
 # ---------------------------------------------------------------------------
@@ -365,7 +530,8 @@ def valid_actions(
 
         # --- CRAFTING ---
         elif isinstance(action, CraftItem):
-            if can_reach_count(action.recipe, action.count, wq, kb):
+            reachable, _ = can_reach_count(action.recipe, action.count, wq, kb)
+            if reachable:
                 result.append(action)
 
         # --- BUILDING ---

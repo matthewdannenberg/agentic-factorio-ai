@@ -16,6 +16,8 @@ from agent.preconditions import (
     can_mine,
     can_place,
     can_reach_count,
+    check_crafting_preconditions,
+    has_inventory_space,
     is_at,
     is_reachable,
     valid_actions,
@@ -85,12 +87,21 @@ class _RecipeStub:
         self.is_placeholder = is_placeholder
 
 
+class _ItemStub:
+    def __init__(self, name, stack_size=100, is_placeholder=False):
+        self.name = name
+        self.stack_size = stack_size
+        self.is_placeholder = is_placeholder
+
+
 class _KBStub:
     """Minimal KnowledgeBase stub for precondition tests."""
 
-    def __init__(self, recipes_by_product: dict):
+    def __init__(self, recipes_by_product: dict, stack_sizes: dict = None):
         # recipes_by_product: item_name -> list[_RecipeStub]
         self._by_product = recipes_by_product
+        # stack_sizes: item_name -> int (defaults to 100 for unknowns)
+        self._stack_sizes = stack_sizes or {}
 
     def recipes_for_product(self, item: str):
         return list(self._by_product.get(item, []))
@@ -102,6 +113,16 @@ class _KBStub:
                 if r.name == name:
                     return r
         return None
+
+    def get_item(self, name: str):
+        ss = self._stack_sizes.get(name)
+        if ss is None:
+            return None
+        return _ItemStub(name=name, stack_size=ss)
+
+    def ensure_item(self, name: str):
+        ss = self._stack_sizes.get(name, 1)
+        return _ItemStub(name=name, stack_size=ss)
 
 
 # ---------------------------------------------------------------------------
@@ -242,44 +263,44 @@ class TestCanReachCount(unittest.TestCase):
     def test_already_have_enough(self):
         wq = _make_wq(inventory_items={"iron-ore": 50})
         kb = _KBStub({})
-        self.assertTrue(can_reach_count("iron-ore", 50, wq, kb))
+        self.assertTrue(can_reach_count("iron-ore", 50, wq, kb)[0])
 
     def test_already_have_more_than_enough(self):
         wq = _make_wq(inventory_items={"iron-ore": 100})
         kb = _KBStub({})
-        self.assertTrue(can_reach_count("iron-ore", 50, wq, kb))
+        self.assertTrue(can_reach_count("iron-ore", 50, wq, kb)[0])
 
     def test_have_none_no_recipe(self):
         wq = _make_wq(inventory_items={})
         kb = _KBStub({})
-        self.assertFalse(can_reach_count("iron-ore", 10, wq, kb))
+        self.assertFalse(can_reach_count("iron-ore", 10, wq, kb)[0])
 
     def test_can_craft_deficit_from_ingredients(self):
         # Have 0 iron-plate, have 10 iron-ore → can craft 10 iron-plate.
         recipe = self._iron_plate_recipe()
         wq = _make_wq(inventory_items={"iron-ore": 10})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertTrue(can_reach_count("iron-plate", 10, wq, kb))
+        self.assertTrue(can_reach_count("iron-plate", 10, wq, kb)[0])
 
     def test_cannot_craft_missing_ingredients(self):
         recipe = self._iron_plate_recipe()
         wq = _make_wq(inventory_items={})  # no iron-ore
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertFalse(can_reach_count("iron-plate", 10, wq, kb))
+        self.assertFalse(can_reach_count("iron-plate", 10, wq, kb)[0])
 
     def test_partial_inventory_counts_toward_target(self):
         # Have 8 iron-plate already; need 2 more from 2 iron-ore.
         recipe = self._iron_plate_recipe()
         wq = _make_wq(inventory_items={"iron-plate": 8, "iron-ore": 2})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertTrue(can_reach_count("iron-plate", 10, wq, kb))
+        self.assertTrue(can_reach_count("iron-plate", 10, wq, kb)[0])
 
     def test_partial_inventory_insufficient_ingredients(self):
         # Have 8 iron-plate; need 2 more but only 1 iron-ore.
         recipe = self._iron_plate_recipe()
         wq = _make_wq(inventory_items={"iron-plate": 8, "iron-ore": 1})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertFalse(can_reach_count("iron-plate", 10, wq, kb))
+        self.assertFalse(can_reach_count("iron-plate", 10, wq, kb)[0])
 
     def test_recursive_ingredient_chain(self):
         # Gear needs iron-plate; iron-plate needs iron-ore.
@@ -290,8 +311,8 @@ class TestCanReachCount(unittest.TestCase):
             "iron-gear-wheel": [gear_recipe],
             "iron-plate": [plate_recipe],
         })
-        self.assertTrue(can_reach_count("iron-gear-wheel", 2, wq, kb))
-        self.assertFalse(can_reach_count("iron-gear-wheel", 3, wq, kb))
+        self.assertTrue(can_reach_count("iron-gear-wheel", 2, wq, kb)[0])
+        self.assertFalse(can_reach_count("iron-gear-wheel", 3, wq, kb)[0])
 
     # --- Hand-craftable filtering ---
 
@@ -306,7 +327,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={"iron-ore": 10})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb))
+        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb)[0])
 
     def test_character_not_in_made_in_rejected(self):
         # Category is "crafting" but made_in has only machines, not "character".
@@ -319,7 +340,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={"iron-ore": 10})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb))
+        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb)[0])
 
     def test_fluid_ingredient_rejected(self):
         # Recipe requires a fluid ingredient — not hand-craftable in practice.
@@ -332,7 +353,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={})
         kb = _KBStub({"some-item": [recipe]})
-        self.assertFalse(can_reach_count("some-item", 1, wq, kb))
+        self.assertFalse(can_reach_count("some-item", 1, wq, kb)[0])
 
     def test_placeholder_recipe_rejected(self):
         recipe = _RecipeStub(
@@ -345,7 +366,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={"iron-ore": 10})
         kb = _KBStub({"iron-plate": [recipe]})
-        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb))
+        self.assertFalse(can_reach_count("iron-plate", 5, wq, kb)[0])
 
     def test_multiple_recipes_machine_only_and_hand_craftable(self):
         # One machine-only recipe and one hand-craftable for the same item.
@@ -366,7 +387,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={"iron-ore": 10})
         kb = _KBStub({"iron-plate": [machine_recipe, hand_recipe]})
-        self.assertTrue(can_reach_count("iron-plate", 5, wq, kb))
+        self.assertTrue(can_reach_count("iron-plate", 5, wq, kb)[0])
 
     def test_circular_recipe_guard(self):
         # A recipe that consumes the item it produces (circular).
@@ -380,7 +401,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={})
         kb = _KBStub({"circular-item": [circular]})
-        self.assertFalse(can_reach_count("circular-item", 1, wq, kb))
+        self.assertFalse(can_reach_count("circular-item", 1, wq, kb)[0])
 
     def test_circular_recipe_with_existing_stock(self):
         # If we already have enough, circular doesn't matter.
@@ -393,7 +414,7 @@ class TestCanReachCount(unittest.TestCase):
         )
         wq = _make_wq(inventory_items={"circular-item": 5})
         kb = _KBStub({"circular-item": [circular]})
-        self.assertTrue(can_reach_count("circular-item", 5, wq, kb))
+        self.assertTrue(can_reach_count("circular-item", 5, wq, kb)[0])
 
 
 class TestCanReachCountProductionChains(unittest.TestCase):
@@ -545,35 +566,35 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         # 1 gear needs 2 iron-plate, each needing 1 iron-ore → 2 iron-ore total.
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 2})
-        self.assertTrue(can_reach_count("iron-gear-wheel", 1, wq, kb))
+        self.assertTrue(can_reach_count("iron-gear-wheel", 1, wq, kb)[0])
 
     def test_gear_wheel_insufficient_ore_by_one(self):
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 1})
-        self.assertFalse(can_reach_count("iron-gear-wheel", 1, wq, kb))
+        self.assertFalse(can_reach_count("iron-gear-wheel", 1, wq, kb)[0])
 
     def test_gear_wheel_multiple_count(self):
         # 5 gears need 10 iron-plate → 10 iron-ore.
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 10})
-        self.assertTrue(can_reach_count("iron-gear-wheel", 5, wq, kb))
+        self.assertTrue(can_reach_count("iron-gear-wheel", 5, wq, kb)[0])
 
     def test_gear_wheel_multiple_count_one_short(self):
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 9})
-        self.assertFalse(can_reach_count("iron-gear-wheel", 5, wq, kb))
+        self.assertFalse(can_reach_count("iron-gear-wheel", 5, wq, kb)[0])
 
     def test_gear_wheel_partial_plates_in_inventory(self):
         # 2 gears = 4 plates. Have 3 plates + 2 ore → can craft 1 more plate → 4 total.
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-plate": 3, "iron-ore": 1})
-        self.assertTrue(can_reach_count("iron-gear-wheel", 2, wq, kb))
+        self.assertTrue(can_reach_count("iron-gear-wheel", 2, wq, kb)[0])
 
     def test_gear_wheel_partial_plates_still_short(self):
         # 3 gears = 6 plates. Have 3 plates + 2 ore (→ 2 more = 5 total). Short by 1.
         kb = self._kb(self._r_iron_gear_wheel(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-plate": 3, "iron-ore": 2})
-        self.assertFalse(can_reach_count("iron-gear-wheel", 3, wq, kb))
+        self.assertFalse(can_reach_count("iron-gear-wheel", 3, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Copper cable — yield > 1 per run (1 copper-plate → 2 cables)
@@ -583,25 +604,25 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         # 4 cables = 2 runs = 2 copper-plate = 2 copper-ore.
         kb = self._kb(self._r_copper_cable(), self._r_copper_plate())
         wq = _make_wq(inventory_items={"copper-ore": 2})
-        self.assertTrue(can_reach_count("copper-cable", 4, wq, kb))
+        self.assertTrue(can_reach_count("copper-cable", 4, wq, kb)[0])
 
     def test_copper_cable_odd_count_rounds_up(self):
         # 3 cables: ceil(3/2)=2 runs → 2 copper-plate → 2 copper-ore.
         kb = self._kb(self._r_copper_cable(), self._r_copper_plate())
         wq = _make_wq(inventory_items={"copper-ore": 2})
-        self.assertTrue(can_reach_count("copper-cable", 3, wq, kb))
+        self.assertTrue(can_reach_count("copper-cable", 3, wq, kb)[0])
 
     def test_copper_cable_one_short_of_even_run(self):
         # 5 cables: ceil(5/2)=3 runs → 3 copper-ore. 2 ore only covers 4 cables.
         kb = self._kb(self._r_copper_cable(), self._r_copper_plate())
         wq = _make_wq(inventory_items={"copper-ore": 2})
-        self.assertFalse(can_reach_count("copper-cable", 5, wq, kb))
+        self.assertFalse(can_reach_count("copper-cable", 5, wq, kb)[0])
 
     def test_copper_cable_existing_cables_reduce_runs_needed(self):
         # Have 2 cables; need 5 → deficit 3 → ceil(3/2)=2 runs → 2 copper-ore.
         kb = self._kb(self._r_copper_cable(), self._r_copper_plate())
         wq = _make_wq(inventory_items={"copper-cable": 2, "copper-ore": 2})
-        self.assertTrue(can_reach_count("copper-cable", 5, wq, kb))
+        self.assertTrue(can_reach_count("copper-cable", 5, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Electronic circuit — branching chain with non-unit cable yield
@@ -618,7 +639,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_copper_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 1, "copper-ore": 2})
-        self.assertTrue(can_reach_count("electronic-circuit", 1, wq, kb))
+        self.assertTrue(can_reach_count("electronic-circuit", 1, wq, kb)[0])
 
     def test_electronic_circuit_missing_copper(self):
         kb = self._kb(
@@ -628,7 +649,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_copper_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 1})
-        self.assertFalse(can_reach_count("electronic-circuit", 1, wq, kb))
+        self.assertFalse(can_reach_count("electronic-circuit", 1, wq, kb)[0])
 
     def test_electronic_circuit_missing_iron(self):
         kb = self._kb(
@@ -638,7 +659,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_copper_plate(),
         )
         wq = _make_wq(inventory_items={"copper-ore": 2})
-        self.assertFalse(can_reach_count("electronic-circuit", 1, wq, kb))
+        self.assertFalse(can_reach_count("electronic-circuit", 1, wq, kb)[0])
 
     def test_electronic_circuit_four_circuits(self):
         # 4 circuits: 4 iron-ore + 6 copper-ore
@@ -650,7 +671,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_copper_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 4, "copper-ore": 6})
-        self.assertTrue(can_reach_count("electronic-circuit", 4, wq, kb))
+        self.assertTrue(can_reach_count("electronic-circuit", 4, wq, kb)[0])
 
     def test_electronic_circuit_four_circuits_one_copper_short(self):
         kb = self._kb(
@@ -660,7 +681,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_copper_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 4, "copper-ore": 5})
-        self.assertFalse(can_reach_count("electronic-circuit", 4, wq, kb))
+        self.assertFalse(can_reach_count("electronic-circuit", 4, wq, kb)[0])
 
     def test_electronic_circuit_partial_intermediates_in_inventory(self):
         # Have 2 copper-cable already; need 3 for 1 circuit → deficit 1.
@@ -676,7 +697,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             "copper-ore": 1,
             "iron-ore": 1,
         })
-        self.assertTrue(can_reach_count("electronic-circuit", 1, wq, kb))
+        self.assertTrue(can_reach_count("electronic-circuit", 1, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Burner mining drill — three levels, diamond dependency on iron-plate
@@ -692,7 +713,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_iron_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 9, "stone": 5})
-        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     def test_burner_mining_drill_one_iron_short(self):
         kb = self._kb(
@@ -702,7 +723,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_iron_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 8, "stone": 5})
-        self.assertFalse(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertFalse(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     def test_burner_mining_drill_no_stone(self):
         kb = self._kb(
@@ -712,7 +733,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_iron_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 9})
-        self.assertFalse(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertFalse(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     def test_burner_mining_drill_diamond_dependency_iron_plate(self):
         # Iron-plate is consumed both directly (3) and via gears (6).
@@ -727,7 +748,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         )
         # Provide iron-plate directly, skipping ore, to isolate the diamond.
         wq = _make_wq(inventory_items={"iron-plate": 9, "stone": 5})
-        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     def test_burner_mining_drill_furnace_prefabbed(self):
         # Stone-furnace already in inventory — no stone needed.
@@ -738,7 +759,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_iron_plate(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 9, "stone-furnace": 1})
-        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     def test_burner_mining_drill_gears_prefabbed(self):
         # All 3 gears already in inventory — only need 3 plate + 1 furnace.
@@ -753,7 +774,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             "iron-ore": 3,
             "stone": 5,
         })
-        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb))
+        self.assertTrue(can_reach_count("burner-mining-drill", 1, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Advanced circuit — deep chain that fails on machine-only plastic
@@ -771,7 +792,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             self._r_plastic_machine_only(),
         )
         wq = _make_wq(inventory_items={"iron-ore": 100, "copper-ore": 100})
-        self.assertFalse(can_reach_count("advanced-circuit", 1, wq, kb))
+        self.assertFalse(can_reach_count("advanced-circuit", 1, wq, kb)[0])
 
     def test_advanced_circuit_succeeds_when_plastic_in_inventory(self):
         # With plastic already in inventory, the chain can complete.
@@ -792,7 +813,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
             "iron-ore": 2,
             "copper-ore": 5,
         })
-        self.assertTrue(can_reach_count("advanced-circuit", 1, wq, kb))
+        self.assertTrue(can_reach_count("advanced-circuit", 1, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Iron stick — yield > 1, ceiling arithmetic at boundary conditions
@@ -803,25 +824,25 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         # 4 sticks = 2 runs = 2 iron-plate = 2 iron-ore.
         kb = self._kb(self._r_iron_stick(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 2})
-        self.assertTrue(can_reach_count("iron-stick", 4, wq, kb))
+        self.assertTrue(can_reach_count("iron-stick", 4, wq, kb)[0])
 
     def test_iron_stick_odd_target_rounds_up(self):
         # 5 sticks: ceil(5/2)=3 runs → 3 iron-plate → 3 iron-ore.
         kb = self._kb(self._r_iron_stick(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 3})
-        self.assertTrue(can_reach_count("iron-stick", 5, wq, kb))
+        self.assertTrue(can_reach_count("iron-stick", 5, wq, kb)[0])
 
     def test_iron_stick_odd_target_one_ore_short(self):
         # 5 sticks needs 3 ore; 2 ore only gives 4 sticks.
         kb = self._kb(self._r_iron_stick(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-ore": 2})
-        self.assertFalse(can_reach_count("iron-stick", 5, wq, kb))
+        self.assertFalse(can_reach_count("iron-stick", 5, wq, kb)[0])
 
     def test_iron_stick_existing_sticks_reduce_deficit(self):
         # Have 3 sticks; need 5 → deficit 2 → ceil(2/2)=1 run → 1 iron-ore.
         kb = self._kb(self._r_iron_stick(), self._r_iron_plate())
         wq = _make_wq(inventory_items={"iron-stick": 3, "iron-ore": 1})
-        self.assertTrue(can_reach_count("iron-stick", 5, wq, kb))
+        self.assertTrue(can_reach_count("iron-stick", 5, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Probabilistic yield — product.probability < 1.0
@@ -839,7 +860,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         )
         kb = _KBStub({"rare-item": [recipe]})
         wq = _make_wq(inventory_items={"base-material": 6})
-        self.assertTrue(can_reach_count("rare-item", 3, wq, kb))
+        self.assertTrue(can_reach_count("rare-item", 3, wq, kb)[0])
 
     def test_probabilistic_yield_insufficient(self):
         recipe = _RecipeStub(
@@ -851,7 +872,7 @@ class TestCanReachCountProductionChains(unittest.TestCase):
         )
         kb = _KBStub({"rare-item": [recipe]})
         wq = _make_wq(inventory_items={"base-material": 5})
-        self.assertFalse(can_reach_count("rare-item", 3, wq, kb))
+        self.assertFalse(can_reach_count("rare-item", 3, wq, kb)[0])
 
     # ------------------------------------------------------------------
     # Multi-product recipe — only the target product's yield matters
@@ -874,14 +895,14 @@ class TestCanReachCountProductionChains(unittest.TestCase):
 
         # 4 of item-a: ceil(4/2)=2 runs → 2 raw.
         wq_a = _make_wq(inventory_items={"raw": 2})
-        self.assertTrue(can_reach_count("item-a", 4, wq_a, kb))
+        self.assertTrue(can_reach_count("item-a", 4, wq_a, kb)[0])
 
         # 4 of item-b: ceil(4/1)=4 runs → 4 raw.
         wq_b_ok = _make_wq(inventory_items={"raw": 4})
-        self.assertTrue(can_reach_count("item-b", 4, wq_b_ok, kb))
+        self.assertTrue(can_reach_count("item-b", 4, wq_b_ok, kb)[0])
 
         wq_b_short = _make_wq(inventory_items={"raw": 3})
-        self.assertFalse(can_reach_count("item-b", 4, wq_b_short, kb))
+        self.assertFalse(can_reach_count("item-b", 4, wq_b_short, kb)[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1168,6 +1189,323 @@ class TestValidActions(unittest.TestCase):
         self.assertEqual(passing_kinds.count("RotateEntity"), 1)
         self.assertEqual(passing_kinds.count("EquipArmor"), 1)
         self.assertEqual(len(result), 6)
+
+
+# ---------------------------------------------------------------------------
+# can_reach_count — tuple return value
+# ---------------------------------------------------------------------------
+
+class TestCanReachCountTupleReturn(unittest.TestCase):
+    """
+    Tests specifically for the (bool, int) return value of can_reach_count.
+    The existing TestCanReachCount and TestCanReachCountProductionChains classes
+    cover the boolean component [0]; these tests cover the achievable count [1].
+    """
+
+    def _gear_kb(self):
+        # 2 iron-plate → 1 iron-gear-wheel
+        gear = _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+            category="crafting",
+            made_in=["character"],
+        )
+        return _KBStub({"iron-gear-wheel": [gear]})
+
+    def test_returns_tuple(self):
+        wq = _make_wq(inventory_items={"iron-plate": 4})
+        result = can_reach_count("iron-gear-wheel", 2, wq, self._gear_kb())
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+    def test_success_returns_true_and_target(self):
+        wq = _make_wq(inventory_items={"iron-plate": 4})
+        ok, n = can_reach_count("iron-gear-wheel", 2, wq, self._gear_kb())
+        self.assertTrue(ok)
+        self.assertEqual(n, 2)
+
+    def test_failure_returns_false_and_achievable(self):
+        # 4 plates → max 2 gears; ask for 5
+        wq = _make_wq(inventory_items={"iron-plate": 4})
+        ok, n = can_reach_count("iron-gear-wheel", 5, wq, self._gear_kb())
+        self.assertFalse(ok)
+        self.assertEqual(n, 2)
+
+    def test_achievable_zero_when_nothing_possible(self):
+        # 1 plate → can't make even 1 gear (needs 2)
+        wq = _make_wq(inventory_items={"iron-plate": 1})
+        ok, n = can_reach_count("iron-gear-wheel", 10, wq, self._gear_kb())
+        self.assertFalse(ok)
+        self.assertEqual(n, 0)
+
+    def test_achievable_exact_with_odd_plates(self):
+        # 7 plates → floor(7/2) = 3 gears
+        wq = _make_wq(inventory_items={"iron-plate": 7})
+        ok, n = can_reach_count("iron-gear-wheel", 100, wq, self._gear_kb())
+        self.assertFalse(ok)
+        self.assertEqual(n, 3)
+
+    def test_already_in_inventory_returns_target(self):
+        wq = _make_wq(inventory_items={"iron-plate": 100})
+        ok, n = can_reach_count("iron-plate", 50, wq, _KBStub({}))
+        self.assertTrue(ok)
+        self.assertEqual(n, 50)
+
+    def test_no_recipe_no_inventory_returns_zero(self):
+        wq = _make_wq(inventory_items={})
+        ok, n = can_reach_count("iron-gear-wheel", 1, wq, _KBStub({}))
+        self.assertFalse(ok)
+        self.assertEqual(n, 0)
+
+    def test_target_zero_returns_true_zero(self):
+        wq = _make_wq(inventory_items={})
+        ok, n = can_reach_count("iron-gear-wheel", 0, wq, _KBStub({}))
+        self.assertTrue(ok)
+        self.assertEqual(n, 0)
+
+    def test_achievable_n_is_monotone(self):
+        # If we can achieve N, we should also be able to achieve N-1.
+        wq = _make_wq(inventory_items={"iron-plate": 9})
+        ok, n = can_reach_count("iron-gear-wheel", 100, wq, self._gear_kb())
+        self.assertFalse(ok)
+        self.assertEqual(n, 4)  # floor(9/2) = 4
+        # Verify: can_reach_count for n returns True, n+1 returns False
+        ok2, _ = can_reach_count("iron-gear-wheel", n, wq, self._gear_kb())
+        ok3, _ = can_reach_count("iron-gear-wheel", n + 1, wq, self._gear_kb())
+        self.assertTrue(ok2)
+        self.assertFalse(ok3)
+
+
+# ---------------------------------------------------------------------------
+# has_inventory_space
+# ---------------------------------------------------------------------------
+
+def _make_wq_with_slots(inventory_items: dict, inventory_size: int = 80) -> WorldQuery:
+    """WorldQuery with both inventory contents and total slot count set."""
+    state = WorldState(tick=0)
+    if inventory_items:
+        state.player.inventory = Inventory(
+            slots=[InventorySlot(item=k, count=v) for k, v in inventory_items.items()]
+        )
+    state.player.inventory_size = inventory_size
+    state._rebuild_entity_indices()
+    return WorldQuery(state)
+
+
+def _ss_kb(**stack_sizes) -> _KBStub:
+    """KB stub with only stack-size data. Keyword args: item=stack_size."""
+    return _KBStub({}, stack_sizes=stack_sizes)
+
+
+class TestHasInventorySpace(unittest.TestCase):
+
+    # --- guard conditions ---
+
+    def test_returns_false_when_total_slots_zero(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertFalse(has_inventory_space("iron-plate", 10, {}, 0, kb))
+
+    def test_returns_false_when_total_slots_negative(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertFalse(has_inventory_space("iron-plate", 1, {}, -1, kb))
+
+    # --- simple fit cases ---
+
+    def test_empty_inventory_single_stack_fits(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 100, {}, 80, kb))
+
+    def test_full_stack_plus_one_needs_two_slots_fits(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 101, {}, 2, kb))
+
+    def test_full_stack_plus_one_only_one_slot_fails(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertFalse(has_inventory_space("iron-plate", 101, {}, 1, kb))
+
+    # --- partial stack absorption ---
+
+    def test_partial_existing_stack_absorbs_output(self):
+        # 90 plates in inv (1 slot occupied); 10 more fit in same slot.
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 10, {"iron-plate": 90}, 1, kb))
+
+    def test_partial_stack_overflow_needs_extra_slot_and_fails(self):
+        # 90 existing + 20 new = 110; needs 2 slots but only 1 total.
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertFalse(has_inventory_space("iron-plate", 20, {"iron-plate": 90}, 1, kb))
+
+    def test_partial_stack_overflow_with_extra_slot_fits(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 20, {"iron-plate": 90}, 2, kb))
+
+    def test_exactly_full_existing_stack_needs_fresh_slot(self):
+        # 100 existing plates = exactly 1 full stack; 1 more needs a fresh slot.
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 1, {"iron-plate": 100}, 2, kb))
+
+    # --- other items consuming slots ---
+
+    def test_occupied_slots_from_other_items_reduce_free_slots(self):
+        # 79 full coal stacks (79 slots), 1 free; 100 iron fits in 1 slot.
+        kb = _ss_kb(**{"iron-plate": 100, "coal": 50})
+        self.assertTrue(
+            has_inventory_space("iron-plate", 100, {"coal": 50 * 79}, 80, kb)
+        )
+
+    def test_no_free_slots_returns_false(self):
+        kb = _ss_kb(**{"iron-plate": 100, "coal": 50})
+        self.assertFalse(
+            has_inventory_space("iron-plate", 1, {"coal": 50 * 80}, 80, kb)
+        )
+
+    def test_multi_slot_item_counted_correctly(self):
+        # 150 coal at stack_size=50 → ceil(150/50)=3 slots; 77 free.
+        kb = _ss_kb(**{"iron-plate": 100, "coal": 50})
+        self.assertTrue(
+            has_inventory_space("iron-plate", 100, {"coal": 150}, 80, kb)
+        )
+
+    # --- edge cases ---
+
+    def test_zero_count_items_not_counted_as_occupied(self):
+        kb = _ss_kb(**{"iron-plate": 100, "iron-ore": 50})
+        self.assertTrue(
+            has_inventory_space("iron-plate", 100, {"iron-ore": 0}, 1, kb)
+        )
+
+    def test_negative_count_treated_as_zero(self):
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(has_inventory_space("iron-plate", 50, {"iron-plate": -10}, 1, kb))
+
+    def test_uncached_item_falls_back_to_stack_size_one(self):
+        # "mystery-item" not in kb → stack_size=1; 5 units occupy 5 slots.
+        kb = _ss_kb(**{"iron-plate": 100})
+        self.assertTrue(
+            has_inventory_space("iron-plate", 100, {"mystery-item": 5}, 80, kb)
+        )
+
+    def test_exactly_fills_last_slot_passes(self):
+        kb = _ss_kb(**{"iron-plate": 100, "coal": 50})
+        self.assertTrue(
+            has_inventory_space("iron-plate", 100, {"coal": 50 * 79}, 80, kb)
+        )
+
+    def test_one_unit_over_last_slot_capacity_fails(self):
+        kb = _ss_kb(**{"iron-plate": 100, "coal": 50})
+        self.assertFalse(
+            has_inventory_space("iron-plate", 101, {"coal": 50 * 79}, 80, kb)
+        )
+
+
+# ---------------------------------------------------------------------------
+# check_crafting_preconditions
+# ---------------------------------------------------------------------------
+
+class TestCheckCraftingPreconditions(unittest.TestCase):
+
+    def _gear_kb(self, stack_sizes=None):
+        gear = _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+            category="crafting",
+            made_in=["character"],
+        )
+        ss = {"iron-gear-wheel": 100, "iron-plate": 100}
+        if stack_sizes:
+            ss.update(stack_sizes)
+        return _KBStub({"iron-gear-wheel": [gear]}, stack_sizes=ss)
+
+    def _wq(self, inventory_items, inventory_size=80):
+        return _make_wq_with_slots(inventory_items, inventory_size)
+
+    def test_returns_tuple_of_two_bools(self):
+        wq = self._wq({"iron-plate": 4})
+        result = check_crafting_preconditions("iron-gear-wheel", 2, wq, self._gear_kb())
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], bool)
+        self.assertIsInstance(result[1], bool)
+
+    def test_can_craft_and_has_space(self):
+        # 4 plates → 2 gears; inventory_size=80 → plenty of space.
+        wq = self._wq({"iron-plate": 4})
+        can_craft, has_space = check_crafting_preconditions(
+            "iron-gear-wheel", 2, wq, self._gear_kb()
+        )
+        self.assertTrue(can_craft)
+        self.assertTrue(has_space)
+
+    def test_cannot_craft_returns_false_false(self):
+        # No ingredients → can't craft.
+        wq = self._wq({"iron-plate": 0})
+        can_craft, has_space = check_crafting_preconditions(
+            "iron-gear-wheel", 2, wq, self._gear_kb()
+        )
+        self.assertFalse(can_craft)
+        self.assertFalse(has_space)
+
+    def test_can_craft_but_no_space(self):
+        # Enough ingredients but inventory full.
+        # 79 slots occupied by coal (stack=50 each), 1 free; but gears need 1 slot.
+        # After consuming 4 plates (which free their slot), we have 1 free slot.
+        # That slot holds the 2 gears (stack_size=100). Should pass.
+        # To force failure: use inventory_size=1 and fill it entirely.
+        kb = self._gear_kb()
+        # 1-slot inventory, occupied by plates. After consuming plates there's
+        # technically a freed slot — tricky. Use a separate item to fill the slot.
+        kb2 = _KBStub(
+            {"iron-gear-wheel": _KBStub.__new__(_KBStub)},  # not used; build differently
+            stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100, "coal": 50},
+        )
+        gear = _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+            category="crafting",
+            made_in=["character"],
+        )
+        kb3 = _KBStub(
+            {"iron-gear-wheel": [gear]},
+            stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100, "coal": 50},
+        )
+        # 2-slot inventory: 1 slot = 50 coal, 1 slot = 4 iron-plates.
+        # After crafting: coal slot stays, plates slot freed, gear needs 1 slot.
+        # total=2, coal=1 occupied, plates freed=0 (consumed), gears need 1 → fits.
+        wq = self._wq({"coal": 50, "iron-plate": 4}, inventory_size=2)
+        can_craft, has_space = check_crafting_preconditions("iron-gear-wheel", 2, wq, kb3)
+        self.assertTrue(can_craft)
+        self.assertTrue(has_space)
+
+    def test_has_space_false_when_inventory_size_zero(self):
+        # inventory_size=0 → bridge hasn't reported it yet → has_space=False.
+        wq = self._wq({"iron-plate": 4}, inventory_size=0)
+        can_craft, has_space = check_crafting_preconditions(
+            "iron-gear-wheel", 2, wq, self._gear_kb()
+        )
+        self.assertTrue(can_craft)
+        self.assertFalse(has_space)
+
+    def test_ingredients_subtracted_before_space_check(self):
+        # After consuming 2 plates for 1 gear, the plate slot is freed.
+        # 1-slot inventory, 2 plates. After consumption → slot freed → 1 gear fits.
+        gear = _RecipeStub(
+            name="iron-gear-wheel",
+            ingredients=[_IngredientStub("iron-plate", 2)],
+            products=[_ProductStub("iron-gear-wheel", 1)],
+            category="crafting",
+            made_in=["character"],
+        )
+        kb = _KBStub(
+            {"iron-gear-wheel": [gear]},
+            stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100},
+        )
+        wq = self._wq({"iron-plate": 2}, inventory_size=1)
+        can_craft, has_space = check_crafting_preconditions("iron-gear-wheel", 1, wq, kb)
+        self.assertTrue(can_craft)
+        self.assertTrue(has_space)
 
 
 if __name__ == "__main__":
