@@ -1,5 +1,5 @@
 """
-world/knowledge.py
+world/knowledge/base.py
 
 KnowledgeBase — the agent's persistent, SQLite-backed store of learned game knowledge.
 

@@ -1,22 +1,22 @@
 """
-tests/unit/agent/test_self_model.py
+tests/unit/world/test_self_model.py
 
-Tests for agent/self_model.py
+Tests for world/model/self_model.py
 
-Run with:  python -m pytest tests/unit/agent/test_self_model.py -v
-       or:  python -m unittest tests.unit.agent.test_self_model
+Run with:  python -m pytest tests/unit/world/test_self_model.py -v
+       or:  python -m unittest tests.unit.world.test_self_model
 """
 
 from __future__ import annotations
 
 import unittest
 
-from world.state import Position
-from agent.self_model import (
+from world import (
     BoundingBox,
     EdgeType,
     NodeStatus,
     NodeType,
+    Position,
     SelfModel,
     SelfModelEdge,
     SelfModelNode,
@@ -223,7 +223,6 @@ class TestSelfModelPath(unittest.TestCase):
         self.assertEqual(path, [self.a.id])
 
     def test_directed_no_backward_path(self):
-        # Edges go A→B→C; there's no path from C→A
         path = self.sm.query_path(self.c.id, self.a.id)
         self.assertIsNone(path)
 
@@ -262,7 +261,7 @@ class TestSelfModelProducers(unittest.TestCase):
             self.sm.add_node(n)
 
         capacity = self.sm.find_capacity("iron-plate")
-        self.assertAlmostEqual(capacity, 30.0)   # only ACTIVE counts
+        self.assertAlmostEqual(capacity, 30.0)
 
     def test_find_capacity_zero_when_no_active(self):
         n = _node("prod", status=NodeStatus.CANDIDATE, throughput={"coal": 100.0})
@@ -351,7 +350,6 @@ class TestSelfModelSubgraph(unittest.TestCase):
 class TestSelfModelOverlappingNodes(unittest.TestCase):
     def setUp(self):
         self.sm = SelfModel()
-        # Three non-overlapping nodes in a row
         self.left   = _node("left",   node_type=NodeType.PRODUCTION_LINE)
         self.middle = _node("middle", node_type=NodeType.BELT_CORRIDOR)
         self.right  = _node("right",  node_type=NodeType.STORAGE)
@@ -368,7 +366,6 @@ class TestSelfModelOverlappingNodes(unittest.TestCase):
         self.assertIs(hits[0], self.left)
 
     def test_partial_overlap(self):
-        # Straddles left and middle
         bbox = BoundingBox(Position(5, 0), Position(25, 10))
         hits = self.sm.overlapping_nodes(bbox)
         ids = {n.id for n in hits}
@@ -377,7 +374,6 @@ class TestSelfModelOverlappingNodes(unittest.TestCase):
         self.assertNotIn(self.right.id, ids)
 
     def test_no_overlap(self):
-        # Sits in the gap between left and middle
         bbox = BoundingBox(Position(11, 0), Position(19, 10))
         self.assertEqual(self.sm.overlapping_nodes(bbox), [])
 
@@ -394,7 +390,7 @@ class TestSelfModelOverlappingNodes(unittest.TestCase):
         """overlapping_nodes detects but does not prevent overlapping adds."""
         overlapper = _node("overlapper")
         overlapper.bounding_box = BoundingBox(Position(0, 0), Position(10, 10))
-        self.sm.add_node(overlapper)   # should not raise
+        self.sm.add_node(overlapper)
         hits = self.sm.overlapping_nodes(BoundingBox(Position(0, 0), Position(10, 10)))
         self.assertEqual(len(hits), 2)
 

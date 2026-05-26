@@ -1,5 +1,5 @@
 """
-world/entities.py
+world/knowledge/entities.py
 
 Thin facade over KnowledgeBase for entity and resource queries.
 
@@ -19,7 +19,7 @@ Public API
 
 from __future__ import annotations
 
-from world.knowledge import (
+from world.knowledge.base import (
     EntityCategory,
     EntityRecord,
     FluidRecord,

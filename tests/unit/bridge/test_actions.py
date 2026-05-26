@@ -42,7 +42,7 @@ from bridge import (
     Wait,
     NoOp,
 )
-from world.state import Direction, Position
+from world import Direction, Position
 
 
 class TestActionCategory(unittest.TestCase):

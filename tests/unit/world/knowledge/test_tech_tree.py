@@ -13,9 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from world.knowledge import KnowledgeBase, TechRecord
-from world.state import ResearchState
-from world.tech_tree import TechTree
+from world import KnowledgeBase, TechRecord, ResearchState, TechTree
 
 
 # ---------------------------------------------------------------------------

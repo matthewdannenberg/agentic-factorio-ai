@@ -1,8 +1,8 @@
 """
-agent/self_model.py
+world/model/self_model.py
 
-SelfModel — the agent's persistent, graph-theoretic model of what it has built
-in the current run.
+SelfModel — the coordinator's persistent, graph-theoretic model of what has
+been built in the current run.
 
 The self-model is the execution network's durable, globally accurate record of
 factory infrastructure. It is not subject to scan-radius limitations — nodes are
@@ -13,9 +13,9 @@ Lifecycle
 ---------
 - Starts EMPTY at the beginning of each run. WorldState observation does not
   automatically populate it.
-- Agents write CANDIDATE nodes to the blackboard when they complete a
-  construction subtask.
-- The examination layer verifies candidates against WorldState and either
+- Agents emit SelfModelPatch objects (world/model/patch.py) when they complete
+  construction work. The coordinator applies these patches.
+- The examination layer verifies CANDIDATE nodes against WorldState and either
   promotes them to ACTIVE or discards them.
 - The self-model persists until run end. What crosses the run boundary into
   behavioral memory (spatial patterns, subgraph summaries) is defined in
@@ -29,6 +29,12 @@ node represents a multi-tile belt run connecting two areas.
 
 Edges represent relationships between nodes. They are directed (from_id → to_id)
 but queries may traverse in either direction.
+
+Access rules
+------------
+- Read and written by the coordinator only.
+- Agents emit SelfModelPatch objects; they never query or mutate this directly.
+- The examination layer calls promote_candidate / discard_candidate directly.
 
 Rules
 -----
@@ -46,7 +52,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from world.state import Position
+from world.observable.state import Position
 
 
 # ---------------------------------------------------------------------------
@@ -81,12 +87,12 @@ class NodeStatus(Enum):
 
 class EdgeType(Enum):
     """Relationship type between two self-model nodes."""
-    FEEDS_INTO        = auto()   # node A provides output consumed by node B
-    DEPENDS_ON        = auto()   # node A cannot operate without node B
-    CONNECTED_BY_BELT = auto()   # items flow between nodes via belt
-    CONNECTED_BY_RAIL = auto()   # items flow between nodes via train
-    DEFENDS           = auto()   # node A provides defence coverage for node B
-    SPATIALLY_ADJACENT = auto()  # nodes are geographically neighbouring
+    FEEDS_INTO         = auto()   # node A provides output consumed by node B
+    DEPENDS_ON         = auto()   # node A cannot operate without node B
+    CONNECTED_BY_BELT  = auto()   # items flow between nodes via belt
+    CONNECTED_BY_RAIL  = auto()   # items flow between nodes via train
+    DEFENDS            = auto()   # node A provides defence coverage for node B
+    SPATIALLY_ADJACENT = auto()   # nodes are geographically neighbouring
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +276,7 @@ class SelfModel(SelfModelProtocol):
     In-memory self-model graph backed by adjacency dicts.
 
     Nodes are stored in a dict keyed by NodeId. Edges are stored as a list
-    and duplicated into forward and reverse adjacency dicts for efficient
-    path queries.
+    and duplicated into a forward adjacency dict for efficient path queries.
 
     This is the production implementation for Phases 5-9. The examination
     layer (Phase 10) may extend it with richer indexing, but the interface
@@ -318,7 +323,6 @@ class SelfModel(SelfModelProtocol):
             raise ValueError(f"Source node {from_id!r} not found in self-model")
         if to_id not in self._nodes:
             raise ValueError(f"Target node {to_id!r} not found in self-model")
-        # Dedup check
         for existing_to, existing_type in self._adj.get(from_id, []):
             if existing_to == to_id and existing_type == edge_type:
                 return
@@ -361,7 +365,6 @@ class SelfModel(SelfModelProtocol):
             )
         del self._nodes[node_id]
         del self._adj[node_id]
-        # Remove from adjacency of other nodes and from edge list
         for nid in self._adj:
             self._adj[nid] = [
                 (to, et) for (to, et) in self._adj[nid] if to != node_id
@@ -384,12 +387,7 @@ class SelfModel(SelfModelProtocol):
         type: Optional[NodeType] = None,
         status: Optional[NodeStatus] = None,
     ) -> list[SelfModelNode]:
-        """
-        Return nodes matching all supplied filters.
-
-        None for a filter means 'match all'. Both type and status can be
-        filtered independently or together.
-        """
+        """Return nodes matching all supplied filters. None = match all."""
         result = []
         for node in self._nodes.values():
             if type is not None and node.type != type:
@@ -433,9 +431,6 @@ class SelfModel(SelfModelProtocol):
         """
         Return all nodes whose throughput dict contains the given item
         with a positive rate.
-
-        Used by the coordinator to check whether a prerequisite item is
-        already being produced before deriving a new production subtask.
         """
         return [
             node for node in self._nodes.values()
@@ -445,9 +440,7 @@ class SelfModel(SelfModelProtocol):
     def find_capacity(self, item: str) -> float:
         """
         Return the total throughput (units per minute) for the given item
-        across all ACTIVE nodes.
-
-        CANDIDATE, DEGRADED, and INACTIVE nodes are excluded.
+        across all ACTIVE nodes only.
         """
         return sum(
             node.throughput.get(item, 0.0)
@@ -459,12 +452,8 @@ class SelfModel(SelfModelProtocol):
         """
         Return all nodes whose bounding box overlaps the given bbox.
 
-        Used by the spatial-logistics agent to detect conflicts before
-        placing new infrastructure, and by the examination layer to flag
-        unexpected overlaps during reconciliation.
-
-        Enforcement of non-overlap invariants is the caller's responsibility —
-        this method only detects; it does not prevent or reject overlaps.
+        Detects conflicts but does not prevent them — enforcement is the
+        caller's responsibility.
         """
         return [
             node for node in self._nodes.values()
@@ -482,9 +471,7 @@ class SelfModel(SelfModelProtocol):
     def subgraph(self, node_ids: list[NodeId]) -> "SelfModel":
         """
         Return a new SelfModel containing only the specified nodes and
-        the edges between them.
-
-        Nodes not found in this graph are silently skipped.
+        the edges between them. Nodes not found are silently skipped.
         """
         id_set = set(node_ids)
         sub = SelfModel()

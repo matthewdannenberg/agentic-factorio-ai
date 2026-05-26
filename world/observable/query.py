@@ -1,5 +1,5 @@
 """
-world/query.py
+world/observable/query.py
 
 WorldQuery — the sole read interface for WorldState.
 
@@ -58,7 +58,7 @@ from __future__ import annotations
 import logging
 from typing import Optional, TYPE_CHECKING
 
-from world.state import (
+from world.observable.state import (
     EntityState,
     EntityStatus,
     InserterState,
@@ -69,7 +69,7 @@ from world.state import (
 )
 
 if TYPE_CHECKING:
-    from world.knowledge import KnowledgeBase
+    from world.knowledge.base import KnowledgeBase
 
 log = logging.getLogger(__name__)
 

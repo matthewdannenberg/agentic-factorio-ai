@@ -37,7 +37,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from world.state import (
+from world.observable.state import (
     BeltLane,
     BeltSegment,
     BiterBase,

@@ -13,15 +13,15 @@ import unittest
 from unittest.mock import MagicMock
 
 from bridge import StateParser
-from world.query import WorldQuery
-from world.state import (
+from world import WorldQuery
+from world import (
     BeltLane,
     Direction,
     EntityStatus,
     InserterState,
     Position,
-    WorldState,
 )
+from world.observable.state import WorldState  # white-box: tests WorldState internals directly
 
 class TestStateParserFullParse(unittest.TestCase):
     def setUp(self):

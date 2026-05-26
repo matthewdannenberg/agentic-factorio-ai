@@ -15,7 +15,7 @@ Rules
   execution layer can filter by context (e.g. no COMBAT actions when biters off,
   no VEHICLE actions when not in a vehicle).
 - The `kind` property is the class name — used as a discriminator by the executor.
-- All coordinate types use Position from world/state.py to keep units consistent.
+- All coordinate types use Position from world/observable/state.py to keep units consistent.
 
 Scope of this file
 ------------------
@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from world.state import Direction, Position
+from world.observable.state import Direction, Position
 
 
 # ---------------------------------------------------------------------------

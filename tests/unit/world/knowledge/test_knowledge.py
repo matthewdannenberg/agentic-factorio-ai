@@ -1,7 +1,7 @@
 """
 tests/unit/world/test_knowledge.py
 
-Unit tests for world/knowledge.py — SQLite-backed KnowledgeBase.
+Unit tests for world/knowledge/base.py — SQLite-backed KnowledgeBase.
 
 Windows compatibility note
 --------------------------
@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from world.knowledge import (
+from world.knowledge.base import (
     EntityCategory,
     EntityRecord,
     FluidRecord,

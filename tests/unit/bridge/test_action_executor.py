@@ -41,7 +41,7 @@ from bridge import (
     DriveVehicle,
 )
 from tests.fixtures import MockRconClient
-from world.state import Direction, Position
+from world import Direction, Position
 
 
 class TestActionExecutor(unittest.TestCase):

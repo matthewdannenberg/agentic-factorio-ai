@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import unittest
 
-from world.production_tracker import ProductionSummary, ProductionTracker
-from world.state import EntityStatus
+from world import ProductionSummary, ProductionTracker, EntityStatus
 from tests.fixtures import make_world_query, make_inventory_entity
 
 

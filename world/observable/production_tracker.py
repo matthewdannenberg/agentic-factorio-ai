@@ -1,5 +1,5 @@
 """
-world/production_tracker.py
+world/observable/production_tracker.py
 
 ProductionTracker — tracks item throughput over time by observing successive
 WorldQuery snapshots.
@@ -24,10 +24,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable, TYPE_CHECKING
 
-from world.state import EntityStatus
+from world.observable.state import EntityStatus
 
 if TYPE_CHECKING:
-    from world.query import WorldQuery
+    from world.observable.query import WorldQuery
 
 
 # ---------------------------------------------------------------------------

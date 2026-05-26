@@ -1,5 +1,5 @@
 """
-world/tech_tree.py
+world/knowledge/tech_tree.py
 
 TechTree — queries the KnowledgeBase for research dependency data.
 
@@ -16,8 +16,8 @@ call. The KnowledgeBase handles caching and persistence.
 
 from __future__ import annotations
 
-from world.knowledge import KnowledgeBase, TechRecord
-from world.state import ResearchState
+from world.knowledge.base import KnowledgeBase, TechRecord
+from world.observable.state import ResearchState
 
 
 class TechTree:

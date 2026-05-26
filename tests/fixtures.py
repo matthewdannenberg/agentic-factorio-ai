@@ -27,16 +27,16 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from world.state import (
+from world import (
     EntityState,
     EntityStatus,
     Inventory,
     InventorySlot,
     LogisticsState,
     Position,
-    WorldState,
+    WorldQuery,
 )
-from world.query import WorldQuery
+from world.observable.state import WorldState
 
 
 # ---------------------------------------------------------------------------

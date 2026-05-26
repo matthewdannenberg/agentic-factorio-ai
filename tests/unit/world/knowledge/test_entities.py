@@ -24,14 +24,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from world.entities import (
+from world.knowledge.entities import (
     EntityCategory,
     EntityRecord,
     ResourceRecord,
     ResourceRegistry,
     get_entity_metadata,
 )
-from world.knowledge import KnowledgeBase
+from world.knowledge.base import KnowledgeBase
 
 
 def _make_kb(tmp_path: Path) -> KnowledgeBase:
@@ -151,7 +151,7 @@ class TestResourceRegistryHelpers(unittest.TestCase):
 
     def test_is_fluid_reflects_record_value(self):
         # Inject a non-placeholder record directly to test facade passthrough
-        from world.knowledge import ResourceRecord as KBResourceRecord
+        from world.knowledge.base import ResourceRecord as KBResourceRecord
         fluid_record = KBResourceRecord(
             name="crude-oil", is_fluid=True, is_infinite=True,
             display_name="Crude Oil", is_placeholder=False,
@@ -160,7 +160,7 @@ class TestResourceRegistryHelpers(unittest.TestCase):
         self.assertTrue(self.reg.is_fluid("crude-oil"))
 
     def test_is_infinite_reflects_record_value(self):
-        from world.knowledge import ResourceRecord as KBResourceRecord
+        from world.knowledge.base import ResourceRecord as KBResourceRecord
         fluid_record = KBResourceRecord(
             name="crude-oil", is_fluid=True, is_infinite=True,
             display_name="Crude Oil", is_placeholder=False,
@@ -333,7 +333,7 @@ class TestGetEntityMetadataSafety(unittest.TestCase):
     def test_prototype_category_passthrough(self):
         # Inject a fully-populated EntityRecord to verify the facade returns
         # whatever the KB gives it, including non-OTHER categories.
-        from world.knowledge import EntityRecord as KBEntityRecord
+        from world.knowledge.base import EntityRecord as KBEntityRecord
         assembly_record = KBEntityRecord(
             name="assembling-machine-2",
             proto_type="assembling-machine",

@@ -1,5 +1,5 @@
 """
-world/writer.py
+world/observable/writer.py
 
 WorldWriter — the sole mutation interface for WorldState.
 
@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from world.state import (
+from world.observable.state import (
     DamagedEntity,
     DestroyedEntity,
     EntityState,

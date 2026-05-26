@@ -3,9 +3,9 @@ tests/integration/test_StateParser_WorldState.py
 
 Integration tests for StateParser with WorldState + WorldQuery.
 
-StateParser still constructs WorldState snapshots directly (that's the bridge's
-legitimate construction path). Tests now verify the output through WorldQuery,
-which is the correct consumer interface.
+StateParser constructs WorldState snapshots directly — that is the bridge's
+legitimate construction path. Tests verify the output through WorldQuery,
+which is the correct consumer interface for all other layers.
 
 Run with:  python tests/integration/test_StateParser_WorldState.py
 """
@@ -15,9 +15,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from bridge.state_parser import StateParser
-from world.query import WorldQuery
-from world.state import EntityStatus
+from bridge import StateParser
+from world import WorldQuery, EntityStatus
 
 
 class TestStateParserWorldQueryAPI(unittest.TestCase):

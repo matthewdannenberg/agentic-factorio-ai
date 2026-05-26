@@ -1,11 +1,11 @@
 """
-world/state.py
+world/observable/state.py
 
 WorldState — the agent's belief-state snapshot of the game at a point in time.
 
 Produced by:  bridge/state_parser.py  (constructs fresh snapshots)
-Mutated by:   world/writer.py         (WorldWriter — the ONLY permitted mutation path)
-Read by:      world/query.py          (WorldQuery — the ONLY permitted read path)
+Mutated by:   world/observable/writer.py         (WorldWriter — the ONLY permitted mutation path)
+Read by:      world/observable/query.py          (WorldQuery — the ONLY permitted read path)
 
 Rules:
 - Pure data. No LLM calls. No RCON. No side effects.

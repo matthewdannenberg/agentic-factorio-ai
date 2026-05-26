@@ -1,7 +1,7 @@
 """
 tests/unit/world/test_state.py
 
-Tests for world/state.py, world/query.py, and world/writer.py.
+Tests for world/observable/state.py, world/observable/query.py, and world/observable/writer.py.
 
 This file tests WorldState internals directly (indices, fields) — that is
 intentional, this is the unit test for those modules.  Other test files that
@@ -22,16 +22,17 @@ from __future__ import annotations
 
 import unittest
 
-from world.state import (
+from world import (
     BeltLane, BeltSegment, BiterBase, DamagedEntity, DestroyedEntity,
     Direction, EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
     ResourcePatch, ResearchState,
-    ThreatState, WorldState,
+    ThreatState,
+    WorldQuery,
+    WorldWriter,
 )
-from world.query import WorldQuery
-from world.writer import WorldWriter
+from world.observable.state import WorldState  # white-box: tests WorldState internals directly
 
 
 # ---------------------------------------------------------------------------
