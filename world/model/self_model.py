@@ -1,497 +1,211 @@
 """
 world/model/self_model.py
 
-SelfModel — the coordinator's persistent, graph-theoretic model of what has
-been built in the current run.
+SelfModel -- the coordinator's persistent, layered model of the game world.
 
-The self-model is the execution network's durable, globally accurate record of
-factory infrastructure. It is not subject to scan-radius limitations — nodes are
-added and updated by the coordinator and examination layer as structures are built
-and verified, not by reading entity scan data directly.
+Contains two layers:
+  factory  : FactoryGraph -- directed graph of factory components and flows.
+  chunks   : ChunkGrid    -- spatial index of charted map chunks (stub).
+
+The coordinator accesses layers directly (sm.factory.find_producers(...)) for
+queries, and applies mutations via SelfModel.apply(patch), which routes each
+SelfModelPatch to the correct layer's apply logic.
 
 Lifecycle
 ---------
-- Starts EMPTY at the beginning of each run. WorldState observation does not
-  automatically populate it.
-- Agents emit SelfModelPatch objects (world/model/patch.py) when they complete
-  construction work. The coordinator applies these patches.
-- The examination layer verifies CANDIDATE nodes against WorldState and either
-  promotes them to ACTIVE or discards them.
-- The self-model persists until run end. What crosses the run boundary into
-  behavioral memory (spatial patterns, subgraph summaries) is defined in
-  Phase 10.
-
-Node and edge semantics
------------------------
-Nodes represent logical factory units — not individual entities. A PRODUCTION_LINE
-node might span a row of assemblers, inserters, and belt segments. A BELT_CORRIDOR
-node represents a multi-tile belt run connecting two areas.
-
-Edges represent relationships between nodes. They are directed (from_id → to_id)
-but queries may traverse in either direction.
+- Starts empty at the beginning of each run.
+- Agents emit SelfModelPatch objects; the coordinator calls apply().
+- The examination layer calls layer methods directly (promote_candidate,
+  update_throughput, update_io_points) after verifying WorldState.
+- What crosses the run boundary into behavioral memory is defined in Phase 10.
 
 Access rules
 ------------
-- Read and written by the coordinator only.
-- Agents emit SelfModelPatch objects; they never query or mutate this directly.
-- The examination layer calls promote_candidate / discard_candidate directly.
-
-Rules
------
-- Pure data + graph operations. No LLM calls. No RCON. No WorldQuery reads.
-- The concrete SelfModel implementation is injected; callers depend only on
-  SelfModelProtocol.
-- Thread safety is not a requirement at this stage.
+- SelfModel is owned and queried exclusively by the coordinator.
+- Agents may not query SelfModel; they emit patches instead.
+- The examination layer has direct write access (it IS the verification step).
+- Nothing in this module imports from execution/, planning/, or llm/.
 """
 
 from __future__ import annotations
 
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Optional
+import logging
 
-from world.observable.state import Position
+from world.model.layers.chunk_grid import ChunkGrid
+from world.model.layers.factory_graph import (
+    EdgeType,
+    FactoryEdge,
+    FactoryGraph,
+    FactoryNode,
+    NodeStatus,
+    NodeType,
+    ProcessType,
+)
+from world.model.patch import SelfModelPatch
+from world.model.types import BoundingBox, IOPoint, NodeId
 
-
-# ---------------------------------------------------------------------------
-# Type alias
-# ---------------------------------------------------------------------------
-
-NodeId = str   # UUID string
-
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
-class NodeType(Enum):
-    """Logical category of a self-model node."""
-    PRODUCTION_LINE  = auto()   # assemblers/furnaces/refineries producing an item
-    RESOURCE_SITE    = auto()   # miners on a resource patch
-    BELT_CORRIDOR    = auto()   # belt run connecting two points / areas
-    POWER_GRID       = auto()   # power generation + distribution network
-    DEFENDED_REGION  = auto()   # region with active turret coverage (Phase 9+)
-    TRAIN_STATION    = auto()   # train stop + associated infrastructure
-    STORAGE          = auto()   # dedicated buffer/storage area
+log = logging.getLogger(__name__)
 
 
-class NodeStatus(Enum):
-    """Verification state of a self-model node."""
-    CANDIDATE = auto()   # written by agents; not yet examination-verified
-    ACTIVE    = auto()   # examination-confirmed and currently operating
-    DEGRADED  = auto()   # examination found issues (low throughput, damage)
-    INACTIVE  = auto()   # confirmed to exist but currently not operating
-
-
-class EdgeType(Enum):
-    """Relationship type between two self-model nodes."""
-    FEEDS_INTO         = auto()   # node A provides output consumed by node B
-    DEPENDS_ON         = auto()   # node A cannot operate without node B
-    CONNECTED_BY_BELT  = auto()   # items flow between nodes via belt
-    CONNECTED_BY_RAIL  = auto()   # items flow between nodes via train
-    DEFENDS            = auto()   # node A provides defence coverage for node B
-    SPATIALLY_ADJACENT = auto()   # nodes are geographically neighbouring
-
-
-# ---------------------------------------------------------------------------
-# BoundingBox
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BoundingBox:
+class SelfModel:
     """
-    Axis-aligned bounding box in game-tile coordinates.
+    Layered self-model container.
 
-    Used to describe the spatial extent of a self-model node. Coordinates
-    use the same system as Position (x increases east, y increases south
-    in Factorio's convention).
-    """
-    top_left: Position
-    bottom_right: Position
-
-    def contains(self, position: Position) -> bool:
-        """True if the given position falls within (or on) this box."""
-        return (
-            self.top_left.x <= position.x <= self.bottom_right.x
-            and self.top_left.y <= position.y <= self.bottom_right.y
-        )
-
-    def overlaps(self, other: "BoundingBox") -> bool:
-        """True if this box shares any area with another box."""
-        return (
-            self.top_left.x <= other.bottom_right.x
-            and self.bottom_right.x >= other.top_left.x
-            and self.top_left.y <= other.bottom_right.y
-            and self.bottom_right.y >= other.top_left.y
-        )
-
-    @property
-    def width(self) -> float:
-        return self.bottom_right.x - self.top_left.x
-
-    @property
-    def height(self) -> float:
-        return self.bottom_right.y - self.top_left.y
-
-    def __repr__(self) -> str:
-        return (
-            f"BoundingBox({self.top_left} → {self.bottom_right}, "
-            f"{self.width:.0f}×{self.height:.0f})"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Node and Edge dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SelfModelNode:
-    """
-    A logical factory unit in the self-model graph.
-
-    Fields
-    ------
-    id              : NodeId (UUID string), auto-generated.
-    type            : Logical category of this unit.
-    status          : Verification state (CANDIDATE → ACTIVE/DEGRADED/INACTIVE).
-    bounding_box    : Spatial extent in game tiles.
-    label           : Human-readable name (e.g. "iron-plate smelter A").
-    throughput      : Dict mapping item name → units per minute.
-                      For production lines: items produced per minute.
-                      For resource sites: ore extracted per minute.
-                      Empty for belt corridors, power grids, etc.
-    created_at      : Game tick at which this node was first written.
-    last_verified_at: Game tick of the most recent examination verification.
-                      0 if never verified (CANDIDATE nodes).
-    """
-    type: NodeType
-    status: NodeStatus
-    bounding_box: BoundingBox
-    label: str
-    throughput: dict[str, float]
-    created_at: int
-    last_verified_at: int = 0
-    id: NodeId = field(default_factory=lambda: str(uuid.uuid4()))
-
-    def __repr__(self) -> str:
-        return (
-            f"SelfModelNode({self.id[:8]}… type={self.type.name} "
-            f"status={self.status.name} label={self.label!r})"
-        )
-
-
-@dataclass
-class SelfModelEdge:
-    """A directed relationship between two self-model nodes."""
-    from_id: NodeId
-    to_id: NodeId
-    edge_type: EdgeType
-
-    def __repr__(self) -> str:
-        return (
-            f"SelfModelEdge({self.from_id[:8]}… "
-            f"→[{self.edge_type.name}]→ {self.to_id[:8]}…)"
-        )
-
-
-# ---------------------------------------------------------------------------
-# SelfModelProtocol
-# ---------------------------------------------------------------------------
-
-class SelfModelProtocol:
-    """
-    Protocol for the factory self-model graph.
-
-    Callers depend only on this interface. The concrete implementation is
-    injected at startup. Swapping the backing store (e.g. from in-memory
-    adjacency to a graph database) requires substituting the injected object,
-    not restructuring callers.
-
-    All methods that query nodes respect the current status of each node.
-    Candidate nodes are included in query results unless explicitly filtered
-    out — the examination layer needs to see them.
-    """
-
-    def add_node(self, node: SelfModelNode) -> NodeId:
-        raise NotImplementedError
-
-    def add_edge(
-        self,
-        from_id: NodeId,
-        to_id: NodeId,
-        edge_type: EdgeType,
-    ) -> None:
-        raise NotImplementedError
-
-    def get_node(self, node_id: NodeId) -> Optional[SelfModelNode]:
-        raise NotImplementedError
-
-    def query_nodes(
-        self,
-        type: Optional[NodeType] = None,
-        status: Optional[NodeStatus] = None,
-    ) -> list[SelfModelNode]:
-        raise NotImplementedError
-
-    def query_path(
-        self,
-        from_id: NodeId,
-        to_id: NodeId,
-    ) -> Optional[list[NodeId]]:
-        raise NotImplementedError
-
-    def find_producers(self, item: str) -> list[SelfModelNode]:
-        raise NotImplementedError
-
-    def find_capacity(self, item: str) -> float:
-        raise NotImplementedError
-
-    def subgraph(self, node_ids: list[NodeId]) -> "SelfModel":
-        raise NotImplementedError
-
-    def promote_candidate(self, node_id: NodeId) -> None:
-        raise NotImplementedError
-
-    def discard_candidate(self, node_id: NodeId) -> None:
-        raise NotImplementedError
-
-    def overlapping_nodes(self, bbox: BoundingBox) -> list[SelfModelNode]:
-        raise NotImplementedError
-
-    def all_nodes(self) -> list[SelfModelNode]:
-        raise NotImplementedError
-
-    def all_edges(self) -> list[SelfModelEdge]:
-        raise NotImplementedError
-
-
-# ---------------------------------------------------------------------------
-# Concrete implementation
-# ---------------------------------------------------------------------------
-
-class SelfModel(SelfModelProtocol):
-    """
-    In-memory self-model graph backed by adjacency dicts.
-
-    Nodes are stored in a dict keyed by NodeId. Edges are stored as a list
-    and duplicated into a forward adjacency dict for efficient path queries.
-
-    This is the production implementation for Phases 5-9. The examination
-    layer (Phase 10) may extend it with richer indexing, but the interface
-    remains the same.
+    Attributes
+    ----------
+    factory : FactoryGraph
+        The factory component graph. Primary coordination data structure.
+    chunks  : ChunkGrid
+        Spatial index of charted chunks. Stub until bridge supports it.
     """
 
     def __init__(self) -> None:
-        self._nodes: dict[NodeId, SelfModelNode] = {}
-        self._edges: list[SelfModelEdge] = []
-        # Forward adjacency: from_id -> list of (to_id, EdgeType)
-        self._adj: dict[NodeId, list[tuple[NodeId, EdgeType]]] = {}
+        self.factory = FactoryGraph()
+        self.chunks = ChunkGrid()
 
     # ------------------------------------------------------------------
-    # Mutation
+    # Patch application
     # ------------------------------------------------------------------
 
-    def add_node(self, node: SelfModelNode) -> NodeId:
+    def apply(self, patch: SelfModelPatch) -> None:
         """
-        Add a node to the graph and return its id.
+        Apply a SelfModelPatch to the appropriate layer.
 
-        If a node with the same id already exists it is replaced. Edges
-        referencing the old node are preserved.
+        Logs a warning and returns without raising for:
+          - Unknown layer names
+          - Actions with missing required fields
+          - ValueErrors from the layer (e.g. node not found)
+
+        This keeps the coordinator's tick loop safe from malformed patches
+        emitted by agents.
         """
-        self._nodes[node.id] = node
-        if node.id not in self._adj:
-            self._adj[node.id] = []
-        return node.id
+        try:
+            if patch.layer == "factory":
+                self._apply_factory(patch)
+            elif patch.layer == "chunks":
+                self._apply_chunks(patch)
+            else:
+                log.warning(
+                    "SelfModel.apply: unknown layer %r (action=%r source=%r)",
+                    patch.layer, patch.action, patch.source_agent,
+                )
+        except (ValueError, TypeError) as exc:
+            log.warning(
+                "SelfModel.apply: failed to apply %r from %r: %s",
+                patch.action, patch.source_agent, exc,
+            )
 
-    def add_edge(
-        self,
-        from_id: NodeId,
-        to_id: NodeId,
-        edge_type: EdgeType,
-    ) -> None:
-        """
-        Add a directed edge from_id → to_id.
+    def _apply_factory(self, patch: SelfModelPatch) -> None:
+        action = patch.action
 
-        Both nodes must already exist. Duplicate edges (same from/to/type)
-        are silently ignored.
-
-        Raises ValueError if either node is not found.
-        """
-        if from_id not in self._nodes:
-            raise ValueError(f"Source node {from_id!r} not found in self-model")
-        if to_id not in self._nodes:
-            raise ValueError(f"Target node {to_id!r} not found in self-model")
-        for existing_to, existing_type in self._adj.get(from_id, []):
-            if existing_to == to_id and existing_type == edge_type:
+        if action == "add_node":
+            if patch.node is None:
+                log.warning("add_node patch missing `node` field")
                 return
-        edge = SelfModelEdge(from_id=from_id, to_id=to_id, edge_type=edge_type)
-        self._edges.append(edge)
-        self._adj.setdefault(from_id, []).append((to_id, edge_type))
+            self.factory.add_node(patch.node)
 
-    def promote_candidate(self, node_id: NodeId) -> None:
-        """
-        Promote a CANDIDATE node to ACTIVE.
-
-        Called by the examination layer after verifying the node against
-        WorldState.
-
-        Raises ValueError if the node is not found or not CANDIDATE.
-        """
-        node = self._nodes.get(node_id)
-        if node is None:
-            raise ValueError(f"Node {node_id!r} not found")
-        if node.status != NodeStatus.CANDIDATE:
-            raise ValueError(
-                f"Node {node_id!r} has status {node.status.name}, expected CANDIDATE"
+        elif action == "add_edge":
+            if None in (patch.from_id, patch.to_id, patch.edge_type):
+                log.warning("add_edge patch missing from_id, to_id, or edge_type")
+                return
+            self.factory.add_edge(
+                patch.from_id, patch.to_id, patch.edge_type,
+                item=patch.item, rate=patch.rate, transport=patch.transport,
             )
-        node.status = NodeStatus.ACTIVE
 
-    def discard_candidate(self, node_id: NodeId) -> None:
-        """
-        Remove a CANDIDATE node that failed examination verification.
+        elif action == "promote":
+            if patch.node_id is None:
+                log.warning("promote patch missing `node_id` field")
+                return
+            self.factory.promote_candidate(patch.node_id)
 
-        Also removes all edges that reference this node.
+        elif action == "discard":
+            if patch.node_id is None:
+                log.warning("discard patch missing `node_id` field")
+                return
+            self.factory.discard_candidate(patch.node_id)
 
-        Raises ValueError if the node is not found or not CANDIDATE.
-        """
-        node = self._nodes.get(node_id)
-        if node is None:
-            raise ValueError(f"Node {node_id!r} not found")
-        if node.status != NodeStatus.CANDIDATE:
-            raise ValueError(
-                f"Node {node_id!r} has status {node.status.name}, expected CANDIDATE"
+        elif action == "update_status":
+            if patch.node_id is None or patch.new_status is None:
+                log.warning("update_status patch missing node_id or new_status")
+                return
+            self.factory.update_status(patch.node_id, patch.new_status)
+
+        elif action == "update_throughput":
+            if patch.node_id is None:
+                log.warning("update_throughput patch missing `node_id` field")
+                return
+            self.factory.update_throughput(
+                patch.node_id, patch.throughput, patch.verified_at
             )
-        del self._nodes[node_id]
-        del self._adj[node_id]
-        for nid in self._adj:
-            self._adj[nid] = [
-                (to, et) for (to, et) in self._adj[nid] if to != node_id
-            ]
-        self._edges = [
-            e for e in self._edges
-            if e.from_id != node_id and e.to_id != node_id
-        ]
 
-    # ------------------------------------------------------------------
-    # Query
-    # ------------------------------------------------------------------
+        elif action == "update_io_points":
+            if patch.node_id is None:
+                log.warning("update_io_points patch missing `node_id` field")
+                return
+            self.factory.update_io_points(patch.node_id, patch.io_points)
 
-    def get_node(self, node_id: NodeId) -> Optional[SelfModelNode]:
-        """Return the node with the given id, or None."""
-        return self._nodes.get(node_id)
+        else:
+            log.warning("Unknown factory patch action: %r", action)
 
-    def query_nodes(
-        self,
-        type: Optional[NodeType] = None,
-        status: Optional[NodeStatus] = None,
-    ) -> list[SelfModelNode]:
-        """Return nodes matching all supplied filters. None = match all."""
-        result = []
-        for node in self._nodes.values():
-            if type is not None and node.type != type:
-                continue
-            if status is not None and node.status != status:
-                continue
-            result.append(node)
-        return result
-
-    def query_path(
-        self,
-        from_id: NodeId,
-        to_id: NodeId,
-    ) -> Optional[list[NodeId]]:
-        """
-        Return the shortest path from from_id to to_id (BFS, directed edges).
-
-        Returns None if no path exists or either node is not in the graph.
-        The returned list includes both from_id and to_id.
-        """
-        if from_id not in self._nodes or to_id not in self._nodes:
-            return None
-        if from_id == to_id:
-            return [from_id]
-
-        visited: set[NodeId] = {from_id}
-        queue: deque[list[NodeId]] = deque([[from_id]])
-
-        while queue:
-            path = queue.popleft()
-            current = path[-1]
-            for neighbour, _ in self._adj.get(current, []):
-                if neighbour == to_id:
-                    return path + [to_id]
-                if neighbour not in visited:
-                    visited.add(neighbour)
-                    queue.append(path + [neighbour])
-        return None
-
-    def find_producers(self, item: str) -> list[SelfModelNode]:
-        """
-        Return all nodes whose throughput dict contains the given item
-        with a positive rate.
-        """
-        return [
-            node for node in self._nodes.values()
-            if node.throughput.get(item, 0.0) > 0.0
-        ]
-
-    def find_capacity(self, item: str) -> float:
-        """
-        Return the total throughput (units per minute) for the given item
-        across all ACTIVE nodes only.
-        """
-        return sum(
-            node.throughput.get(item, 0.0)
-            for node in self._nodes.values()
-            if node.status == NodeStatus.ACTIVE
+    def _apply_chunks(self, patch: SelfModelPatch) -> None:
+        # Chunk patches are not yet defined -- the ChunkGrid is a stub.
+        # When bridge chunk-position support is added, this method will
+        # handle "mark_charted" and "mark_charted_bulk" actions.
+        log.warning(
+            "SelfModel._apply_chunks: chunk patches not yet implemented "
+            "(action=%r source=%r)", patch.action, patch.source_agent,
         )
 
-    def overlapping_nodes(self, bbox: BoundingBox) -> list[SelfModelNode]:
-        """
-        Return all nodes whose bounding box overlaps the given bbox.
+    # ------------------------------------------------------------------
+    # Convenience pass-throughs for the most common coordinator queries
+    # ------------------------------------------------------------------
 
-        Detects conflicts but does not prevent them — enforcement is the
-        caller's responsibility.
-        """
-        return [
-            node for node in self._nodes.values()
-            if node.bounding_box.overlaps(bbox)
-        ]
+    def find_producers(self, item: str) -> list[FactoryNode]:
+        """Shorthand for sm.factory.find_producers(item)."""
+        return self.factory.find_producers(item)
 
-    def all_nodes(self) -> list[SelfModelNode]:
-        """Return all nodes in insertion order."""
-        return list(self._nodes.values())
+    def active_capacity_for(self, item: str) -> float:
+        """Shorthand for sm.factory.active_capacity_for(item)."""
+        return self.factory.active_capacity_for(item)
 
-    def all_edges(self) -> list[SelfModelEdge]:
-        """Return all edges in insertion order."""
-        return list(self._edges)
+    def overlapping_nodes(self, bbox: BoundingBox) -> list[FactoryNode]:
+        """Shorthand for sm.factory.overlapping_nodes(bbox)."""
+        return self.factory.overlapping_nodes(bbox)
 
-    def subgraph(self, node_ids: list[NodeId]) -> "SelfModel":
-        """
-        Return a new SelfModel containing only the specified nodes and
-        the edges between them. Nodes not found are silently skipped.
-        """
-        id_set = set(node_ids)
-        sub = SelfModel()
-        for nid in node_ids:
-            node = self._nodes.get(nid)
-            if node is not None:
-                sub.add_node(node)
-        for edge in self._edges:
-            if edge.from_id in id_set and edge.to_id in id_set:
-                sub.add_edge(edge.from_id, edge.to_id, edge.edge_type)
-        return sub
+    def stale_nodes(self, current_tick: int, threshold_ticks: int) -> list[FactoryNode]:
+        """Shorthand for sm.factory.stale_nodes(current_tick, threshold_ticks)."""
+        return self.factory.stale_nodes(current_tick, threshold_ticks)
 
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
-    def __len__(self) -> int:
-        return len(self._nodes)
-
     def __repr__(self) -> str:
         return (
-            f"SelfModel({len(self._nodes)} nodes, {len(self._edges)} edges)"
+            f"SelfModel(factory={self.factory!r}, chunks={self.chunks!r})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Re-export key types so callers can do:
+#   from world.model.self_model import SelfModel, FactoryNode, NodeType, ...
+# without knowing the internal layer structure.
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    "SelfModel",
+    # From factory_graph
+    "FactoryNode",
+    "FactoryEdge",
+    "NodeType",
+    "NodeStatus",
+    "EdgeType",
+    "ProcessType",
+    # From chunk_grid
+    "ChunkGrid",
+    # From types
+    "BoundingBox",
+    "IOPoint",
+    "NodeId",
+]

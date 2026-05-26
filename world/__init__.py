@@ -40,16 +40,18 @@ from world.knowledge.tech_tree import TechTree
 
 from world.model.self_model import (
     SelfModel,
-    SelfModelProtocol,
-    SelfModelNode,
-    SelfModelEdge,
-    BoundingBox,
+    FactoryNode,
+    FactoryEdge,
     NodeType,
     NodeStatus,
     EdgeType,
+    ProcessType,
+    ChunkGrid,
+    BoundingBox,
+    IOPoint,
     NodeId,
 )
-from world.model.patch import SelfModelPatch
+from world.model.patch import SelfModelPatch, PatchLayer, PatchAction
 
 # --- Observable state dataclasses -------------------------------------------
 # These appear in external method signatures and must be importable without
@@ -123,15 +125,19 @@ __all__ = [
     "TechTree",
     # Self-model
     "SelfModel",
-    "SelfModelProtocol",
-    "SelfModelNode",
-    "SelfModelEdge",
-    "BoundingBox",
+    "FactoryNode",
+    "FactoryEdge",
     "NodeType",
     "NodeStatus",
     "EdgeType",
+    "ProcessType",
+    "ChunkGrid",
+    "BoundingBox",
+    "IOPoint",
     "NodeId",
     "SelfModelPatch",
+    "PatchLayer",
+    "PatchAction",
     # Observable state dataclasses
     "Position",
     "Direction",
