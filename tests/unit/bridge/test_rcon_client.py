@@ -13,9 +13,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from bridge.action_executor import ActionExecutor
-from bridge.actions import NoOp
-from bridge.rcon_client import BridgeError, RconClient
+from bridge import ActionExecutor, BridgeError, NoOp, RconClient
 from tests.fixtures import MockRconClient
 
 
@@ -69,18 +67,13 @@ class TestRconClient(unittest.TestCase):
             client.connect()
         return client
 
-    def _make_response_sequence(self, *packets: bytes) -> bytes:
-        return b"".join(packets)
-
     def test_connect_and_is_connected(self):
-        # Auth: client sends req_id=1 type 3; server replies with req_id=1 type 2.
         auth_resp = self._make_auth_response(1)
         sock = FakeSocket(auth_resp)
         client = self._make_client_with_socket(sock)
         self.assertTrue(client.is_connected())
 
     def test_send_returns_response_body(self):
-        # Sequence: auth(req=1) then exec response(req=2, body='{"ok":true}')
         auth_resp = self._make_auth_response(1)
         exec_resp = self._make_exec_response(2, '{"ok":true}')
         sock = FakeSocket(auth_resp + exec_resp)
@@ -89,7 +82,6 @@ class TestRconClient(unittest.TestCase):
         self.assertEqual(result.strip(), '{"ok":true}')
 
     def test_auth_failure_raises_bridge_error(self):
-        # Server responds with id=-1 to signal auth failure.
         auth_fail = _make_rcon_packet(-1, 2, "")
         sock = FakeSocket(auth_fail)
         with patch("socket.socket") as mock_socket_cls:
@@ -111,8 +103,6 @@ class TestRconClient(unittest.TestCase):
 
     def test_thread_safety_multiple_sends(self):
         """Multiple threads can call send() without corruption."""
-        # This test just checks no exceptions are raised — true socket
-        # interleaving can't be simulated without a real server.
         results: list[bool] = []
         errors: list[Exception] = []
 
@@ -125,7 +115,10 @@ class TestRconClient(unittest.TestCase):
 
         mock_client = MockRconClient()
         executor = ActionExecutor(mock_client)
-        threads = [threading.Thread(target=send_worker, args=(executor,)) for _ in range(10)]
+        threads = [
+            threading.Thread(target=send_worker, args=(executor,))
+            for _ in range(10)
+        ]
         for t in threads:
             t.start()
         for t in threads:

@@ -1,7 +1,7 @@
 """
 tests/unit/bridge/test_actions.py
 
-Tests for bridge/actions.py 
+Tests for bridge/actions.py
 
 Run with:  python tests/unit/bridge/test_actions.py
 """
@@ -10,24 +10,40 @@ from __future__ import annotations
 
 import unittest
 
-from bridge.actions import (
-    Action, ActionCategory, ALL_ACTION_TYPES, ACTIONS_BY_CATEGORY, actions_for_context,
-    MoveTo, StopMovement,
-    MineResource, MineEntity, StopMining,
+from bridge import (
+    Action,
+    ActionCategory,
+    ALL_ACTION_TYPES,
+    ACTIONS_BY_CATEGORY,
+    actions_for_context,
+    MoveTo,
+    StopMovement,
+    MineResource,
+    MineEntity,
+    StopMining,
     CraftItem,
-    PlaceEntity, SetRecipe, SetFilter, SetSplitterPriority, RotateEntity,
-    FlipEntity, ApplyBlueprint,
+    PlaceEntity,
+    SetRecipe,
+    SetFilter,
+    SetSplitterPriority,
+    RotateEntity,
+    FlipEntity,
+    ApplyBlueprint,
     TransferItems,
     SetResearchQueue,
-    EquipArmor, UseItem,
-    EnterVehicle, ExitVehicle, DriveVehicle,
-    SelectWeapon, ShootAt, StopShooting,
-    Wait, NoOp,
+    EquipArmor,
+    UseItem,
+    EnterVehicle,
+    ExitVehicle,
+    DriveVehicle,
+    SelectWeapon,
+    ShootAt,
+    StopShooting,
+    Wait,
+    NoOp,
 )
-from world.state import (
-    Direction,
-    Position
-)
+from world.state import Direction, Position
+
 
 class TestActionCategory(unittest.TestCase):
     def test_all_action_types_have_category(self):

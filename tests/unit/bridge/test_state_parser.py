@@ -1,18 +1,18 @@
 """
 tests/unit/bridge/test_state_parser.py
 
-Tests for bridge/state_parser.py 
+Tests for bridge/state_parser.py
 
 Run with:  python tests/unit/bridge/test_state_parser.py
 """
 
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import MagicMock
-import json
 
-from bridge.state_parser import StateParser
+from bridge import StateParser
 from world.query import WorldQuery
 from world.state import (
     BeltLane,
@@ -169,7 +169,6 @@ class TestStateParserFullParse(unittest.TestCase):
         state = self._parse(data)
         self.assertEqual(len(state.resource_map), 1)
         patch = state.resource_map[0]
-        # A more general test might also query the KnowledgeBase about resource_type
         self.assertEqual(patch.amount, 200000)
         self.assertEqual(patch.size, 500)
 
@@ -501,14 +500,12 @@ class TestStateParserFullParse(unittest.TestCase):
             ],
         }
         state = self._parse(data)
-        # Only the recent entity survives.
         self.assertEqual(len(state.destroyed_entities), 1)
         self.assertEqual(state.destroyed_entities[0].name, "new-wall")
 
     def test_destroyed_entities_merge_with_existing(self):
         """parse_partial should merge new events with existing rolling window."""
         parser = StateParser()
-        # First parse establishes a destroyed entity.
         raw1 = json.dumps({"tick": 1000, "destroyed_entities": [{
             "name": "wall-1", "position": {"x": 0, "y": 0},
             "destroyed_at": 1000, "cause": "biter",
@@ -516,7 +513,6 @@ class TestStateParserFullParse(unittest.TestCase):
         state = parser.parse(raw1, current_tick=1000)
         self.assertEqual(len(state.destroyed_entities), 1)
 
-        # Second partial update adds another.
         raw2 = json.dumps({"tick": 1100, "destroyed_entities": [{
             "name": "wall-2", "position": {"x": 1, "y": 0},
             "destroyed_at": 1100, "cause": "vehicle",
@@ -562,10 +558,7 @@ class TestStateParserFullParse(unittest.TestCase):
         }})
         state = WorldState(tick=400)
         state = parser.parse_partial(raw, "player", state)
-
-        # Player section stamped.
         self.assertEqual(state.observed_at.get("player"), 500)
-        # Other sections NOT stamped.
         self.assertNotIn("entities", state.observed_at)
         self.assertNotIn("research", state.observed_at)
         self.assertNotIn("logistics", state.observed_at)

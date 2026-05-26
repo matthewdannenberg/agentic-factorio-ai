@@ -1,7 +1,7 @@
 """
 tests/unit/bridge/test_action_executor.py
 
-Tests for bridge/actions.py and bridge/action_executor.py
+Tests for bridge/action_executor.py
 
 Run with:  python tests/unit/bridge/test_action_executor.py
 """
@@ -12,7 +12,9 @@ import json
 import unittest
 from unittest.mock import MagicMock
 
-from bridge.actions import (
+from bridge import (
+    ActionExecutor,
+    BridgeError,
     ApplyBlueprint,
     CraftItem,
     EquipArmor,
@@ -34,14 +36,12 @@ from bridge.actions import (
     TransferItems,
     UseItem,
     Wait,
+    EnterVehicle,
+    ExitVehicle,
+    DriveVehicle,
 )
-from bridge.action_executor import ActionExecutor
-from bridge.rcon_client import BridgeError
 from tests.fixtures import MockRconClient
-from world.state import (
-    Direction,
-    Position
-)
+from world.state import Direction, Position
 
 
 class TestActionExecutor(unittest.TestCase):
@@ -288,19 +288,16 @@ class TestActionExecutor(unittest.TestCase):
     # --- VEHICLE stubs --------------------------------------------------------
 
     def test_enter_vehicle_raises_not_implemented(self):
-        from bridge.actions import EnterVehicle
         action = EnterVehicle(entity_id=5)
         with self.assertRaises(NotImplementedError):
             self.executor.execute(action)
 
     def test_exit_vehicle_raises_not_implemented(self):
-        from bridge.actions import ExitVehicle
         action = ExitVehicle()
         with self.assertRaises(NotImplementedError):
             self.executor.execute(action)
 
     def test_drive_vehicle_raises_not_implemented(self):
-        from bridge.actions import DriveVehicle
         action = DriveVehicle(position=Position(0, 0))
         with self.assertRaises(NotImplementedError):
             self.executor.execute(action)
@@ -325,7 +322,9 @@ class TestActionExecutor(unittest.TestCase):
     # --- recoverable failure --------------------------------------------------
 
     def test_recoverable_failure_returns_false(self):
-        client = MockRconClient({"fa.mine_entity": json.dumps({"ok": False, "reason": "out_of_reach"})})
+        client = MockRconClient(
+            {"fa.mine_entity": json.dumps({"ok": False, "reason": "out_of_reach"})}
+        )
         executor = ActionExecutor(client)
         result = executor.execute(MineEntity(entity_id=1))
         self.assertFalse(result)
@@ -333,7 +332,9 @@ class TestActionExecutor(unittest.TestCase):
     # --- unrecoverable (non-JSON Lua error) -----------------------------------
 
     def test_non_json_response_raises_bridge_error(self):
-        client = MockRconClient({"fa.craft_item": "Error: something went wrong in Lua"})
+        client = MockRconClient(
+            {"fa.craft_item": "Error: something went wrong in Lua"}
+        )
         executor = ActionExecutor(client)
         with self.assertRaises(BridgeError):
             executor.execute(CraftItem(recipe="iron-plate", count=1))
@@ -345,7 +346,6 @@ class TestActionExecutor(unittest.TestCase):
         fake_action.kind = "CompletelyUnknownAction"
         with self.assertRaises(BridgeError):
             self.executor.execute(fake_action)
-
 
 
 if __name__ == "__main__":
