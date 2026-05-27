@@ -50,7 +50,7 @@ from world import WorldQuery
 from world import WorldWriter
 
 if TYPE_CHECKING:
-    from execution.memory.behavioral import BehavioralMemoryProtocol
+    from memory.behavioral import BehavioralMemoryProtocol
     from execution.coordinator.coordinator import CoordinatorProtocol
     from world import SelfModel
     from bridge import ActionExecutor
