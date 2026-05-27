@@ -18,21 +18,18 @@ from __future__ import annotations
 
 import unittest
 
-from planning.condition_namespace import (
-    _DeltaView,
-    build_core_namespace,
-    safe_builtins,
-)
-from world.query import WorldQuery
-from world.state import (
+from planning import build_core_namespace, safe_builtins, BLOCKED_NAMES
+from planning.evaluation.condition_namespace import _DeltaView
+from world import WorldQuery
+from world import (
     ExplorationState,
     Inventory,
     InventorySlot,
     PlayerState,
     Position,
     ResourcePatch,
-    WorldState,
 )
+from world.observable.state import WorldState  # white-box: constructs WorldState directly
 from tests.fixtures import make_world_query
 
 
@@ -280,7 +277,7 @@ class TestSafeBuiltins(unittest.TestCase):
         self.builtins = safe_builtins()
 
     def test_blocked_names_absent(self):
-        from planning.condition_namespace import BLOCKED_NAMES
+        
         for name in BLOCKED_NAMES:
             self.assertNotIn(name, self.builtins, f"Blocked: {name}")
 

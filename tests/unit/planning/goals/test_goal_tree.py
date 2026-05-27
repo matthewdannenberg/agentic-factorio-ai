@@ -1,7 +1,7 @@
 """
 tests/unit/planning/test_goal_tree.py
 
-Tests for planning/goal_tree.py
+Tests for planning/goals/goal_tree.py
 
 Run with:  python -m pytest tests/unit/planning/test_goal_tree.py -v
        or: python tests/unit/planning/test_goal_tree.py
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import unittest
 
-from planning.goal import GoalStatus, Priority, make_goal
-from planning.goal_tree import GoalTree
+from planning import GoalStatus, Priority, make_goal
+from planning import GoalTree
 
 
 def _goal(desc="test goal", priority=Priority.NORMAL, parent_id=None):

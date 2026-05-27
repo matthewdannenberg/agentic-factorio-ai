@@ -1,5 +1,5 @@
 """
-llm/goal_source.py
+planning/goals/goal_source.py
 
 GoalSource — the interface the loop uses to obtain goals and handle escalation.
 
@@ -42,11 +42,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from planning.goal import Goal, GoalStatus, Priority, make_goal
+from planning.goals.goal import Goal, GoalStatus, Priority, make_goal
 
 if TYPE_CHECKING:
-    from agent.subtask import Subtask
-    from agent.execution_protocol import StuckContext
+    from planning.tasks.task import Task as Subtask  # renamed from Subtask
+    from execution.protocol import StuckContext  # execution/ layer, Phase 4
 
 log = logging.getLogger(__name__)
 

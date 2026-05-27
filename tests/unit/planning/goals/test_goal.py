@@ -1,7 +1,7 @@
 """
 tests/unit/planning/test_goal.py
 
-Tests for planning/goal.py 
+Tests for planning/goals/goal.py 
 
 Run with:  python tests/unit/planning/test_goal.py
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from planning.goal import Priority, GoalStatus, RewardSpec, Goal, make_goal
+from planning import Priority, GoalStatus, RewardSpec, Goal, make_goal
 
 
 class TestPriority(unittest.TestCase):

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import unittest
 
-from planning.goal import Priority
-from planning.resource_allocator import ResourceAllocator
+from planning import Priority
+from planning import ResourceAllocator
 
 
 class TestResourceAllocatorPassthrough(unittest.TestCase):

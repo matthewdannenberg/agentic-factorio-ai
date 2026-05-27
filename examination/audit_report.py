@@ -1,5 +1,5 @@
 """
-agent/examiner/audit_report.py
+examination/audit_report.py
 
 AuditReport — the shared output type of both examiner modes.
 

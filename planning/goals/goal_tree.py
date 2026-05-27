@@ -1,5 +1,5 @@
 """
-planning/goal_tree.py
+planning/goals/goal_tree.py
 
 GoalTree — runtime manager for the agent's goal hierarchy.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from planning.goal import Goal, GoalStatus, Priority
+from planning.goals.goal import Goal, GoalStatus, Priority
 
 log = logging.getLogger(__name__)
 

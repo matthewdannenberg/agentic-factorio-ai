@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import unittest
 
-from planning.goal import RewardSpec, make_goal, Priority
-from planning.reward_evaluator import EvaluationResult, RewardEvaluator
-from world.query import WorldQuery
-from world.state import Inventory, InventorySlot, PlayerState, Position, ResourcePatch, WorldState
+from planning import RewardSpec, make_goal, Priority
+from planning import EvaluationResult, RewardEvaluator
+from world import WorldQuery
+from world import Inventory, InventorySlot, PlayerState, Position, ResourcePatch
+from world.observable.state import WorldState  # white-box: constructs WorldState directly
 from tests.fixtures import make_world_query
 
 def _make_start_wq(
@@ -25,7 +26,7 @@ def _make_start_wq(
     resource_patches: list = None,
 ) -> WorldQuery:
     """Build a WorldQuery representing world state at goal activation."""
-    from world.state import ExplorationState
+    from world import ExplorationState
     ws = WorldState(
         player=PlayerState(
             position=Position(0.0, 0.0),
@@ -279,7 +280,7 @@ class TestRewardEvaluatorDeltaView(unittest.TestCase):
         self.ev = RewardEvaluator()
 
     def _make_wq(self, charted_chunks=0, iron_ore=0, resource_patches=None):
-        from world.state import ExplorationState
+        from world import ExplorationState
         ws = WorldState(player=PlayerState(
             position=Position(0, 0),
             inventory=Inventory(slots=(

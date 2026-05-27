@@ -1,5 +1,5 @@
 """
-planning/resource_allocator.py
+planning/evaluation/resource_allocator.py
 
 ResourceAllocator — priority-weighted allocation of shared agent resources.
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from planning.goal import Priority
+from planning.goals.goal import Priority
 
 log = logging.getLogger(__name__)
 

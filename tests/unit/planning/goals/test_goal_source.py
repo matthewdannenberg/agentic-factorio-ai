@@ -1,5 +1,5 @@
 """
-tests/unit/llm/test_goal_source.py
+tests/unit/planning/test_goal_source.py
 
 Unit tests for llm/goal_source.py.
 
@@ -33,8 +33,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from llm.goal_source import GoalQueue, GoalQueueEntry
-from planning.goal import GoalStatus, Priority
+from planning import GoalQueue, GoalQueueEntry
+from planning import GoalStatus, Priority
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-planning/reward_evaluator.py
+planning/evaluation/reward_evaluator.py
 
 RewardEvaluator — mechanically evaluates a Goal's conditions and RewardSpec
 against a WorldQuery.
@@ -53,11 +53,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
-from planning.goal import Goal, RewardSpec
+from planning.goals.goal import Goal, RewardSpec
 
 if TYPE_CHECKING:
-    from world.query import WorldQuery
-    from world.production_tracker import ProductionTrackerProtocol
+    from world import WorldQuery
+    from world import ProductionTrackerProtocol
 
 log = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ class RewardEvaluator:
         )
 
     def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0, start_wq: "WorldQuery" = None) -> dict:
-        from planning.condition_namespace import build_core_namespace, safe_builtins
+        from planning.evaluation.condition_namespace import build_core_namespace, safe_builtins
 
         if self._tracker is not None:
             production_rate = self._tracker.rate

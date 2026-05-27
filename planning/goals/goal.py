@@ -1,5 +1,5 @@
 """
-planning/goal.py
+planning/goals/goal.py
 
 Goal, RewardSpec, Priority, GoalStatus — the planning layer's core types.
 

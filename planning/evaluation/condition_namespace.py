@@ -1,5 +1,5 @@
 """
-planning/condition_namespace.py
+planning/evaluation/condition_namespace.py
 
 Shared condition evaluation namespace for both RewardEvaluator and the
 coordinator's subtask condition evaluator.
@@ -29,7 +29,7 @@ import logging
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from world.query import WorldQuery
+    from world import WorldQuery
 
 log = logging.getLogger(__name__)
 
