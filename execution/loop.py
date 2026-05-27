@@ -407,7 +407,7 @@ class FactorioLoop:
 
     def _record_outcome(self, goal: Goal, reward: float, success: bool) -> None:
         """Write the outcome to behavioral memory."""
-        from execution.memory.behavioral import GoalOutcome
+        from memory.behavioral import GoalOutcome
         try:
             self._mem.record_outcome(
                 goal_type=getattr(goal, "type", "unknown"),
