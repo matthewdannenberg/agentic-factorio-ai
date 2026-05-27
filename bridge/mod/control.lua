@@ -57,6 +57,24 @@ local function push_destruction_event(entry)
 end
 
 -- ============================================================
+-- Chunk delta tracking — exploration
+-- ============================================================
+-- Tracks which chunks have been charted so that get_state() can emit only
+-- newly-charted chunks each poll (delta) rather than the full set.
+--
+-- last_charted_count: the charted chunk count at the previous poll.
+--   When the count increases, we re-iterate to find new chunks.
+--   When unchanged, newly_charted_chunks is an empty list (zero cost).
+--
+-- known_charted_set: a set of "cx,cy" string keys for every chunk we have
+--   already reported. Persists for the Lua session lifetime. On reconnect
+--   (Lua env reset), resets to empty and the full set is emitted once as
+--   the initial delta — harmless because mark_charted_bulk is idempotent.
+
+local last_charted_count  = 0
+local known_charted_set   = {}   -- {"cx,cy" = true}
+
+-- ============================================================
 -- Event handlers
 -- ============================================================
 
@@ -456,9 +474,10 @@ end
 
 function fa.get_state(opts)
     opts = opts or {}
-    local radius      = opts.radius          or 32
-    local res_radius  = opts.resource_radius or 128
-    local item_radius = opts.item_radius     or 16
+    local radius               = opts.radius               or 32
+    local res_radius           = opts.resource_radius      or 128
+    local item_radius          = opts.item_radius          or 16
+    local exploration_scan_radius = opts.exploration_scan_radius or 6
 
     local player = get_player()
     if not player or not player.valid then
@@ -467,7 +486,7 @@ function fa.get_state(opts)
 
     local state = {
         tick               = game.tick,
-        player             = fa._player_table(player),
+        player             = fa._player_table(player, exploration_scan_radius),
         entities           = fa._entities_table(player, radius),
         resource_map       = fa._resource_map_table(player, res_radius),
         ground_items       = fa._ground_items_table(player, item_radius),
@@ -543,15 +562,16 @@ end
 -- charted_chunks is NON-PROXIMAL: reflects the force's global chart,
 -- not the current scan radius.
 function fa.get_exploration()
+    -- Standalone exploration query. Returns the charted_chunks count and the
+    -- newly_charted_chunks delta using the same shared state as _player_table.
+    -- Useful for partial refreshes when only exploration data is needed.
     local player = get_player()
     if not player or not player.valid then
         return err_response("no_player")
     end
-    -- In Factorio 2.x, LuaForce.get_chart_size() was removed.
-    -- Count charted chunks by iterating surface.get_chunks(), which yields
-    -- every chunk the force has charted. This is O(charted chunks) but only
-    -- called when Python polls get_state, so the cost is acceptable.
-    local charted_chunks = 0
+    local charted_chunks       = 0
+    local newly_charted_chunks = {}
+
     local ok_iter = pcall(function()
         for chunk in player.surface.get_chunks() do
             if player.force.is_chunk_charted(player.surface, chunk) then
@@ -559,12 +579,27 @@ function fa.get_exploration()
             end
         end
     end)
-    if not ok_iter then
-        charted_chunks = 0
+    if not ok_iter then charted_chunks = 0 end
+
+    if charted_chunks > last_charted_count then
+        pcall(function()
+            for chunk in player.surface.get_chunks() do
+                if player.force.is_chunk_charted(player.surface, chunk) then
+                    local key = tostring(chunk.x) .. "," .. tostring(chunk.y)
+                    if not known_charted_set[key] then
+                        known_charted_set[key] = true
+                        table.insert(newly_charted_chunks, {cx = chunk.x, cy = chunk.y})
+                    end
+                end
+            end
+        end)
+        last_charted_count = charted_chunks
     end
+
     return safe_json({
-        tick           = game.tick,
-        charted_chunks = charted_chunks,
+        tick                 = game.tick,
+        charted_chunks       = charted_chunks,
+        newly_charted_chunks = newly_charted_chunks,
     })
 end
 
@@ -572,14 +607,16 @@ end
 -- Internal section builders
 -- ============================================================
 
-function fa._player_table(player)
+function fa._player_table(player, exploration_scan_radius)
     local inv = player.get_inventory(defines.inventory.character_main)
-    -- charted_chunks: total 32x32 chunks the force has revealed on this surface.
-    -- Global to the force -- not scan-radius scoped. Grows monotonically.
-    -- Sourced from LuaForce::get_chart_size(surface).
-    -- Count charted chunks via surface.get_chunks() (2.x replacement for
-    -- the removed LuaForce.get_chart_size()).
-    local charted_chunks = 0
+
+    -- ---- Charted chunk delta ----
+    -- Count all charted chunks. When the count has grown since last poll,
+    -- iterate to find newly-charted ones and update known_charted_set.
+    -- Cost: O(1) when nothing new, O(charted chunks) on exploration ticks.
+    local charted_chunks       = 0
+    local newly_charted_chunks = {}
+
     pcall(function()
         for chunk in player.surface.get_chunks() do
             if player.force.is_chunk_charted(player.surface, chunk) then
@@ -587,6 +624,48 @@ function fa._player_table(player)
             end
         end
     end)
+
+    if charted_chunks > last_charted_count then
+        pcall(function()
+            for chunk in player.surface.get_chunks() do
+                if player.force.is_chunk_charted(player.surface, chunk) then
+                    local key = tostring(chunk.x) .. "," .. tostring(chunk.y)
+                    if not known_charted_set[key] then
+                        known_charted_set[key] = true
+                        table.insert(newly_charted_chunks, {cx = chunk.x, cy = chunk.y})
+                    end
+                end
+            end
+        end)
+        last_charted_count = charted_chunks
+    end
+
+    -- ---- Nearby uncharted chunks (proximal) ----
+    -- Scan a (2*exploration_scan_radius + 1)^2 grid of chunks centred on the
+    -- player's current chunk. Collect every uncharted chunk in that grid.
+    -- Cost: O((2r+1)^2) is_chunk_charted calls, each O(1) in Factorio's
+    -- internal data structure. At r=6 that is 169 calls per poll — negligible.
+    --
+    -- exploration_scan_radius is passed in from Python config so it can be
+    -- tuned without touching the mod.
+    local CHUNK_SIZE = 32
+    local player_cx = math.floor(player.position.x / CHUNK_SIZE)
+    local player_cy = math.floor(player.position.y / CHUNK_SIZE)
+    local nearby_uncharted_chunks = {}
+    local r = exploration_scan_radius or 6
+    pcall(function()
+        for dcx = -r, r do
+            for dcy = -r, r do
+                local ncx = player_cx + dcx
+                local ncy = player_cy + dcy
+                if not player.force.is_chunk_charted(player.surface, {x=ncx, y=ncy}) then
+                    table.insert(nearby_uncharted_chunks, {cx = ncx, cy = ncy})
+                end
+            end
+        end
+    end)
+
+    -- ---- Movement status ----
     local mov_status = "idle"
     if path_unreachable then
         mov_status = "unreachable"
@@ -597,13 +676,15 @@ function fa._player_table(player)
     end
 
     return {
-        position        = {x = player.position.x, y = player.position.y},
-        health          = player.character and player.character.health or 100.0,
-        inventory       = inventory_to_list(inv),
-        inventory_size  = inv and #inv or 0,
-        reachable       = fa._reachable_ids(player),
-        charted_chunks  = charted_chunks,
-        movement_status = mov_status,
+        position             = {x = player.position.x, y = player.position.y},
+        health               = player.character and player.character.health or 100.0,
+        inventory            = inventory_to_list(inv),
+        inventory_size       = inv and #inv or 0,
+        reachable            = fa._reachable_ids(player),
+        charted_chunks            = charted_chunks,
+        newly_charted_chunks      = newly_charted_chunks,
+        nearby_uncharted_chunks   = nearby_uncharted_chunks,
+        movement_status           = mov_status,
     }
 end
 

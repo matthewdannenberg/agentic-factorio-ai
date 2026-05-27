@@ -149,13 +149,21 @@ class SelfModel:
             log.warning("Unknown factory patch action: %r", action)
 
     def _apply_chunks(self, patch: SelfModelPatch) -> None:
-        # Chunk patches are not yet defined -- the ChunkGrid is a stub.
-        # When bridge chunk-position support is added, this method will
-        # handle "mark_charted" and "mark_charted_bulk" actions.
-        log.warning(
-            "SelfModel._apply_chunks: chunk patches not yet implemented "
-            "(action=%r source=%r)", patch.action, patch.source_agent,
-        )
+        # Chunk patches route bulk charting updates from the coordinator
+        # to the ChunkGrid. These are not agent-emitted patches -- they come
+        # from the loop draining WorldQuery.newly_charted_chunks each tick.
+        # Using the patch mechanism keeps the update pathway consistent with
+        # all other SelfModel mutations.
+        if patch.action == "mark_charted_bulk":
+            if patch.chunk_coords is not None:
+                self.chunks.mark_charted_bulk(patch.chunk_coords)
+            else:
+                log.warning("mark_charted_bulk patch missing chunk_coords")
+        else:
+            log.warning(
+                "SelfModel._apply_chunks: unknown action %r (source=%r)",
+                patch.action, patch.source_agent,
+            )
 
     # ------------------------------------------------------------------
     # Convenience pass-throughs for the most common coordinator queries

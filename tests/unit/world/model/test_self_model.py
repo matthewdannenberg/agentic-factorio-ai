@@ -19,6 +19,7 @@ import unittest
 
 from world import (
     BoundingBox,
+    ChunkCoord,
     ChunkGrid,
     EdgeType,
     FactoryEdge,
@@ -524,7 +525,7 @@ class TestChunkGrid(unittest.TestCase):
 
     def test_mark_charted_bulk(self):
         g = ChunkGrid()
-        g.mark_charted_bulk([(0, 0), (1, 0), (0, 1)])
+        g.mark_charted_bulk([ChunkCoord(0, 0), ChunkCoord(1, 0), ChunkCoord(0, 1)])
         self.assertEqual(len(g), 3)
 
     def test_frontiers_single_chunk(self):
@@ -557,7 +558,7 @@ class TestChunkGrid(unittest.TestCase):
 
     def test_nearest_frontier_returns_closest(self):
         g = ChunkGrid()
-        g.mark_charted_bulk([(0, 0), (5, 5), (10, 10)])
+        g.mark_charted_bulk([ChunkCoord(0, 0), ChunkCoord(5, 5), ChunkCoord(10, 10)])
         pos = Position(32 * 5 + 16, 32 * 5 + 16)   # centre of chunk (5,5)
         nearest = g.nearest_frontier(pos)
         self.assertIsNotNone(nearest)

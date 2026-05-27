@@ -61,6 +61,7 @@ from world.observable.state import (
     # Primitives
     Position,
     Direction,
+    ChunkCoord,
     # Entities
     EntityState,
     EntityStatus,
@@ -141,6 +142,7 @@ __all__ = [
     # Observable state dataclasses
     "Position",
     "Direction",
+    "ChunkCoord",
     "EntityState",
     "EntityStatus",
     "ResourcePatch",

@@ -36,6 +36,9 @@ Patch actions
                       Requires `node_id`, `throughput`, `verified_at`.
   update_io_points  : Set IOPoints on an examined node.
                       Requires `node_id`, `io_points`.
+  mark_charted_bulk : Record newly-charted chunks in ChunkGrid.
+                      Requires `chunk_coords`. Layer: "chunks" only.
+                      Emitted by the loop, not by agents.
 
 Rules
 -----
@@ -51,6 +54,7 @@ from typing import Literal, Optional
 
 from world.model.layers.factory_graph import EdgeType, FactoryNode, NodeStatus
 from world.model.types import IOPoint, NodeId
+from world.observable.state import ChunkCoord
 
 
 PatchAction = Literal[
@@ -61,6 +65,7 @@ PatchAction = Literal[
     "update_status",
     "update_throughput",
     "update_io_points",
+    "mark_charted_bulk",  # chunks layer only
 ]
 
 PatchLayer = Literal["factory", "chunks"]
@@ -86,6 +91,7 @@ class SelfModelPatch:
     rate         : For "add_edge" (ITEM_FLOW) -- items/min.
     transport    : For "add_edge" (ITEM_FLOW) -- "belt", "pipe", "train", etc.
     node_id      : For "promote", "discard", "update_*" -- target node id.
+    chunk_coords : For "mark_charted_bulk" -- list of ChunkCoord to mark charted.
     new_status   : For "update_status" -- the NodeStatus to set.
     throughput   : For "update_throughput" -- {item: units/min} measured.
     verified_at  : For "update_throughput" -- tick of measurement.
@@ -118,6 +124,9 @@ class SelfModelPatch:
 
     # update_io_points
     io_points: list[IOPoint] = field(default_factory=list)
+
+    # chunks layer
+    chunk_coords: Optional[list[ChunkCoord]] = None  # for "mark_charted_bulk"
 
     # provenance
     source_agent: str = ""

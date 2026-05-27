@@ -23,7 +23,7 @@ from __future__ import annotations
 import unittest
 
 from world import (
-    BeltLane, BeltSegment, BiterBase, DamagedEntity, DestroyedEntity,
+    BeltLane, BeltSegment, BiterBase, ChunkCoord, DamagedEntity, DestroyedEntity,
     Direction, EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
@@ -355,6 +355,34 @@ class TestWorldQueryEntityLookups(unittest.TestCase):
             exploration=ExplorationState(charted_chunks=1000),
         ))
         self.assertAlmostEqual(_wq(ws).charted_area_km2, 1.024)
+
+    def test_newly_charted_chunks_property(self):
+        coords = [ChunkCoord(cx=1, cy=2), ChunkCoord(cx=3, cy=4)]
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            exploration=ExplorationState(newly_charted_chunks=coords),
+        ))
+        result = _wq(ws).newly_charted_chunks
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].cx, 1)
+        self.assertEqual(result[1].cy, 4)
+
+    def test_newly_charted_chunks_empty_by_default(self):
+        self.assertEqual(_wq(WorldState()).newly_charted_chunks, [])
+
+    def test_nearby_uncharted_chunks_property(self):
+        coords = [ChunkCoord(cx=-1, cy=0), ChunkCoord(cx=0, cy=1)]
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            exploration=ExplorationState(nearby_uncharted_chunks=coords),
+        ))
+        result = _wq(ws).nearby_uncharted_chunks
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].cx, -1)
+        self.assertEqual(result[1].cy, 1)
+
+    def test_nearby_uncharted_chunks_empty_by_default(self):
+        self.assertEqual(_wq(WorldState()).nearby_uncharted_chunks, [])
 
     def test_state_passthrough(self):
         ws = WorldState(tick=1234)
@@ -708,6 +736,38 @@ class TestExplorationState(unittest.TestCase):
 
     def test_large_exploration(self):
         self.assertAlmostEqual(ExplorationState(charted_chunks=10000).charted_area_km2, 10.24)
+
+    def test_newly_charted_chunks_defaults_empty(self):
+        self.assertEqual(ExplorationState().newly_charted_chunks, [])
+
+    def test_nearby_uncharted_chunks_defaults_empty(self):
+        self.assertEqual(ExplorationState().nearby_uncharted_chunks, [])
+
+    def test_newly_charted_chunks_stored(self):
+        coords = [ChunkCoord(cx=1, cy=2), ChunkCoord(cx=3, cy=4)]
+        e = ExplorationState(charted_chunks=10, newly_charted_chunks=coords)
+        self.assertEqual(len(e.newly_charted_chunks), 2)
+        self.assertEqual(e.newly_charted_chunks[0].cx, 1)
+        self.assertEqual(e.newly_charted_chunks[1].cy, 4)
+
+    def test_nearby_uncharted_chunks_stored(self):
+        coords = [ChunkCoord(cx=-1, cy=0), ChunkCoord(cx=0, cy=-1)]
+        e = ExplorationState(nearby_uncharted_chunks=coords)
+        self.assertEqual(len(e.nearby_uncharted_chunks), 2)
+        self.assertEqual(e.nearby_uncharted_chunks[0].cx, -1)
+
+    def test_chunk_coord_repr(self):
+        self.assertEqual(repr(ChunkCoord(cx=3, cy=-5)), "ChunkCoord(3, -5)")
+
+    def test_all_three_fields_independent(self):
+        e = ExplorationState(
+            charted_chunks=50,
+            newly_charted_chunks=[ChunkCoord(cx=5, cy=5)],
+            nearby_uncharted_chunks=[ChunkCoord(cx=7, cy=7), ChunkCoord(cx=8, cy=7)],
+        )
+        self.assertEqual(e.charted_chunks, 50)
+        self.assertEqual(len(e.newly_charted_chunks), 1)
+        self.assertEqual(len(e.nearby_uncharted_chunks), 2)
 
 
 class TestWorldStateExploration(unittest.TestCase):

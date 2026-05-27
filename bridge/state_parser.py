@@ -46,6 +46,7 @@ from world.observable.state import (
     Direction,
     EntityState,
     EntityStatus,
+    ChunkCoord,
     ExplorationState,
     GroundItem,
     Inventory,
@@ -250,13 +251,25 @@ class StateParser:
         reachable = [int(x) for x in d.get("reachable", [])]
         charted_chunks = int(d.get("charted_chunks", 0))
         self._last_movement_status = str(d.get("movement_status", "idle"))
+
+        def _parse_chunk_list(key: str) -> list:
+            return [
+                ChunkCoord(cx=int(c["cx"]), cy=int(c["cy"]))
+                for c in d.get(key, [])
+                if isinstance(c, dict) and "cx" in c and "cy" in c
+            ]
+
         return PlayerState(
             position=pos,
             health=health,
             inventory=inventory,
             inventory_size=inventory_size,
             reachable=reachable,
-            exploration=ExplorationState(charted_chunks=charted_chunks),
+            exploration=ExplorationState(
+                charted_chunks=charted_chunks,
+                newly_charted_chunks=_parse_chunk_list("newly_charted_chunks"),
+                nearby_uncharted_chunks=_parse_chunk_list("nearby_uncharted_chunks"),
+            ),
         )
 
     def _parse_entities(self, lst: Any) -> list[EntityState]:

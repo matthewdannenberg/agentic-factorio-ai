@@ -377,16 +377,43 @@ class WorldQuery:
 
     @property
     def charted_chunks(self) -> int:
-        """NON-PROXIMAL. Total chunks the force has revealed."""
+        """NON-PROXIMAL. Total chunks the force has revealed. Monotonically
+        increasing. Safe to evaluate anywhere regardless of player position."""
         return self._state.player.exploration.charted_chunks
 
     @property
     def charted_tiles(self) -> int:
+        """NON-PROXIMAL. charted_chunks * 1024."""        
         return self._state.player.exploration.charted_tiles
 
     @property
     def charted_area_km2(self) -> float:
+        """NON-PROXIMAL. charted_tiles / 1,000,000."""        
         return self._state.player.exploration.charted_area_km2
+
+    @property
+    def newly_charted_chunks(self) -> list:
+        """
+        Chunks charted since the previous bridge poll, as a list of ChunkCoord.
+
+        TRANSIENT — each poll produces a fresh delta; empty on most ticks.
+        The coordinator drains this each tick to update ChunkGrid.
+        """
+        return self._state.player.exploration.newly_charted_chunks
+
+    @property
+    def nearby_uncharted_chunks(self) -> list:
+        """
+        Uncharted chunks within EXPLORATION_SCAN_RADIUS chunks of the player,
+        as a list of ChunkCoord.
+
+        PROXIMAL — depends on where the player is standing. Refreshed every
+        poll. The exploration agent uses this for local movement decisions:
+        pick the nearest entry and issue MoveTo toward its tile-space centre.
+        Empty when fully surrounded by charted territory within the scan
+        radius — the agent should signal the coordinator for a new frontier.
+        """
+        return self._state.player.exploration.nearby_uncharted_chunks
 
     # ------------------------------------------------------------------
     # Research

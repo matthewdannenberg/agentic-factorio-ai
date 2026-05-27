@@ -254,14 +254,35 @@ class LogisticsState:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ChunkCoord:
+    """A chunk coordinate pair (cx, cy) in chunk-space. One chunk = 32×32 tiles."""
+    cx: int
+    cy: int
+
+    def __repr__(self) -> str:
+        return f"ChunkCoord({self.cx}, {self.cy})"
+
+
+@dataclass
 class ExplorationState:
     """
-    Force-level map exploration statistics. NON-PROXIMAL.
+    Force-level map exploration statistics.
 
-    charted_chunks : Chunks revealed by this force. Monotonically increasing.
-                     Sourced from LuaForce::get_chart_size(surface).
+    charted_chunks           : Total chunks revealed. NON-PROXIMAL, monotonically
+                               increasing. Sourced from iterating surface.get_chunks().
+    newly_charted_chunks     : Chunks charted since the last bridge poll. TRANSIENT.
+                               The mod emits only newly-charted chunks each poll
+                               (delta); empty on most ticks. The coordinator drains
+                               these each poll to update ChunkGrid.
+    nearby_uncharted_chunks  : PROXIMAL. Uncharted chunks within
+                               EXPLORATION_SCAN_RADIUS chunks of the player's current
+                               chunk. Refreshed every poll. Used by the exploration
+                               agent to make local movement decisions — pick the
+                               nearest entry and walk toward its tile-space centre.
     """
     charted_chunks: int = 0
+    newly_charted_chunks: list["ChunkCoord"] = field(default_factory=list)
+    nearby_uncharted_chunks: list["ChunkCoord"] = field(default_factory=list)
 
     @property
     def charted_tiles(self) -> int:

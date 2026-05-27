@@ -28,9 +28,11 @@ class WorldPoller:
     Parameters
     ----------
     client          : Connected RconClient.
-    local_scan      : Radius in tiles for entity / ground-item scans.
-    resource_scan   : Radius in tiles for resource patch scans.
-    item_scan       : Radius in tiles for ground item scans.
+    local_scan               : Radius in tiles for entity / ground-item scans.
+    resource_scan            : Radius in tiles for resource patch scans.
+    item_scan                : Radius in tiles for ground item scans.
+    exploration_scan_radius  : Radius in chunks for nearby_uncharted_chunks scan.
+                               Passed directly to the Lua mod as an opt.
     """
 
     def __init__(
@@ -39,11 +41,13 @@ class WorldPoller:
         local_scan: int,
         resource_scan: int,
         item_scan: int,
+        exploration_scan_radius: int = 6,
     ) -> None:
-        self._client        = client
-        self._local_scan    = local_scan
-        self._resource_scan = resource_scan
-        self._item_scan     = item_scan
+        self._client                 = client
+        self._local_scan             = local_scan
+        self._resource_scan          = resource_scan
+        self._item_scan              = item_scan
+        self._exploration_scan_radius = exploration_scan_radius
 
         # Pre-build the command string — it never changes between polls.
         # /c __agent__ scopes the call into the agent mod's Lua environment
@@ -53,7 +57,8 @@ class WorldPoller:
             f"/c __agent__ rcon.print(fa.get_state({{"
             f"radius={self._local_scan}, "
             f"resource_radius={self._resource_scan}, "
-            f"item_radius={self._item_scan}"
+            f"item_radius={self._item_scan}, "
+            f"exploration_scan_radius={self._exploration_scan_radius}"
             f"}}))"
         )
 

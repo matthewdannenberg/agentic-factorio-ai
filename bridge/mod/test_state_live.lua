@@ -298,4 +298,173 @@ TS.suite("inventory_size", {
     end,
 })
 
+
+-- ============================================================
+-- Suite: chunk_delta
+-- Verifies newly_charted_chunks and nearby_uncharted_chunks fields in
+-- fa._player_table() (via fa.get_state()) and fa.get_exploration().
+-- ============================================================
+
+TS.suite("chunk_delta", {
+
+    get_state_has_newly_charted_chunks = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player ~= nil, "must have player section")
+        t.ok(parsed.player.newly_charted_chunks ~= nil,
+            "player must have newly_charted_chunks field")
+        t.is_table(parsed.player.newly_charted_chunks,
+            "newly_charted_chunks must be a table (array)")
+    end,
+
+    get_state_has_nearby_uncharted_chunks = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player ~= nil, "must have player section")
+        t.ok(parsed.player.nearby_uncharted_chunks ~= nil,
+            "player must have nearby_uncharted_chunks field")
+        t.is_table(parsed.player.nearby_uncharted_chunks,
+            "nearby_uncharted_chunks must be a table (array)")
+    end,
+
+    newly_charted_chunks_have_cx_cy_fields = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, chunk in ipairs(parsed.player.newly_charted_chunks) do
+            t.ok(chunk.cx ~= nil, "each newly_charted_chunks entry must have cx")
+            t.ok(chunk.cy ~= nil, "each newly_charted_chunks entry must have cy")
+            t.is_number(chunk.cx, "cx must be a number")
+            t.is_number(chunk.cy, "cy must be a number")
+        end
+    end,
+
+    nearby_uncharted_chunks_have_cx_cy_fields = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, chunk in ipairs(parsed.player.nearby_uncharted_chunks) do
+            t.ok(chunk.cx ~= nil, "each nearby_uncharted_chunks entry must have cx")
+            t.ok(chunk.cy ~= nil, "each nearby_uncharted_chunks entry must have cy")
+            t.is_number(chunk.cx, "cx must be a number")
+            t.is_number(chunk.cy, "cy must be a number")
+        end
+    end,
+
+    nearby_uncharted_chunks_bounded_by_scan_radius = function(t)
+        -- With radius r, the scan covers (2r+1)^2 chunks. Every entry must
+        -- be within r chunks of the player's chunk in both axes.
+        local r = 3   -- use a small radius to keep the test fast
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=r})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        local CHUNK_SIZE = 32
+        local player_cx = math.floor(player.position.x / CHUNK_SIZE)
+        local player_cy = math.floor(player.position.y / CHUNK_SIZE)
+        for _, chunk in ipairs(parsed.player.nearby_uncharted_chunks) do
+            local dx = math.abs(chunk.cx - player_cx)
+            local dy = math.abs(chunk.cy - player_cy)
+            t.ok(dx <= r and dy <= r,
+                "chunk (" .. tostring(chunk.cx) .. "," .. tostring(chunk.cy) ..
+                ") is outside scan radius " .. tostring(r) ..
+                " from player chunk (" .. tostring(player_cx) .. "," ..
+                tostring(player_cy) .. ")")
+        end
+    end,
+
+    nearby_uncharted_chunks_are_not_charted = function(t)
+        -- Every entry must genuinely be uncharted.
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        for _, chunk in ipairs(parsed.player.nearby_uncharted_chunks) do
+            local is_charted = player.force.is_chunk_charted(
+                player.surface, {x=chunk.cx, y=chunk.cy}
+            )
+            t.ok(not is_charted,
+                "nearby_uncharted chunk (" .. tostring(chunk.cx) .. "," ..
+                tostring(chunk.cy) .. ") is actually charted — scan bug")
+        end
+    end,
+
+    second_call_newly_charted_is_empty = function(t)
+        -- Call once to drain any pending delta, then call again.
+        -- No new exploration can happen between two back-to-back RCON calls.
+        fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                      exploration_scan_radius=6})
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4,
+                                   exploration_scan_radius=6})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local count = 0
+        for _ in ipairs(parsed.player.newly_charted_chunks) do count = count + 1 end
+        t.eq(count, 0,
+            "second back-to-back call should have empty newly_charted_chunks; got " ..
+            tostring(count))
+    end,
+
+    get_exploration_has_newly_charted_chunks = function(t)
+        local raw = fa.get_exploration()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "fa.get_exploration() must return valid JSON")
+        t.ok(parsed.newly_charted_chunks ~= nil,
+            "get_exploration must have newly_charted_chunks field")
+        t.is_table(parsed.newly_charted_chunks,
+            "newly_charted_chunks must be a table")
+    end,
+
+    get_exploration_second_call_delta_empty = function(t)
+        fa.get_exploration()
+        local raw = fa.get_exploration()
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local count = 0
+        for _ in ipairs(parsed.newly_charted_chunks) do count = count + 1 end
+        t.eq(count, 0,
+            "second back-to-back get_exploration should have empty delta; got " ..
+            tostring(count))
+    end,
+
+    charted_chunks_count_consistent_with_delta = function(t)
+        local opts = {radius=4, resource_radius=32, item_radius=4,
+                      exploration_scan_radius=6}
+        local r1 = parse_json(fa.get_state(opts))
+        local r2 = parse_json(fa.get_state(opts))
+        t.ok(r1 ~= nil and r2 ~= nil, "both calls must return valid JSON")
+        t.eq(r1.player.charted_chunks, r2.player.charted_chunks,
+            "charted_chunks must be stable across back-to-back calls")
+        local delta_count = 0
+        for _ in ipairs(r2.player.newly_charted_chunks) do delta_count = delta_count + 1 end
+        t.eq(delta_count, 0, "second call delta must be empty")
+    end,
+
+    nearby_uncharted_stable_across_calls = function(t)
+        -- With no movement between calls, nearby_uncharted_chunks should be
+        -- identical in count (chunks don't spontaneously get charted).
+        local opts = {radius=4, resource_radius=32, item_radius=4,
+                      exploration_scan_radius=6}
+        local r1 = parse_json(fa.get_state(opts))
+        local r2 = parse_json(fa.get_state(opts))
+        t.ok(r1 ~= nil and r2 ~= nil, "both calls must return valid JSON")
+        local c1, c2 = 0, 0
+        for _ in ipairs(r1.player.nearby_uncharted_chunks) do c1 = c1 + 1 end
+        for _ in ipairs(r2.player.nearby_uncharted_chunks) do c2 = c2 + 1 end
+        t.eq(c1, c2,
+            "nearby_uncharted count should be stable; got " ..
+            tostring(c1) .. " then " .. tostring(c2))
+    end,
+})
+
 return TS

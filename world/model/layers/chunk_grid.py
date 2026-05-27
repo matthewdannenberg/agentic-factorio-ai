@@ -1,78 +1,72 @@
 """
 world/model/layers/chunk_grid.py
 
-ChunkGrid — spatial index of charted map chunks.
+ChunkGrid -- spatial index of charted map chunks.
 
-STUB — not yet implemented.
+Populated incrementally by the coordinator each tick from
+WorldQuery.newly_charted_chunks (a delta list of ChunkCoord objects produced
+by the Lua mod's delta-tracking logic). The mod emits only newly-charted
+chunks each poll, so mark_charted_bulk is O(delta size) -- typically zero or
+a handful of chunks per tick during active exploration.
 
-This layer will track which specific chunks have been charted, enabling the
-coordinator to identify exploration frontiers (chunks adjacent to uncharted
-territory) and reason spatially about where to build vs explore.
-
-Why it's a stub
----------------
-The bridge currently reports only a *count* of charted chunks via
-ExplorationState.charted_chunks (sourced from LuaForce::get_chart_size /
-the 2.x surface.get_chunks() iterator). It does not report *which* chunks
-are charted. Populating the grid with real data requires a new bridge
-polling surface:
-
-  fa.get_charted_chunks() -> list of {cx, cy} chunk coordinates
-
-This requires a Lua mod change (bridge/mod/control.lua) and a new StateParser
-section. Until that is implemented, the ChunkGrid returns safe empty defaults
-for all queries so the coordinator can be written against its interface.
+Chunk coordinates
+-----------------
+A chunk is a 32x32-tile region. Chunk coordinate (cx, cy) maps to tile region:
+  x in [cx*32, cx*32 + 31],  y in [cy*32, cy*32 + 31].
+Tile (tx, ty) is in chunk (floor(tx/32), floor(ty/32)).
 
 Frontier definition
 -------------------
 A charted chunk is a "frontier" if at least one of its four cardinal
-neighbours (north, south, east, west) is not in the charted set. These are
-the chunks where exploration should be directed next.
+neighbours (north, south, east, west) has NOT been charted. This is more
+robust than "degree < 4" which breaks at map boundaries.
 
-The "degree < 4" shorthand is tempting but incorrect for map-edge chunks,
-which will never have 4 neighbours regardless of how much is explored. The
-"has an uncharted neighbour" definition is robust to map boundaries.
-
-Phase
------
-Full implementation is paired with the bridge/mod changes that add
-fa.get_charted_chunks(). See OPEN_DECISIONS for tracking.
+Thread safety
+-------------
+Not required at this stage -- the coordinator is single-threaded.
 """
 
 from __future__ import annotations
 
-from world.model.types import Position
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world.observable.state import ChunkCoord
+
+from world.observable.state import Position
 
 
 class ChunkGrid:
     """
     Spatial index of charted map chunks.
 
-    A chunk is a 32×32-tile region. Chunk coordinates (cx, cy) are the
-    chunk's position in chunk-space: tile (x, y) is in chunk
-    (floor(x/32), floor(y/32)).
-
-    All methods return safe empty defaults until the grid is populated.
-    The coordinator may call any method at any time without risk of error.
+    Populated from bridge data via mark_charted_bulk(). All methods return
+    safe empty defaults when the grid is unpopulated.
     """
 
     CHUNK_SIZE: int = 32   # tiles per chunk side
 
     def __init__(self) -> None:
-        # Set of (cx, cy) chunk coordinates that have been charted.
+        # Set of (cx, cy) tuples for every chunk confirmed charted.
         self._charted: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------------
-    # Population (called by the coordinator when bridge data is available)
+    # Population -- called by the coordinator each tick
     # ------------------------------------------------------------------
 
     def mark_charted(self, cx: int, cy: int) -> None:
         """Mark chunk (cx, cy) as charted. Idempotent."""
         self._charted.add((cx, cy))
 
-    def mark_charted_bulk(self, chunks: list[tuple[int, int]]) -> None:
-        """Mark a batch of chunks as charted. More efficient than repeated calls."""
-        self._charted.update(chunks)
+    def mark_charted_bulk(self, chunks: list["ChunkCoord"]) -> None:
+        """
+        Mark a batch of chunks as charted from a delta list of ChunkCoord.
+
+        Called by the coordinator each tick with WorldQuery.newly_charted_chunks.
+        Idempotent -- safe to call with the full set on reconnect.
+        """
+        for c in chunks:
+            self._charted.add((c.cx, c.cy))
 
     # ------------------------------------------------------------------
     # Query
@@ -83,15 +77,15 @@ class ChunkGrid:
         return (cx, cy) in self._charted
 
     def charted_count(self) -> int:
-        """Number of charted chunks. Matches ExplorationState.charted_chunks."""
+        """Number of charted chunks in this grid."""
         return len(self._charted)
 
     def frontiers(self) -> list[tuple[int, int]]:
         """
         Return all charted chunks that have at least one uncharted cardinal
-        neighbour. These are the chunks at the edge of explored territory.
+        neighbour. These are the edge chunks of explored territory.
 
-        Returns an empty list when the grid is unpopulated (stub state).
+        Returns an empty list when the grid is unpopulated.
         """
         result = []
         for (cx, cy) in self._charted:
@@ -106,15 +100,15 @@ class ChunkGrid:
 
     def centre_of_chunk(self, cx: int, cy: int) -> Position:
         """Return the tile position of the centre of chunk (cx, cy)."""
-        tile_x = cx * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0
-        tile_y = cy * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0
-        return Position(tile_x, tile_y)
+        return Position(
+            x=cx * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0,
+            y=cy * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0,
+        )
 
     def nearest_frontier(self, position: Position) -> Optional[tuple[int, int]]:
         """
-        Return the frontier chunk closest to position, or None if no
-        frontiers exist (grid unpopulated or fully surrounded by charted
-        territory on all sides).
+        Return the frontier chunk closest (in chunk-space) to position,
+        or None if no frontiers exist or the grid is empty.
         """
         fronts = self.frontiers()
         if not fronts:
@@ -122,8 +116,18 @@ class ChunkGrid:
         cx0, cy0 = self.chunk_for_position(position)
         return min(fronts, key=lambda c: (c[0] - cx0) ** 2 + (c[1] - cy0) ** 2)
 
+    def nearest_frontier_position(self, position: Position) -> Optional[Position]:
+        """
+        Return the tile-space centre of the nearest frontier chunk, or None.
+        Convenience wrapper around nearest_frontier + centre_of_chunk.
+        """
+        frontier = self.nearest_frontier(position)
+        if frontier is None:
+            return None
+        return self.centre_of_chunk(*frontier)
+
     def all_charted(self) -> list[tuple[int, int]]:
-        """Return all charted chunk coordinates."""
+        """Return all charted chunk coordinates as (cx, cy) tuples."""
         return list(self._charted)
 
     # ------------------------------------------------------------------
@@ -137,8 +141,5 @@ class ChunkGrid:
         return bool(self._charted)
 
     def __repr__(self) -> str:
-        return f"ChunkGrid({len(self._charted)} chunks, {len(self.frontiers())} frontiers)"
-
-
-# Deferred import to avoid circular reference at module level
-from typing import Optional
+        frontier_count = len(self.frontiers())
+        return f"ChunkGrid({len(self._charted)} chunks, {frontier_count} frontiers)"
