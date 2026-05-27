@@ -6,11 +6,11 @@ Blackboard — shared working memory for agents within a goal's lifetime.
 The blackboard is the communication substrate for the multi-agent network. It
 is partitioned by scope and cleared at defined lifecycle boundaries:
 
-  - SUBTASK-scoped entries are cleared when a subtask resolves (success or
-    failure), allowing the next subtask to start with a clean slate for
+  - TASK-scoped entries are cleared when a task resolves (success or
+    failure), allowing the next task to start with a clean slate for
     transient intentions and reservations.
   - GOAL-scoped entries persist for the full duration of the goal, allowing
-    accumulation of durable observations and cross-subtask coordination.
+    accumulation of durable observations and cross-task coordination.
   - All entries are cleared on goal reset (Blackboard.clear_all()).
 
 Entry categories
@@ -26,10 +26,10 @@ Entry categories
 
 Entry scopes
 ------------
-  GOAL    : Persists for the full goal lifetime. Not cleared on subtask
+  GOAL    : Persists for the full goal lifetime. Not cleared on task
             resolution.
-  SUBTASK : Cleared when the current subtask resolves. Used for transient
-            working data specific to one subtask's execution.
+  TASK : Cleared when the current task resolves. Used for transient
+            working data specific to one task's execution.
 
 Entry expiry
 ------------
@@ -66,9 +66,9 @@ class EntryCategory(Enum):
 
 
 class EntryScope(Enum):
-    """Lifetime of a blackboard entry relative to goal/subtask boundaries."""
-    GOAL    = auto()   # persists across subtasks within the goal
-    SUBTASK = auto()   # cleared when current subtask resolves
+    """Lifetime of a blackboard entry relative to goal/task boundaries."""
+    GOAL    = auto()   # persists across tasks within the goal
+    TASK = auto()   # cleared when current task resolves
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class BlackboardEntry:
     ------
     id          : UUID string, auto-generated.
     category    : Semantic role (INTENTION, OBSERVATION, RESERVATION).
-    scope       : Lifetime (GOAL or SUBTASK).
+    scope       : Lifetime (GOAL or TASK).
     owner_agent : Identifier string of the agent that wrote this entry.
     created_at  : Game tick at which the entry was written.
     data        : Arbitrary dict payload — the actual content of the entry.
@@ -115,8 +115,8 @@ class Blackboard:
 
     Typical usage
     -------------
-    The coordinator calls clear_all() on goal reset, clear_scope(SUBTASK) on
-    each subtask resolution, and passes the blackboard to each agent on every
+    The coordinator calls clear_all() on goal reset, clear_scope(TASK) on
+    each task resolution, and passes the blackboard to each agent on every
     tick. Agents call write() to post entries and read() to consume them.
 
     The main loop and examination layer may call snapshot() to capture the
@@ -146,7 +146,7 @@ class Blackboard:
         Parameters
         ----------
         category    : Semantic role.
-        scope       : GOAL or SUBTASK lifetime.
+        scope       : GOAL or TASK lifetime.
         owner_agent : Identifier of the writing agent.
         created_at  : Current game tick.
         data        : Content dict — arbitrary structure, owned by the caller.
@@ -222,7 +222,7 @@ class Blackboard:
         """
         Remove all entries with the given scope.
 
-        Called by the coordinator on subtask resolution (scope=SUBTASK) to
+        Called by the coordinator on task resolution (scope=TASK) to
         clean up transient working data while preserving goal-scoped entries.
 
         Returns the number of entries removed.

@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from bridge import Action
+from world.model.patch import SelfModelPatch
 
 if TYPE_CHECKING:
     from execution.blackboard import Blackboard
@@ -70,6 +71,11 @@ class AgentProtocol:
         Return an estimate of progress toward the current subtask in
         [0.0, 1.0]. Derived from the agent's internal state, not from
         RewardEvaluator. The coordinator aggregates progress across subtasks.
+
+    pending_patches() -> list[SelfModelPatch]
+        Return and clear all self-model patches accumulated since the last
+        call. Called by the coordinator after each tick. Default returns []
+        — agents that never produce patches need not override.
     """
 
     def activate(
@@ -109,3 +115,12 @@ class AgentProtocol:
         kb: "KnowledgeBase",
     ) -> float:
         raise NotImplementedError
+
+    def pending_patches(self) -> list[SelfModelPatch]:
+        """
+        Return and clear accumulated self-model patches since the last call.
+
+        Called by the coordinator after each agent tick. Agents that produce
+        patches override this; agents that do not need not override.
+        """
+        return []

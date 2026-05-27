@@ -1,122 +1,87 @@
 """
 execution/agents/navigation.py
 
-NavigationAgent — rule-based movement agent for Phase 6.
+NavigationAgent — walks the player to a position or entity.
 
-Satisfies AgentProtocol. Handles movement only: walking the player character
-toward waypoint targets specified by the coordinator on the blackboard.
+Task types handled
+------------------
+  navigate_to_position   Walk to a tile-space position.
+  navigate_to_entity     Walk to within reach of a specific entity.
 
-Scope
------
-The navigation agent's sole responsibility is movement:
-  - Read waypoint INTENTION entries from the blackboard
-  - Emit MoveTo actions toward the target position or entity
-  - Detect arrival using is_reachable() (entity targets) or is_at() (position
-    targets) — never a hardcoded reach constant
-  - Write position OBSERVATION entries each tick
-  - Emit StopMovement on arrival so the character does not overshoot
-  - Emit StopMovement on arrival so the character does not overshoot
+Task attributes (set by coordinator)
+-------------------------------------
+  task.target_position   : Position   — for navigate_to_position
+  task.target_entity_id  : int        — for navigate_to_entity
 
-What the navigation agent does NOT do
---------------------------------------
-- Mine, craft, or interact with any entity (MiningAgent owns that)
-- Decide where to go (coordinator writes waypoints to the blackboard)
-- Inspect or store the Goal — agents receive Subtasks only
-- Read the `purpose` field of a waypoint entry or branch on it
-- Evaluate subtask success conditions (coordinator does that)
-- Write to the subtask ledger
+Task outcomes
+-------------
+  COMPLETE  : NavigateSkill reported SUCCEEDED (player arrived).
+  FAILED    : NavigateSkill reported FAILED (target entity not found).
+  STUCK     : NavigateSkill reported STUCK (pathfinder stalled).
 
-Movement model — one-shot with suppression
--------------------------------------------
-fa.move_to() triggers a pathfinding request in the Lua mod; the mod then
-drives walking_state every game tick along the computed path. The Python side
-should issue MoveTo as rarely as possible to avoid cancelling in-flight path
-requests.
+Design
+------
+This agent is intentionally thin. All movement logic — MoveTo suppression,
+stall detection, arrival detection, grace periods — lives in NavigateSkill.
+The agent's job is:
 
-A new MoveTo is issued only when:
-  1. A new waypoint is assigned (different waypoint blackboard entry).
-  2. The target position has changed by more than _REDUNDANT_THRESHOLD tiles
-     from the last-issued target (e.g. an entity has moved).
-  3. The player has been stationary for more than _STALL_GRACE_TICKS ticks
-     since the last command AND the target hasn't changed — indicating the
-     path was lost or the pathfinder returned unreachable.
+  1. On activate(): read target from task, start NavigateSkill.
+  2. Each tick(): tick the skill, return its actions.
+  3. On skill terminal status: write a blackboard observation summarising
+     the outcome.
 
-Condition 3 has a minimum wait of _STALL_GRACE_TICKS (default ~3 seconds)
-to give the pathfinder time to return a result before declaring a stall.
+The blackboard is used only for observations (no waypoint entries — the task
+carries the target directly). The coordinator reads skill status via the task
+evaluation cycle; no side-channel signals needed.
+
+Self-model patches
+------------------
+NavigationAgent does not produce self-model patches.
 
 Rules
 -----
-- No LLM calls. No RCON. Satisfies AgentProtocol interface.
-- All state between ticks stored on the instance. Cleared on activate().
-- Always pathfind=True in MoveTo.
+- No LLM calls. No RCON. No KnowledgeBase access.
+- All state cleared on activate().
 """
 
 from __future__ import annotations
 
 import logging
-import math
 from typing import Optional, TYPE_CHECKING
 
-from execution.blackboard import EntryCategory, EntryScope
 from execution.agents.base import AgentProtocol
-from execution.preconditions import is_at, is_reachable
-from bridge import Action, MoveTo, StopMovement
+from execution.blackboard import EntryCategory, EntryScope
+from execution.skills.navigate import NavigateSkill
+from execution.skills.base import SkillStatus
+from bridge import Action
 from world import Position
+from world.model.patch import SelfModelPatch
 
 if TYPE_CHECKING:
     from execution.blackboard import Blackboard
-    from planning.tasks.task import Task as Subtask
-    from world import KnowledgeBase
-    from world import WorldQuery
-    from world import WorldWriter
+    from planning.tasks.task import Task
+    from world import KnowledgeBase, WorldQuery, WorldWriter
 
 log = logging.getLogger(__name__)
-
-AGENT_ID = "navigation"
-
-# Arrival tolerance (tiles) for position-only waypoints (no entity_id).
-_POSITION_ARRIVAL_TOLERANCE = 1.5
-
-# Suppress a new MoveTo if the new target is within this many tiles of the
-# last-issued target — avoids cancelling an in-flight pathfinding request
-# just because the waypoint position is slightly different.
-_REDUNDANT_THRESHOLD = 0.5
-
-# Minimum ticks after issuing a MoveTo before stall detection fires.
-# Gives the Lua pathfinder time to compute and the character time to start
-# moving. At 60 tps and TICK_INTERVAL=10, 180 ticks ≈ 3 seconds of polls.
-_STALL_GRACE_TICKS = 180
-
-# Shorter grace when the player has never moved at all since the MoveTo was
-# issued. The pathfinder result arrives within a few game ticks — if the
-# player still hasn't moved after this many poll ticks, the path was almost
-# certainly returned as unreachable (ungenerated terrain, solid obstacle).
-# At 60 tps and TICK_INTERVAL=10, 30 ticks ≈ 0.5 seconds of polls.
-_UNREACHABLE_GRACE_TICKS = 30
-
-# Position change below this threshold (tiles) per tick → considered stalled.
-_STOPPED_THRESHOLD = 0.05
 
 
 class NavigationAgent(AgentProtocol):
     """
-    Rule-based navigation agent.
+    Walks the player to a position or entity target.
 
-    Issues MoveTo only when the waypoint changes, the target moves
-    significantly, or a genuine stall is detected after a grace period.
+    Wraps NavigateSkill; adds blackboard observations and translates skill
+    status into signals the coordinator can act on via task evaluation.
     """
 
-    AGENT_ID = "navigation"   # class attribute — matched by registry.agent_by_id()
+    AGENT_ID = "navigation"
+
+    # Task type strings this agent handles.
+    TASK_TYPES = frozenset({"navigate_to_position", "navigate_to_entity"})
 
     def __init__(self) -> None:
-        self._current_subtask: Optional["Subtask"] = None
-        self._waypoints_completed: int = 0
-        self._waypoints_total: int = 0
-        self._last_issued_waypoint_id: Optional[str] = None
-        self._last_issued_target: Optional[Position] = None
-        self._last_move_tick: int = 0
-        self._last_position: Optional[Position] = None
-        self._activate_position: Optional[Position] = None
+        self._skill = NavigateSkill()
+        self._task_type: str = ""
+        self._outcome_written: bool = False
 
     # ------------------------------------------------------------------
     # AgentProtocol
@@ -124,249 +89,158 @@ class NavigationAgent(AgentProtocol):
 
     def activate(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> None:
-        """
-        Called when a new subtask is assigned to this agent.
-        Resets all internal state for the new subtask.
-        """
-        self._current_subtask = subtask
-        self._waypoints_completed = 0
-        self._waypoints_total = 0
-        self._last_issued_waypoint_id = None
-        self._last_issued_target = None
-        self._last_move_tick = 0
-        self._last_position = None
-        self._activate_position = wq.player_position()
+        self._skill.reset()
+        self._outcome_written = False
+        self._task_type = getattr(task, "task_type", "navigate_to_position")
+
+        target_pos: Optional[Position] = getattr(task, "target_position", None)
+        target_entity_id: Optional[int] = getattr(task, "target_entity_id", None)
+
+        if target_pos is not None:
+            self._skill.start(target_position=target_pos)
+        elif target_entity_id is not None:
+            self._skill.start(target_entity_id=target_entity_id)
+        else:
+            log.error(
+                "NavigationAgent: task %s has neither target_position nor "
+                "target_entity_id — agent will idle",
+                task.id[:8],
+            )
+            return
 
         pos = wq.player_position()
         blackboard.write(
             category=EntryCategory.OBSERVATION,
-            scope=EntryScope.SUBTASK,
-            owner_agent=AGENT_ID,
+            scope=EntryScope.TASK,
+            owner_agent=self.AGENT_ID,
             created_at=wq.tick,
             data={
-                "type": "player_position",
-                "position": {"x": pos.x, "y": pos.y},
-                "subtask_id": subtask.id,
+                "type":          "navigation_started",
+                "task_id":       task.id,
+                "task_type":     self._task_type,
+                "from":          {"x": pos.x, "y": pos.y},
+                "target_pos":    {"x": target_pos.x, "y": target_pos.y}
+                                 if target_pos else None,
+                "target_entity": target_entity_id,
             },
         )
         log.debug(
-            "NavigationAgent activated at %s for subtask %s: %s",
-            pos, subtask.id[:8], subtask.description,
+            "NavigationAgent activated: task=%s type=%s target_pos=%s entity=%s",
+            task.id[:8], self._task_type, target_pos, target_entity_id,
         )
 
     def tick(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
         kb: "KnowledgeBase",
     ) -> list[Action]:
-        """
-        One navigation tick. Returns at most one action.
+        if self._skill.status() == SkillStatus.IDLE:
+            return []
 
-        Returns MoveTo only on a new waypoint or stall.
-        Returns StopMovement on arrival.
-        Returns [] on all other ticks.
-        """
+        if self._skill.status().is_terminal:
+            return []
+
+        actions = self._skill.tick(wq, ww, tick)
+
+        # Write position observation every tick for coordinator/examination.
         pos = wq.player_position()
-
         blackboard.write(
             category=EntryCategory.OBSERVATION,
-            scope=EntryScope.SUBTASK,
-            owner_agent=AGENT_ID,
+            scope=EntryScope.TASK,
+            owner_agent=self.AGENT_ID,
             created_at=tick,
             data={"type": "player_position", "position": {"x": pos.x, "y": pos.y}},
         )
 
-        waypoint = self._find_active_waypoint(blackboard, tick)
-        if waypoint is None:
-            self._last_position = pos
-            return []
+        status = self._skill.status()
+        if status.is_terminal and not self._outcome_written:
+            self._outcome_written = True
+            self._write_outcome(task, blackboard, tick, pos, status)
 
-        waypoint_data = waypoint.data
-        target_entity_id: Optional[int] = waypoint_data.get("target_entity_id")
-        target_pos_dict: Optional[dict] = waypoint_data.get("target_position")
-
-        # --- Arrival detection ---
-        # The coordinator evaluates the subtask's success_condition to detect
-        # completion — no side-channel signal needed here. On arrival we simply
-        # stop moving so the character doesn't overshoot the target.
-        if self._check_arrival(target_entity_id, target_pos_dict, wq):
-            self._last_issued_waypoint_id = None
-            self._waypoints_completed += 1
-            self._last_position = pos
-            return [StopMovement()]
-
-        # --- Movement ---
-        is_new_waypoint = waypoint.id != self._last_issued_waypoint_id
-        target_pos = self._resolve_target(target_entity_id, target_pos_dict, wq)
-
-        if target_pos is None:
-            self._last_position = pos
-            return []
-
-        is_redundant = self._is_redundant_target(target_pos)
-        # Use a shorter grace period if the player hasn't moved at all since
-        # activation — this catches pathfinder "unreachable" results quickly
-        # without waiting the full grace period.
-        never_moved = (
-            self._activate_position is not None
-            and self._is_same_position(pos, self._activate_position)
-        )
-        grace = _UNREACHABLE_GRACE_TICKS if never_moved else _STALL_GRACE_TICKS
-        grace_elapsed = (tick - self._last_move_tick) >= grace
-        is_stalled = grace_elapsed and self._is_stalled(pos)
-
-        if is_stalled:
-            # Player hasn't moved since the last issued command and the grace
-            # period has elapsed. Re-issuing the same MoveTo would repeat the
-            # same path and stall again (e.g. tree or obstacle blocking the
-            # path).
-            # Signal the coordinator to escalate immediately rather than
-            # waiting for the subtask failure_condition timeout.
-            log.warning(
-                "NavigationAgent: stall after %d ticks at %s — "
-                "signalling coordinator to re-derive waypoint",
-                tick - self._last_move_tick,
-                pos,
-            )
-            blackboard.write(
-                category=EntryCategory.OBSERVATION,
-                scope=EntryScope.SUBTASK,
-                owner_agent=AGENT_ID,
-                created_at=tick,
-                data={"type": "navigation_stalled", "position": {"x": pos.x, "y": pos.y}},
-            )
-            self._last_position = pos
-            return [StopMovement()]
-
-        should_issue = is_new_waypoint or not is_redundant
-
-        if should_issue:
-            action = MoveTo(position=target_pos, pathfind=True)
-            self._last_issued_waypoint_id = waypoint.id
-            self._last_issued_target = target_pos
-            self._last_move_tick = tick
-            self._last_position = pos
-            return [action]
-
-        self._last_position = pos
-        return []
+        return actions
 
     def observe(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> dict:
         pos = wq.player_position()
-        return {
-            "agent": AGENT_ID,
-            "subtask_id": subtask.id[:8],
+        obs = self._skill.observe()
+        obs.update({
+            "agent":           self.AGENT_ID,
+            "task_id":         task.id[:8],
+            "task_type":       self._task_type,
             "player_position": {"x": pos.x, "y": pos.y},
-            "waypoints_completed": self._waypoints_completed,
-            "waypoints_total": self._waypoints_total,
-            "has_active_waypoint": self._last_issued_waypoint_id is not None,
-        }
+            "skill_status":    self._skill.status().name,
+        })
+        return obs
 
     def progress(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> float:
-        if self._waypoints_total == 0:
-            return 0.0
-        return min(1.0, self._waypoints_completed / self._waypoints_total)
+        status = self._skill.status()
+        if status == SkillStatus.SUCCEEDED:
+            return 1.0
+        # NavigateSkill has no intermediate progress metric; report 0.5 once
+        # a MoveTo has been issued (player is in motion toward target).
+        if status == SkillStatus.RUNNING:
+            return 0.5 if self._skill._last_issued_target is not None else 0.0
+        return 0.0
+
+    def pending_patches(self) -> list[SelfModelPatch]:
+        return []
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal
     # ------------------------------------------------------------------
 
-    def _find_active_waypoint(
+    def _write_outcome(
         self,
+        task: "Task",
         blackboard: "Blackboard",
         tick: int,
-    ) -> Optional[object]:
-        intentions = blackboard.read(
-            category=EntryCategory.INTENTION,
-            current_tick=tick,
+        pos: Position,
+        status: SkillStatus,
+    ) -> None:
+        obs_type = {
+            SkillStatus.SUCCEEDED: "navigation_succeeded",
+            SkillStatus.STUCK:     "navigation_stuck",
+            SkillStatus.FAILED:    "navigation_failed",
+        }.get(status, "navigation_unknown")
+
+        blackboard.write(
+            category=EntryCategory.OBSERVATION,
+            scope=EntryScope.TASK,
+            owner_agent=self.AGENT_ID,
+            created_at=tick,
+            data={
+                "type":          obs_type,
+                "task_id":       task.id,
+                "position":      {"x": pos.x, "y": pos.y},
+                "skill_observe": self._skill.observe(),
+            },
         )
-        waypoints = [e for e in intentions if e.data.get("type") == "waypoint"]
-        if not waypoints:
-            return None
-        waypoint = waypoints[0]
-        if waypoint.id != self._last_issued_waypoint_id:
-            self._waypoints_total = max(
-                self._waypoints_total,
-                self._waypoints_completed + len(waypoints),
+        if status == SkillStatus.STUCK:
+            log.warning(
+                "NavigationAgent: task %s STUCK at %s", task.id[:8], pos
             )
-        return waypoint
-
-    def _check_arrival(
-        self,
-        target_entity_id: Optional[int],
-        target_pos_dict: Optional[dict],
-        wq: "WorldQuery",
-    ) -> bool:
-        if target_entity_id is not None:
-            return is_reachable(target_entity_id, wq)
-        if target_pos_dict is not None:
-            target = Position(x=target_pos_dict["x"], y=target_pos_dict["y"])
-            return is_at(target, wq, tolerance=_POSITION_ARRIVAL_TOLERANCE)
-        return False
-
-    def _resolve_target(
-        self,
-        target_entity_id: Optional[int],
-        target_pos_dict: Optional[dict],
-        wq: "WorldQuery",
-    ) -> Optional[Position]:
-        """Resolve waypoint data to a concrete Position, or None."""
-        if target_entity_id is not None:
-            entity = wq.entity_by_id(target_entity_id)
-            if entity is not None:
-                return entity.position
-        if target_pos_dict is not None:
-            return Position(x=target_pos_dict["x"], y=target_pos_dict["y"])
-        log.warning("NavigationAgent: waypoint has no resolvable target position")
-        return None
-
-    def _is_redundant_target(self, target: Position) -> bool:
-        """
-        True if *target* is within _REDUNDANT_THRESHOLD of the last-issued
-        target — meaning a MoveTo to this position was already sent and the
-        pathfinder is likely still executing it.
-        """
-        if self._last_issued_target is None:
-            return False
-        dx = target.x - self._last_issued_target.x
-        dy = target.y - self._last_issued_target.y
-        return math.sqrt(dx * dx + dy * dy) < _REDUNDANT_THRESHOLD
-
-    def _is_stalled(self, current_pos: Position) -> bool:
-        """
-        True if the player hasn't moved since the last tick — the pathfinder
-        may have returned unreachable or the path was lost.
-        Only meaningful after _STALL_GRACE_TICKS have elapsed.
-        """
-        if self._last_position is None:
-            return False
-        dx = current_pos.x - self._last_position.x
-        dy = current_pos.y - self._last_position.y
-        return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
-
-    def _is_same_position(self, a: Position, b: Position) -> bool:
-        """True if two positions are within _STOPPED_THRESHOLD of each other."""
-        dx = a.x - b.x
-        dy = a.y - b.y
-        return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
+        else:
+            log.debug(
+                "NavigationAgent: task %s → %s at %s",
+                task.id[:8], status.name, pos,
+            )
