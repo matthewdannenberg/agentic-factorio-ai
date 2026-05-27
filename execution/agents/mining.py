@@ -1,43 +1,55 @@
 """
 execution/agents/mining.py
 
-MiningAgent — handles resource gathering and obstacle clearing.
+MiningAgent — resource gathering and terrain clearing.
 
-Satisfies AgentProtocol. Owns two subtask types:
-
+Task types handled
+------------------
   gather_resource
-    Mine N of a named resource from a known patch. The approach walk has
-    already been completed by the NavigationAgent before this agent is
-    activated. The mining agent starts mining immediately, monitors inventory,
-    and re-issues the mining command if it stalls (player drifted out of
-    reach, resource tile exhausted and must move to adjacent tile).
+      Mine N units of a named resource from a known patch.
+      The coordinator navigates the player to the patch first
+      (NavigationAgent), then activates this agent.
 
   clear_region
-    Given a bounding box, remove all obstacles from it. Two modes:
+      Remove entities from a bounding box. Two modes:
+        clear_natural — trees, rocks, cliffs, fish (name heuristics).
+        clear_all     — every entity in the bbox.
+      The coordinator navigates the player to the region first.
 
-      clear_all     — mine every entity in the region regardless of faction.
-      clear_natural — mine only entities whose force is "neutral" and whose
-                      type is not "resource" (trees, rocks, cliffs, etc.).
-                      Uses entity name heuristics at runtime — no KB dependency.
+Task attributes (set by coordinator)
+-------------------------------------
+  gather_resource:
+      task.resource_type   : str       — e.g. "iron-ore"
+      task.target_position : Position  — tile to mine from
+      task.count           : int       — units to collect (0 = unlimited)
 
-    For each target entity: if already within reach, mine it. If not, move
-    to it first (the agent handles its own local positioning within the box),
-    then mine it. Large-distance transit to the region is handled by the
-    NavigationAgent before this agent is activated.
+  clear_region:
+      task.bbox            : BoundingBox
+      task.clear_mode      : str       — "clear_natural" | "clear_all"
 
-Mining model
-------------
-fa.mine_resource() and fa.mine_entity() set player.mining_state, which is
-continuous: once set, the player mines until the resource is exhausted or the
-state is cleared. The agent issues the command once and then does nothing until
-a stall is detected (inventory unchanged after a grace period).
+Task outcomes
+-------------
+  COMPLETE  : MineSkill SUCCEEDED (count reached), or all clear targets gone.
+  STUCK     : MineSkill STUCK (inventory stalled), or DestroySkill STUCK.
+
+Internal loop for clear_region
+-------------------------------
+For each entity in target list:
+  1. Check is_reachable(). If yes → start DestroySkill.
+  2. If not reachable → start NavigateSkill toward entity position.
+  3. When NavigateSkill SUCCEEDED → check reachable again.
+  4. When DestroySkill SUCCEEDED → advance to next target.
+  5. When DestroySkill STUCK → skip this target, log warning.
+
+Self-model patches
+------------------
+MiningAgent does not write factory graph patches. Gathering and clearing
+leave no persistent factory record beyond inventory changes.
 
 Rules
 -----
-- No LLM calls. No RCON. Satisfies AgentProtocol.
-- No KB dependency. Natural-object detection uses entity name heuristics.
-- Agents receive Subtasks, not Goals. No Goal is stored or inspected.
-- All state between ticks stored on the instance. Cleared on activate().
+- No LLM calls. No RCON. No KnowledgeBase access.
+- All state cleared on activate().
 """
 
 from __future__ import annotations
@@ -48,40 +60,26 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, TYPE_CHECKING
 
-from execution.blackboard import EntryCategory, EntryScope
 from execution.agents.base import AgentProtocol
-from execution.preconditions import is_reachable
-from bridge import Action, MineEntity, MineResource, MoveTo, StopMining, StopMovement
+from execution.blackboard import EntryCategory, EntryScope
+from execution.predicates import is_reachable
+from execution.skills.base import SkillStatus
+from execution.skills.navigate import NavigateSkill
+from execution.skills.mine import MineSkill
+from execution.skills.destroy import DestroySkill
+from bridge import Action, StopMining
 from world import Position
+from world.model.patch import SelfModelPatch
 
 if TYPE_CHECKING:
     from execution.blackboard import Blackboard
-    from planning.tasks.task import Task as Subtask
-    from world import KnowledgeBase
-    from world import WorldQuery
-    from world import WorldWriter
+    from planning.tasks.task import Task
+    from world import KnowledgeBase, WorldQuery, WorldWriter, BoundingBox
 
 log = logging.getLogger(__name__)
 
-AGENT_ID = "mining"
 
-# Default player reach radius in tiles when not available from WorldQuery.
-_DEFAULT_REACH = 6.0
-
-# Ticks to wait after issuing a mining command before checking for stall.
-# Mining a single ore tile or entity takes several seconds; this must be
-# long enough that we don't re-issue while the first swing is still in
-# progress. At 60 tps, 300 ticks = 5 seconds — conservative but safe.
-_MINING_GRACE_TICKS = 300
-
-# Ticks to wait after issuing a move command before checking for stall.
-_MOVE_GRACE_TICKS = 10
-
-# Position change below this threshold (tiles/tick) → considered stalled.
-_STOPPED_THRESHOLD = 0.05
-
-
-class _SubtaskKind(Enum):
+class _TaskKind(Enum):
     GATHER  = auto()
     CLEAR   = auto()
     UNKNOWN = auto()
@@ -93,39 +91,39 @@ class _ClearTarget:
     position: Position
 
 
+class _ClearPhase(Enum):
+    NAVIGATE = auto()   # moving toward target entity
+    DESTROY  = auto()   # actively mining target entity
+
+
 class MiningAgent(AgentProtocol):
     """
-    Mining and destruction agent.
+    Resource gathering and terrain clearing agent.
 
-    Reads mining_task INTENTION entries from the blackboard (written by the
-    coordinator) and executes them. Handles its own local positioning within
-    a target region for clear_region tasks; long-distance transit is the
-    NavigationAgent's job.
+    Uses MineSkill for gathering, NavigateSkill + DestroySkill for clearing.
     """
 
-    AGENT_ID = "mining"   # class attribute — matched by registry.agent_by_id()
+    AGENT_ID = "mining"
+
+    TASK_TYPES = frozenset({"gather_resource", "clear_region"})
 
     def __init__(self) -> None:
-        self._current_subtask: Optional["Subtask"] = None
-        self._subtask_kind: _SubtaskKind = _SubtaskKind.UNKNOWN
-        # Set by activate() so tick() emits StopMining on its first call.
-        # Ensures the Lua persistent miner is halted whenever the agent is
-        # assigned a new subtask, regardless of what came before.
+        self._task_kind: _TaskKind = _TaskKind.UNKNOWN
         self._pending_stop: bool = False
 
+        # Skills
+        self._mine_skill    = MineSkill()
+        self._nav_skill     = NavigateSkill()
+        self._destroy_skill = DestroySkill()
+
         # Gather state
-        self._gather_resource_type: str = ""
-        self._gather_target_pos: Optional[Position] = None
-        self._gather_issued_at: int = 0
-        self._last_inventory: dict = {}
+        self._gather_outcome_written: bool = False
 
         # Clear state
         self._clear_targets: list[_ClearTarget] = []
-        self._clear_natural_only: bool = False
         self._current_target: Optional[_ClearTarget] = None
-        self._mine_issued_at: int = 0
-        self._move_issued_at: int = 0
-        self._last_position: Optional[Position] = None
+        self._clear_phase: _ClearPhase = _ClearPhase.NAVIGATE
+        self._targets_total: int = 0
 
     # ------------------------------------------------------------------
     # AgentProtocol
@@ -133,98 +131,136 @@ class MiningAgent(AgentProtocol):
 
     def activate(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> None:
-        """
-        Called when a new subtask is assigned to this agent.
-        Resets all internal state for the new subtask.
-        """
-        self._current_subtask = subtask
-        self._subtask_kind = _SubtaskKind.UNKNOWN
-        self._gather_resource_type = ""
-        self._gather_target_pos = None
-        self._gather_issued_at = 0
-        self._last_inventory = {}
+        # Reset all skills and state.
+        self._mine_skill.reset()
+        self._nav_skill.reset()
+        self._destroy_skill.reset()
+        self._task_kind = _TaskKind.UNKNOWN
+        self._gather_outcome_written = False
         self._clear_targets = []
-        self._clear_natural_only = False
         self._current_target = None
-        self._mine_issued_at = 0
-        self._move_issued_at = 0
-        self._last_position = None
-        # Halt any in-progress Lua mining from a previous subtask. The stop
-        # action is emitted by tick() on its first call rather than here,
-        # because activate() has no return value.
+        self._clear_phase = _ClearPhase.NAVIGATE
+        self._targets_total = 0
+        # Halt any persistent Lua miner from a previous task.
         self._pending_stop = True
+
+        task_type = getattr(task, "task_type", "")
+
+        if task_type == "gather_resource":
+            self._task_kind = _TaskKind.GATHER
+            pos: Optional[Position] = getattr(task, "target_position", None)
+            resource: str = getattr(task, "resource_type", "")
+            count: int = getattr(task, "count", 0)
+            if pos and resource:
+                self._mine_skill.start(position=pos, resource=resource, count=count)
+            else:
+                log.error(
+                    "MiningAgent: gather_resource task %s missing "
+                    "target_position or resource_type",
+                    task.id[:8],
+                )
+
+        elif task_type == "clear_region":
+            self._task_kind = _TaskKind.CLEAR
+            # Target list built on first tick (needs wq.state.entities scan).
+
+        else:
+            log.warning(
+                "MiningAgent: unknown task_type %r on task %s",
+                task_type, task.id[:8],
+            )
+
+        blackboard.write(
+            category=EntryCategory.OBSERVATION,
+            scope=EntryScope.TASK,
+            owner_agent=self.AGENT_ID,
+            created_at=wq.tick,
+            data={
+                "type":      "mining_started",
+                "task_id":   task.id,
+                "task_type": task_type,
+            },
+        )
         log.debug(
-            "MiningAgent activated for subtask %s: %s",
-            subtask.id[:8], subtask.description,
+            "MiningAgent activated: task=%s type=%s",
+            task.id[:8], task_type,
         )
 
     def tick(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
         kb: "KnowledgeBase",
     ) -> list[Action]:
-        """
-        One tick. Reads the active mining_task entry and executes it.
-        Issues commands only when necessary (new task or stall detected).
-        """
         if self._pending_stop:
             self._pending_stop = False
             return [StopMining()]
 
-        task = self._find_active_task(blackboard, tick)
-        if task is None:
-            return []
-
-        task_type = task.data.get("task_type", "")
-
-        if task_type == "gather_resource":
-            return self._tick_gather(task.data, wq, tick)
-        elif task_type in ("clear_all", "clear_natural"):
-            return self._tick_clear(task.data, wq, tick)
-        else:
-            log.warning("MiningAgent: unknown task_type %r", task_type)
-            return []
+        if self._task_kind == _TaskKind.GATHER:
+            return self._tick_gather(task, blackboard, wq, ww, tick)
+        elif self._task_kind == _TaskKind.CLEAR:
+            return self._tick_clear(task, blackboard, wq, ww, tick)
+        return []
 
     def observe(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> dict:
-        return {
-            "agent": AGENT_ID,
-            "subtask_id": subtask.id[:8],
-            "subtask_kind": self._subtask_kind.name,
-            "clear_targets_remaining": len(self._clear_targets),
-            "current_target": (
-                self._current_target.entity_id if self._current_target else None
-            ),
+        obs: dict = {
+            "agent":      self.AGENT_ID,
+            "task_id":    task.id[:8],
+            "task_kind":  self._task_kind.name,
         }
+        if self._task_kind == _TaskKind.GATHER:
+            obs.update(self._mine_skill.observe())
+        elif self._task_kind == _TaskKind.CLEAR:
+            obs.update({
+                "clear_targets_remaining": len(self._clear_targets),
+                "clear_current_entity":    (
+                    self._current_target.entity_id
+                    if self._current_target else None
+                ),
+                "clear_phase":             self._clear_phase.name,
+            })
+            obs.update(self._destroy_skill.observe())
+        return obs
 
     def progress(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> float:
-        if self._subtask_kind == _SubtaskKind.CLEAR:
-            total = len(self._clear_targets) + (1 if self._current_target else 0)
-            if total == 0:
+        if self._task_kind == _TaskKind.GATHER:
+            status = self._mine_skill.status()
+            if status == SkillStatus.SUCCEEDED:
+                return 1.0
+            if status == SkillStatus.RUNNING:
+                return 0.5
+            return 0.0
+        if self._task_kind == _TaskKind.CLEAR:
+            if self._targets_total == 0:
                 return 0.0
-            done = total - len(self._clear_targets) - (1 if self._current_target else 0)
-            return min(1.0, done / total)
+            remaining = len(self._clear_targets) + (
+                1 if self._current_target else 0
+            )
+            return min(1.0, 1.0 - remaining / self._targets_total)
         return 0.0
+
+    def pending_patches(self) -> list[SelfModelPatch]:
+        return []
 
     # ------------------------------------------------------------------
     # Gather
@@ -232,45 +268,44 @@ class MiningAgent(AgentProtocol):
 
     def _tick_gather(
         self,
-        task_data: dict,
+        task: "Task",
+        blackboard: "Blackboard",
         wq: "WorldQuery",
+        ww: "WorldWriter",
         tick: int,
     ) -> list[Action]:
-        self._subtask_kind = _SubtaskKind.GATHER
+        status = self._mine_skill.status()
 
-        resource_type = task_data.get("resource_type", "")
-        target_pos_dict = task_data.get("target_position")
-        if not resource_type or not target_pos_dict:
-            log.warning("MiningAgent: gather_resource task missing fields")
+        if status == SkillStatus.IDLE:
+            # activate() couldn't start the skill (missing params).
             return []
 
-        target_pos = Position(x=target_pos_dict["x"], y=target_pos_dict["y"])
+        if status.is_terminal and not self._gather_outcome_written:
+            self._gather_outcome_written = True
+            obs_type = (
+                "gather_succeeded" if status == SkillStatus.SUCCEEDED
+                else "gather_stuck"
+            )
+            blackboard.write(
+                category=EntryCategory.OBSERVATION,
+                scope=EntryScope.TASK,
+                owner_agent=self.AGENT_ID,
+                created_at=tick,
+                data={
+                    "type":          obs_type,
+                    "task_id":       task.id,
+                    "skill_observe": self._mine_skill.observe(),
+                },
+            )
+            if status == SkillStatus.STUCK:
+                log.warning(
+                    "MiningAgent: gather STUCK — task %s", task.id[:8]
+                )
 
-        is_new = (
-            self._gather_resource_type != resource_type
-            or self._gather_target_pos != target_pos
-        )
-        if is_new:
-            self._gather_resource_type = resource_type
-            self._gather_target_pos = target_pos
-            self._gather_issued_at = 0
-            self._last_inventory = {}
+        if status.is_terminal:
+            return []
 
-        grace_elapsed = (tick - self._gather_issued_at) >= _MINING_GRACE_TICKS
-        is_stalled = grace_elapsed and self._is_inventory_stalled(wq)
-
-        if self._gather_issued_at == 0 or is_stalled:
-            if is_stalled:
-                log.debug("MiningAgent: gather stall detected, re-issuing")
-            self._gather_issued_at = tick
-            self._last_inventory = self._inventory_snapshot(wq)
-            return [MineResource(
-                position=target_pos,
-                resource=resource_type,
-                count=0,  # 0 = mine until full / exhausted
-            )]
-
-        return []
+        return self._mine_skill.tick(wq, ww, tick)
 
     # ------------------------------------------------------------------
     # Clear
@@ -278,159 +313,178 @@ class MiningAgent(AgentProtocol):
 
     def _tick_clear(
         self,
-        task_data: dict,
+        task: "Task",
+        blackboard: "Blackboard",
         wq: "WorldQuery",
+        ww: "WorldWriter",
         tick: int,
     ) -> list[Action]:
-        self._subtask_kind = _SubtaskKind.CLEAR
-        task_type = task_data.get("task_type", "clear_all")
-        self._clear_natural_only = (task_type == "clear_natural")
-
         # Build target list on first tick.
-        if not self._clear_targets and self._current_target is None:
-            self._build_target_list(task_data, wq)
-            if not self._clear_targets:
-                log.info("MiningAgent: no targets found in region")
+        if not self._clear_targets and self._current_target is None \
+                and self._targets_total == 0:
+            self._build_target_list(task, wq)
+            if not self._clear_targets and self._current_target is None:
+                log.info("MiningAgent: no targets in clear region — done")
                 return []
 
         # Advance if current target was destroyed.
         if self._current_target is not None:
             if wq.entity_by_id(self._current_target.entity_id) is None:
                 log.debug(
-                    "MiningAgent: target %d gone, advancing",
+                    "MiningAgent: entity %d gone, advancing",
                     self._current_target.entity_id,
                 )
                 self._current_target = None
-                self._mine_issued_at = 0
-                self._move_issued_at = 0
+                self._nav_skill.reset()
+                self._destroy_skill.reset()
+                self._clear_phase = _ClearPhase.NAVIGATE
 
         # Pick next target.
         if self._current_target is None:
             if not self._clear_targets:
                 return []
             self._current_target = self._clear_targets.pop(0)
-            self._mine_issued_at = 0
-            self._move_issued_at = 0
-            log.debug("MiningAgent: advancing to entity %d", self._current_target.entity_id)
+            self._nav_skill.reset()
+            self._destroy_skill.reset()
+            self._clear_phase = _ClearPhase.NAVIGATE
+            log.debug(
+                "MiningAgent: targeting entity %d",
+                self._current_target.entity_id,
+            )
 
-        current_pos = wq.player_position()
+        # Route to the right phase.
+        if self._clear_phase == _ClearPhase.NAVIGATE:
+            return self._clear_navigate(task, blackboard, wq, ww, tick)
+        else:
+            return self._clear_destroy(task, blackboard, wq, ww, tick)
 
-        if is_reachable(self._current_target.entity_id, wq):
-            return self._issue_mine(self._current_target, wq, tick)
+    def _clear_navigate(
+        self,
+        task: "Task",
+        blackboard: "Blackboard",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+    ) -> list[Action]:
+        """Move toward current target until it's reachable, then switch to DESTROY."""
+        target = self._current_target
 
-        return self._issue_move(self._current_target.position, current_pos, tick)
+        # Already reachable — skip navigation.
+        if is_reachable(target.entity_id, wq):
+            self._nav_skill.reset()
+            self._clear_phase = _ClearPhase.DESTROY
+            self._destroy_skill.start(entity_id=target.entity_id)
+            return self._clear_destroy(task, blackboard, wq, ww, tick)
 
-    def _build_target_list(self, task_data: dict, wq: "WorldQuery") -> None:
-        bbox = task_data.get("bounding_box")
-        if not bbox:
-            log.warning("MiningAgent: clear task has no bounding_box")
+        nav_status = self._nav_skill.status()
+
+        if nav_status == SkillStatus.IDLE:
+            self._nav_skill.start(target_position=target.position)
+        elif nav_status == SkillStatus.SUCCEEDED:
+            # Arrived — switch to DESTROY regardless of is_reachable
+            # (entity may be slightly off-centre from its tile position).
+            self._nav_skill.reset()
+            self._clear_phase = _ClearPhase.DESTROY
+            self._destroy_skill.start(entity_id=target.entity_id)
+            return self._clear_destroy(task, blackboard, wq, ww, tick)
+        elif nav_status == SkillStatus.STUCK:
+            log.warning(
+                "MiningAgent: nav stuck reaching entity %d — skipping",
+                target.entity_id,
+            )
+            self._current_target = None
+            self._nav_skill.reset()
+            self._clear_phase = _ClearPhase.NAVIGATE
+            return []
+
+        return self._nav_skill.tick(wq, ww, tick)
+
+    def _clear_destroy(
+        self,
+        task: "Task",
+        blackboard: "Blackboard",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+    ) -> list[Action]:
+        """Mine the current target entity."""
+        d_status = self._destroy_skill.status()
+
+        if d_status == SkillStatus.IDLE:
+            # Shouldn't normally happen — start defensively.
+            self._destroy_skill.start(entity_id=self._current_target.entity_id)
+
+        if d_status == SkillStatus.SUCCEEDED:
+            # Entity gone — advance handled at top of _tick_clear next tick.
+            return []
+
+        if d_status == SkillStatus.STUCK:
+            log.warning(
+                "MiningAgent: destroy STUCK on entity %d — skipping",
+                self._current_target.entity_id,
+            )
+            self._current_target = None
+            self._destroy_skill.reset()
+            self._clear_phase = _ClearPhase.NAVIGATE
+            return []
+
+        return self._destroy_skill.tick(wq, ww, tick)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_target_list(self, task: "Task", wq: "WorldQuery") -> None:
+        bbox = getattr(task, "bbox", None)
+        if bbox is None:
+            log.warning(
+                "MiningAgent: clear_region task %s has no bbox", task.id[:8]
+            )
             return
 
-        x_min = bbox.get("x_min", -1e9)
-        y_min = bbox.get("y_min", -1e9)
-        x_max = bbox.get("x_max",  1e9)
-        y_max = bbox.get("y_max",  1e9)
+        clear_mode: str = getattr(task, "clear_mode", "clear_natural")
+        natural_only = (clear_mode == "clear_natural")
 
-        targets = []
+        targets: list[_ClearTarget] = []
         for entity in wq.state.entities:
             pos = entity.position
-            if not (x_min <= pos.x <= x_max and y_min <= pos.y <= y_max):
+            if not (bbox.x_min <= pos.x <= bbox.x_max
+                    and bbox.y_min <= pos.y <= bbox.y_max):
                 continue
-            if self._clear_natural_only and not self._is_natural(entity):
+            if natural_only and not _is_natural(entity):
                 continue
             targets.append(_ClearTarget(entity_id=entity.entity_id, position=pos))
 
         player_pos = wq.player_position()
-        targets.sort(key=lambda t: t.position.distance_to(player_pos))
+        targets.sort(
+            key=lambda t: math.hypot(
+                t.position.x - player_pos.x,
+                t.position.y - player_pos.y,
+            )
+        )
         self._clear_targets = targets
-        log.info("MiningAgent: %d targets in clear region", len(targets))
-
-    def _is_natural(self, entity) -> bool:
-        """
-        True if the entity is a natural world object (not player-built).
-
-        Uses entity name heuristics — KB-free. When EntityState gains a
-        prototype_type field (Phase 9), replace with a type check against
-        _NATURAL_TYPES = {"tree", "simple-entity", "cliff", "fish"}.
-        """
-        name = entity.name.lower()
-        return (
-            "tree" in name
-            or "rock" in name
-            or "boulder" in name
-            or "cliff" in name
-            or "fish" in name
+        self._targets_total = len(targets)
+        log.info(
+            "MiningAgent: %d targets in clear region (mode=%s)",
+            len(targets), clear_mode,
         )
 
-    def _issue_mine(
-        self,
-        target: _ClearTarget,
-        wq: "WorldQuery",
-        tick: int,
-    ) -> list[Action]:
-        grace_elapsed = (tick - self._mine_issued_at) >= _MINING_GRACE_TICKS
-        entity_still_present = wq.entity_by_id(target.entity_id) is not None
 
-        if self._mine_issued_at == 0 or (grace_elapsed and entity_still_present):
-            if self._mine_issued_at > 0:
-                log.debug("MiningAgent: mine stall on %d, re-issuing", target.entity_id)
-            self._mine_issued_at = tick
-            return [MineEntity(entity_id=target.entity_id)]
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
 
-        return []
-
-    def _issue_move(
-        self,
-        target_pos: Position,
-        current_pos: Position,
-        tick: int,
-    ) -> list[Action]:
-        is_new = self._move_issued_at == 0
-        grace_elapsed = (tick - self._move_issued_at) >= _MOVE_GRACE_TICKS
-        is_stalled = grace_elapsed and self._is_movement_stalled(current_pos)
-
-        if is_new or is_stalled:
-            if is_stalled:
-                log.debug("MiningAgent: move stall, re-issuing")
-            self._move_issued_at = tick
-            self._last_position = current_pos
-            return [MoveTo(position=target_pos, pathfind=True)]
-
-        self._last_position = current_pos
-        return []
-
-    def _is_movement_stalled(self, current_pos: Position) -> bool:
-        if self._last_position is None:
-            return False
-        dx = current_pos.x - self._last_position.x
-        dy = current_pos.y - self._last_position.y
-        return math.sqrt(dx * dx + dy * dy) < _STOPPED_THRESHOLD
-
-    # ------------------------------------------------------------------
-    # Inventory stall detection
-    # ------------------------------------------------------------------
-
-    def _is_inventory_stalled(self, wq: "WorldQuery") -> bool:
-        return self._inventory_snapshot(wq) == self._last_inventory
-
-    def _inventory_snapshot(self, wq: "WorldQuery") -> dict:
-        return {
-            slot.item: slot.count
-            for slot in wq.state.player.inventory.slots
-        }
-
-    # ------------------------------------------------------------------
-    # Blackboard reading
-    # ------------------------------------------------------------------
-
-    def _find_active_task(
-        self,
-        blackboard: "Blackboard",
-        tick: int,
-    ) -> Optional[object]:
-        intentions = blackboard.read(
-            category=EntryCategory.INTENTION,
-            current_tick=tick,
-        )
-        tasks = [e for e in intentions if e.data.get("type") == "mining_task"]
-        return tasks[0] if tasks else None
+def _is_natural(entity) -> bool:
+    """
+    True if the entity appears to be a natural world object.
+    Uses name heuristics — KB-free. Replace with prototype_type check
+    when EntityState gains that field (Phase 9).
+    """
+    name = entity.name.lower()
+    return (
+        "tree"    in name
+        or "rock"    in name
+        or "boulder" in name
+        or "cliff"   in name
+        or "fish"    in name
+    )

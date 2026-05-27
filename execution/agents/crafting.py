@@ -3,7 +3,7 @@ execution/agents/crafting.py
 
 CraftingAgent — queues hand-crafting jobs and confirms ingredient consumption.
 
-Satisfies AgentProtocol. Owns one subtask type:
+Satisfies AgentProtocol. Owns one task type:
 
   craft_items
     Craft one or more items by hand. The coordinator writes a list of
@@ -42,7 +42,7 @@ success conditions — the coordinator handles that as normal.
 
 Multi-target crafting
 ---------------------
-A single craft_items subtask may request multiple item types. All CraftItem
+A single craft_items task may request multiple item types. All CraftItem
 commands are issued on the same tick. expected_post_inventory covers the
 combined effect of all targets sequentially.
 
@@ -51,7 +51,7 @@ Rules
 - No LLM calls. No RCON. Satisfies AgentProtocol.
 - No KB access needed — all cost information comes from the coordinator
   via the INTENTION entry.
-- Agents receive Subtasks, not Goals. No Goal is stored or inspected.
+- Agents receive Tasks, not Goals. No Goal is stored or inspected.
 - All state between ticks stored on the instance. Cleared on activate().
 """
 
@@ -67,7 +67,7 @@ from bridge import Action, CraftItem
 
 if TYPE_CHECKING:
     from execution.blackboard import Blackboard
-    from planning.tasks.task import Task as Subtask
+    from planning.tasks.task import Task
     from world import KnowledgeBase
     from world import WorldQuery
     from world import WorldWriter
@@ -110,7 +110,7 @@ class CraftingAgent(AgentProtocol):
     AGENT_ID = "crafting"
 
     def __init__(self) -> None:
-        self._current_subtask: Optional["Subtask"] = None
+        self._current_task: Optional["Task"] = None
         self._targets: list[_CraftTarget] = []
         # Inventory snapshot at activation.
         self._snapshot: dict[str, int] = {}
@@ -127,12 +127,12 @@ class CraftingAgent(AgentProtocol):
 
     def activate(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
     ) -> None:
-        self._current_subtask = subtask
+        self._current_task = task
         self._targets = []
         self._snapshot = self._inventory_snapshot(wq)
         self._expected_post = dict(self._snapshot)
@@ -147,13 +147,13 @@ class CraftingAgent(AgentProtocol):
                                                       self._snapshot))
 
         log.debug(
-            "CraftingAgent activated for subtask %s: %d target(s) — %s",
-            subtask.id[:8], len(self._targets), subtask.description,
+            "CraftingAgent activated for task %s: %d target(s) — %s",
+            task.id[:8], len(self._targets), task.description,
         )
 
     def tick(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         ww: "WorldWriter",
@@ -179,8 +179,8 @@ class CraftingAgent(AgentProtocol):
                 if self._reissue_count > _MAX_REISSUE_ATTEMPTS:
                     log.warning(
                         "CraftingAgent: %d re-issue attempts exhausted for "
-                        "subtask %s — ingredient consumption not detected",
-                        _MAX_REISSUE_ATTEMPTS, subtask.id[:8],
+                        "task %s — ingredient consumption not detected",
+                        _MAX_REISSUE_ATTEMPTS, task.id[:8],
                     )
                     return []
                 log.debug(
@@ -203,7 +203,7 @@ class CraftingAgent(AgentProtocol):
 
     def observe(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
@@ -212,7 +212,7 @@ class CraftingAgent(AgentProtocol):
         expected = self._total_expected_depletion()
         return {
             "agent": AGENT_ID,
-            "subtask_id": subtask.id[:8],
+            "task_id": task.id[:8],
             "targets": [{"item": t.item, "count": t.count} for t in self._targets],
             "dispatched": self._dispatched,
             "reissue_count": self._reissue_count,
@@ -222,7 +222,7 @@ class CraftingAgent(AgentProtocol):
 
     def progress(
         self,
-        subtask: "Subtask",
+        task: "Task",
         blackboard: "Blackboard",
         wq: "WorldQuery",
         kb: "KnowledgeBase",
