@@ -1,5 +1,5 @@
 """
-agent/preconditions.py
+execution/preconditions.py
 
 Precondition helpers — check action validity against the current WorldQuery.
 
@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from bridge.actions import (
+from bridge import (
     Action,
     CraftItem,
     EquipArmor,
@@ -40,11 +40,11 @@ from bridge.actions import (
     UseItem,
     Wait,
 )
-from world.state import Position
+from world import Position
 
 if TYPE_CHECKING:
-    from world.query import WorldQuery
-    from world.knowledge import KnowledgeBase, RecipeRecord
+    from world import WorldQuery
+    from world import KnowledgeBase, RecipeRecord
 
 # The Factorio prototype category string for recipes that can be hand-crafted
 # by the player character. All other categories require a specific machine.

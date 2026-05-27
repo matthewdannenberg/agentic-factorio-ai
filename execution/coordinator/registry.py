@@ -1,5 +1,5 @@
 """
-agent/network/registry.py
+execution/coordinator/registry.py
 
 AgentRegistry — a simple ordered registry of AgentProtocol instances.
 
@@ -18,7 +18,7 @@ Rules
 
 from __future__ import annotations
 
-from agent.network.agent_protocol import AgentProtocol
+from execution.agents.base import AgentProtocol
 
 
 class AgentRegistry:

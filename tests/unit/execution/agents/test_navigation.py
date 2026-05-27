@@ -15,16 +15,16 @@ Key differences from the original test file:
 
 import unittest
 
-from agent.blackboard import Blackboard, EntryCategory, EntryScope
-from agent.network.agents.navigation import NavigationAgent
-from agent.subtask import Subtask
-from bridge.actions import MoveTo, StopMovement
-from world.state import (
+from execution import Blackboard, EntryCategory, EntryScope
+from execution.agents.navigation import NavigationAgent
+from planning import Task as Subtask
+from bridge import MoveTo, StopMovement
+from world import (
     EntityState,
     Position,
     WorldState,
 )
-from world.query import WorldQuery
+from world import WorldQuery
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ class TestNavigationAgentActivate(unittest.TestCase):
         self.assertEqual(agent._waypoints_total, 0)
 
     def test_activate_clears_last_issued_target(self):
-        from world.state import Position as P
+        from world import Position as P
         agent = NavigationAgent()
         agent._last_issued_target = P(5.0, 5.0)
         agent._last_move_tick = 99
@@ -304,7 +304,7 @@ class TestNavigationAgentStall(unittest.TestCase):
         the agent writes a navigation_stalled observation so the coordinator
         can escalate immediately rather than waiting for the timeout.
         """
-        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        from execution.agents.navigation import _STALL_GRACE_TICKS
         agent = NavigationAgent()
         bb = Blackboard()
         wq = _make_wq(player_pos=Position(0.0, 0.0))
@@ -327,7 +327,7 @@ class TestNavigationAgentStall(unittest.TestCase):
 
     def test_stall_returns_stop_movement(self):
         """On stall the agent returns StopMovement to halt any in-progress walking."""
-        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        from execution.agents.navigation import _STALL_GRACE_TICKS
         agent = NavigationAgent()
         bb = Blackboard()
         wq = _make_wq(player_pos=Position(0.0, 0.0))
@@ -347,7 +347,7 @@ class TestNavigationAgentStall(unittest.TestCase):
 
     def test_no_stall_if_player_moved(self):
         """No stall signal when the player has moved since the last tick."""
-        from agent.network.agents.navigation import _STALL_GRACE_TICKS
+        from execution.agents.navigation import _STALL_GRACE_TICKS
         agent = NavigationAgent()
         bb = Blackboard()
         wq_start = _make_wq(player_pos=Position(0.0, 0.0))

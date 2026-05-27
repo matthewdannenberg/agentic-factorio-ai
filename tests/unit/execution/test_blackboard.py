@@ -1,9 +1,9 @@
 """
-tests/unit/agent/test_blackboard.py
+tests/unit/execution/test_blackboard.py
 
-Tests for agent/blackboard.py
+Tests for execution/blackboard.py
 
-Run with:  python -m pytest tests/unit/agent/test_blackboard.py -v
+Run with:  python -m pytest tests/unit/execution/test_blackboard.py -v
        or:  python -m unittest tests.unit.agent.test_blackboard
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent.blackboard import Blackboard, BlackboardEntry, EntryCategory, EntryScope
+from execution import Blackboard, BlackboardEntry, EntryCategory, EntryScope
 
 
 class TestBlackboardWrite(unittest.TestCase):

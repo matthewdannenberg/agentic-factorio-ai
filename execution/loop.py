@@ -1,5 +1,5 @@
 """
-agent/loop.py
+execution/loop.py
 
 FactorioLoop — master orchestration for the four-timescale data flow.
 
@@ -42,22 +42,22 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 import config
-from agent.execution_protocol import ExecutionStatus
-from planning.goal import Goal, GoalStatus
-from planning.reward_evaluator import RewardEvaluator
-from world.state import WorldState
-from world.query import WorldQuery
-from world.writer import WorldWriter
+from execution.protocol import ExecutionStatus
+from planning import Goal, GoalStatus
+from planning import RewardEvaluator
+from world.observable.state import WorldState
+from world import WorldQuery
+from world import WorldWriter
 
 if TYPE_CHECKING:
-    from agent.memory.behavioral import BehavioralMemoryProtocol
-    from agent.network.coordinator import CoordinatorProtocol
-    from agent.self_model import SelfModel
-    from bridge.action_executor import ActionExecutor
-    from bridge.rcon_client import RconClient
-    from bridge.state_parser import StateParser
-    from bridge.world_poller import WorldPoller
-    from llm.goal_source import GoalSource
+    from execution.memory.behavioral import BehavioralMemoryProtocol
+    from execution.coordinator.coordinator import CoordinatorProtocol
+    from world import SelfModel
+    from bridge import ActionExecutor
+    from bridge import RconClient
+    from bridge import StateParser
+    from bridge import WorldPoller
+    from planning import GoalSource
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +303,11 @@ class FactorioLoop:
         if raw:
             snapshot = self._parser.parse(raw, self._state.tick)
             self._ww.integrate_snapshot(snapshot)
+        # Drain newly-charted chunks into the SelfModel's ChunkGrid.
+        # This is bookkeeping, not an agent decision, so it bypasses patches.
+        newly = self._wq.newly_charted_chunks
+        if newly:
+            self._sm.chunks.mark_charted_bulk(newly)
 
     # ------------------------------------------------------------------
     # Goal lifecycle
@@ -402,7 +407,7 @@ class FactorioLoop:
 
     def _record_outcome(self, goal: Goal, reward: float, success: bool) -> None:
         """Write the outcome to behavioral memory."""
-        from agent.memory.behavioral import GoalOutcome
+        from execution.memory.behavioral import GoalOutcome
         try:
             self._mem.record_outcome(
                 goal_type=getattr(goal, "type", "unknown"),

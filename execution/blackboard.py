@@ -1,5 +1,5 @@
 """
-agent/blackboard.py
+execution/blackboard.py
 
 Blackboard — shared working memory for agents within a goal's lifetime.
 

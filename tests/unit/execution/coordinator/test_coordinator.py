@@ -10,27 +10,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.blackboard import Blackboard, EntryCategory, EntryScope
-from agent.execution_protocol import ExecutionStatus
-from agent.network.coordinator import (
+from execution import Blackboard, EntryCategory, EntryScope
+from execution import ExecutionStatus
+from execution.coordinator.coordinator import (
     GOAL_TYPE_COLLECTION,
     GOAL_TYPE_CRAFTING,
     GOAL_TYPE_EXPLORATION,
     GOAL_TYPE_PRODUCTION,
     RuleBasedCoordinator,
 )
-from agent.network.registry import AgentRegistry
-from agent.network.agents.navigation import NavigationAgent
-from agent.self_model import SelfModel
-from agent.subtask import Subtask, SubtaskLedger, SubtaskStatus
-from planning.goal import Goal, GoalStatus, Priority, RewardSpec
-from world.knowledge import (
+from execution.coordinator.registry import AgentRegistry
+from execution.agents.navigation import NavigationAgent
+from world import SelfModel
+from planning import Task as Subtask, TaskLedger as SubtaskLedger, TaskStatus as SubtaskStatus
+from planning import Goal, GoalStatus, Priority, RewardSpec
+from world import (
     IngredientRecord,
     KnowledgeBase,
     ProductRecord,
     RecipeRecord,
 )
-from world.state import (
+from world import (
     ExplorationState,
     Inventory,
     InventorySlot,
@@ -39,7 +39,7 @@ from world.state import (
     ResourcePatch,
     WorldState,
 )
-from world.query import WorldQuery
+from world import WorldQuery
 
 
 # ---------------------------------------------------------------------------
@@ -494,13 +494,14 @@ class TestCoordinatorSubtaskLifecycle(unittest.TestCase):
 
         # The approach subtask's success_condition is is_at(Position(x, y)).
         # We advance the player to the patch position so the condition is met.
-        from world.state import WorldState, Inventory, InventorySlot, ExplorationState
+        from world import Inventory, InventorySlot, ExplorationState
+from world.observable.state import WorldState
         state_at_patch = WorldState(tick=101)
         state_at_patch.player.position = patch.position
         state_at_patch.resource_map = [patch]
         state_at_patch.player.exploration = ExplorationState(charted_chunks=0)
         state_at_patch._rebuild_entity_indices()
-        from world.query import WorldQuery
+        from world import WorldQuery
         wq_at_patch = WorldQuery(state_at_patch)
 
         coordinator.tick(goal, wq_at_patch, ww, tick=101)

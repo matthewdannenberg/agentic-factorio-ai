@@ -1,7 +1,7 @@
 """
-tests/unit/agent/test_execution_protocol.py
+tests/unit/execution/test_execution_protocol.py
 
-Tests for agent/execution_protocol.py
+Tests for execution/protocol.py
 
 Run with:  python -m unittest tests.unit.agent.test_execution_protocol
 """
@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import unittest
 
-from bridge.actions import NoOp, Wait
-from planning.goal import make_goal
-from agent.execution_protocol import (
+from bridge import NoOp, Wait
+from planning import make_goal
+from execution import (
     ExecutionLayerProtocol,
     ExecutionResult,
     ExecutionStatus,
     StuckContext,
 )
-from agent.subtask import Subtask, SubtaskRecord, SubtaskStatus
+from planning import Task as Subtask, TaskStatus as SubtaskStatus
+from planning.tasks.task import TaskRecord as SubtaskRecord
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-agent/network/agent_protocol.py
+execution/agents/base.py
 
 AgentProtocol — the interface every agent in the execution network must satisfy.
 
@@ -30,14 +30,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from bridge.actions import Action
+from bridge import Action
 
 if TYPE_CHECKING:
-    from agent.blackboard import Blackboard
-    from agent.subtask import Subtask
-    from world.knowledge import KnowledgeBase
-    from world.query import WorldQuery
-    from world.writer import WorldWriter
+    from execution.blackboard import Blackboard
+    from planning.tasks.task import Task as Subtask
+    from world import KnowledgeBase
+    from world import WorldQuery
+    from world import WorldWriter
 
 
 class AgentProtocol:

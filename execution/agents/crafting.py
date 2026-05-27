@@ -1,5 +1,5 @@
 """
-agent/network/agents/crafting.py
+execution/agents/crafting.py
 
 CraftingAgent — queues hand-crafting jobs and confirms ingredient consumption.
 
@@ -61,16 +61,16 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
-from agent.blackboard import EntryCategory, EntryScope
-from agent.network.agent_protocol import AgentProtocol
-from bridge.actions import Action, CraftItem
+from execution.blackboard import EntryCategory, EntryScope
+from execution.agents.base import AgentProtocol
+from bridge import Action, CraftItem
 
 if TYPE_CHECKING:
-    from agent.blackboard import Blackboard
-    from agent.subtask import Subtask
-    from world.knowledge import KnowledgeBase
-    from world.query import WorldQuery
-    from world.writer import WorldWriter
+    from execution.blackboard import Blackboard
+    from planning.tasks.task import Task as Subtask
+    from world import KnowledgeBase
+    from world import WorldQuery
+    from world import WorldWriter
 
 log = logging.getLogger(__name__)
 

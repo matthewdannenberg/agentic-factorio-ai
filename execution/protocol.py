@@ -1,5 +1,5 @@
 """
-agent/execution_protocol.py
+execution/protocol.py
 
 ExecutionLayerProtocol — the sole interface between the planning layer and the
 agent execution network.
@@ -23,13 +23,13 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional, TYPE_CHECKING
 
-from bridge.actions import Action
-from planning.goal import Goal
+from bridge import Action
+from planning import Goal
 
 if TYPE_CHECKING:
-    from agent.subtask import Subtask, SubtaskRecord
-    from world.query import WorldQuery
-    from world.writer import WorldWriter
+    from planning.tasks.task import Task as Subtask, TaskRecord as SubtaskRecord
+    from world import WorldQuery
+    from world import WorldWriter
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-agent/memory/behavioral.py
+execution/memory/behavioral.py
 
 BehavioralMemory — persistent cross-run strategy and performance storage.
 
@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agent.self_model import SelfModel
+    from world import SelfModel
 
 log = logging.getLogger(__name__)
 

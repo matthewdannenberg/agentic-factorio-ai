@@ -12,7 +12,7 @@ Changes from original:
 
 import unittest
 
-from agent.preconditions import (
+from execution.preconditions import (
     can_mine,
     can_place,
     can_reach_count,
@@ -23,7 +23,7 @@ from agent.preconditions import (
     post_crafting_inventory,
     valid_actions,
 )
-from bridge.actions import (
+from bridge import (
     CraftItem,
     EquipArmor,
     FlipEntity,
@@ -41,14 +41,14 @@ from bridge.actions import (
     UseItem,
     Wait,
 )
-from world.state import (
+from world import (
     EntityState,
     Inventory,
     InventorySlot,
     Position,
     WorldState,
 )
-from world.query import WorldQuery
+from world import WorldQuery
 
 
 # ---------------------------------------------------------------------------
@@ -1158,7 +1158,7 @@ class TestValidActions(unittest.TestCase):
 
     def test_unknown_action_passes_through(self):
         # Actions not explicitly handled (e.g. vehicle/combat stubs) pass through.
-        from bridge.actions import EnterVehicle
+        from bridge import EnterVehicle
         wq = _make_wq()
         result = valid_actions(wq, self.kb, [EnterVehicle(entity_id=1)])
         self.assertEqual(len(result), 1)
@@ -1574,8 +1574,9 @@ class TestPostCraftingInventoryPreconditions(unittest.TestCase):
             {"iron-gear-wheel": [gear]},
             stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100},
         )
-        from world.state import WorldState, Inventory, InventorySlot
-        from world.query import WorldQuery
+        from world.observable.state import WorldState
+from world import Inventory, InventorySlot
+        from world import WorldQuery
         state = WorldState(tick=0)
         state.player.inventory = Inventory(slots=[
             InventorySlot(item="iron-plate", count=2)

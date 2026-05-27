@@ -1,18 +1,18 @@
 """
-tests/unit/agent/test_registry.py
+tests/unit/execution/test_registry.py
 
-Tests for agent/network/registry.py (updated for new API: register(agent) only,
+Tests for execution/coordinator/registry.py (updated for new API: register(agent) only,
 no goal-type arguments).
 
-Run with:  pytest tests/unit/agent/test_registry.py -v
+Run with:  pytest tests/unit/execution/test_registry.py -v
 """
 
 from __future__ import annotations
 
 import unittest
 
-from agent.network.agent_protocol import AgentProtocol
-from agent.network.registry import AgentRegistry
+from execution.agents.base import AgentProtocol
+from execution.coordinator.registry import AgentRegistry
 
 
 class _StubAgent(AgentProtocol):
@@ -125,9 +125,9 @@ class TestStubCoordinator(unittest.TestCase):
     """Verify the stub coordinator from coordinator.py satisfies its protocol."""
 
     def test_stub_returns_waiting(self):
-        from agent.network.coordinator import StubCoordinator
-        from agent.execution_protocol import ExecutionStatus
-        from planning.goal import make_goal
+        from execution.coordinator.coordinator import StubCoordinator
+        from execution import ExecutionStatus
+        from planning import make_goal
 
         stub = StubCoordinator()
         goal = make_goal("do nothing", "True", "False")
@@ -137,8 +137,8 @@ class TestStubCoordinator(unittest.TestCase):
         self.assertIsNone(result.stuck_context)
 
     def test_stub_reset_does_not_raise(self):
-        from agent.network.coordinator import StubCoordinator
-        from planning.goal import make_goal
+        from execution.coordinator.coordinator import StubCoordinator
+        from planning import make_goal
 
         stub = StubCoordinator()
         goal = make_goal("do nothing", "True", "False")

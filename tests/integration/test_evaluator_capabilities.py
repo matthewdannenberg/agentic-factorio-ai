@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import unittest
 
-from planning.goal import RewardSpec, make_goal, Priority
-from planning.reward_evaluator import RewardEvaluator
-from world.production_tracker import ProductionTracker
-from world.query import WorldQuery
-from world.state import (
+from planning import RewardSpec, make_goal, Priority
+from planning import RewardEvaluator
+from world import ProductionTracker
+from world import WorldQuery
+from world import (
     BeltLane, BeltSegment, DamagedEntity, DestroyedEntity,
     EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
@@ -558,7 +558,7 @@ class TestPT_ProductionRate(unittest.TestCase):
 
     def _tracker_with_history(self, item, count_start, count_end,
                                tick_start=0, tick_end=3600):
-        from world.query import WorldQuery
+        from world import WorldQuery
         tracker = ProductionTracker()
         e_start = EntityState(
             entity_id=1, name="assembling-machine-1", position=Position(0, 0),
@@ -819,7 +819,7 @@ class TestXC_Compound(unittest.TestCase):
 # ===========================================================================
 
 def _make_start_wq(charted_chunks=0, iron_ore=0, resource_patches=None):
-    from world.state import ExplorationState
+    from world import ExplorationState
     ws = WorldState(
         player=PlayerState(
             position=Position(0.0, 0.0),

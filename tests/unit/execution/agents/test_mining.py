@@ -25,18 +25,18 @@ Coverage:
 
 import unittest
 
-from agent.blackboard import Blackboard, EntryCategory, EntryScope
-from agent.network.agents.mining import MiningAgent
-from agent.subtask import Subtask
-from bridge.actions import MineEntity, MineResource, MoveTo, StopMining
-from world.state import (
+from execution import Blackboard, EntryCategory, EntryScope
+from execution.agents.mining import MiningAgent
+from planning import Task as Subtask
+from bridge import MineEntity, MineResource, MoveTo, StopMining
+from world import (
     EntityState,
     Inventory,
     InventorySlot,
     Position,
     WorldState,
 )
-from world.query import WorldQuery
+from world import WorldQuery
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ class TestMiningAgentActivate(unittest.TestCase):
         self.assertEqual(agent._last_inventory, {})
 
     def test_activate_resets_clear_state(self):
-        from agent.network.agents.mining import _ClearTarget
+        from execution.agents.mining import _ClearTarget
         agent = MiningAgent()
         agent._clear_targets = [_ClearTarget(entity_id=1, position=Position(0, 0))]
         agent._mine_issued_at = 200
@@ -243,7 +243,7 @@ class TestMiningAgentGather(unittest.TestCase):
         # Issue at tick 100.
         self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100, kb=None)
         # Tick after grace period with unchanged inventory.
-        from agent.network.agents.mining import _MINING_GRACE_TICKS
+        from execution.agents.mining import _MINING_GRACE_TICKS
         tick_after_grace = 100 + _MINING_GRACE_TICKS + 1
         actions = self.agent.tick(
             self.subtask, self.bb, self.wq, self.ww, tick=tick_after_grace, kb=None
@@ -257,7 +257,7 @@ class TestMiningAgentGather(unittest.TestCase):
         self.agent.tick(self.subtask, self.bb, self.wq, self.ww, tick=100, kb=None)
         # Advance with ore in inventory.
         wq_with_ore = _make_wq(inventory_items={"iron-ore": 3})
-        from agent.network.agents.mining import _MINING_GRACE_TICKS
+        from execution.agents.mining import _MINING_GRACE_TICKS
         tick_after_grace = 100 + _MINING_GRACE_TICKS + 1
         actions = self.agent.tick(
             self.subtask, self.bb, wq_with_ore, self.ww, tick=tick_after_grace, kb=None
@@ -545,7 +545,7 @@ class TestMiningAgentProgressAndObserve(unittest.TestCase):
         self.assertAlmostEqual(agent.progress(subtask, Blackboard(), _make_wq(), None), 0.0)
 
     def test_progress_reflects_clear_completion(self):
-        from agent.network.agents.mining import _ClearTarget, _SubtaskKind
+        from execution.agents.mining import _ClearTarget, _SubtaskKind
         agent = MiningAgent()
         subtask = _make_subtask()
         agent.activate(subtask, Blackboard(), _make_wq(), None)

@@ -1,5 +1,5 @@
 """
-agent/network/coordinator.py
+execution/coordinator/coordinator.py
 
 CoordinatorProtocol and rule-based coordinator implementation for Phase 6.
 
@@ -62,23 +62,23 @@ import math
 import uuid
 from typing import Optional, TYPE_CHECKING
 
-from agent.blackboard import Blackboard, EntryCategory, EntryScope
-from agent.execution_protocol import (
+from execution.blackboard import Blackboard, EntryCategory, EntryScope
+from execution.protocol import (
     ExecutionResult,
     ExecutionStatus,
     StuckContext,
 )
-from bridge.actions import StopMining
-from agent.subtask import Subtask, SubtaskLedger, SubtaskStatus
-from planning.goal import Goal
-from world.state import Position
+from bridge import StopMining
+from planning import Task as Subtask, TaskLedger as SubtaskLedger, TaskStatus as SubtaskStatus
+from planning import Goal
+from world import Position
 
 if TYPE_CHECKING:
-    from agent.network.registry import AgentRegistry
-    from agent.self_model import SelfModelProtocol
-    from world.knowledge import KnowledgeBase
-    from world.query import WorldQuery
-    from world.writer import WorldWriter
+    from execution.coordinator.registry import AgentRegistry
+    from world import SelfModel as SelfModelProtocol
+    from world import KnowledgeBase
+    from world import WorldQuery
+    from world import WorldWriter
 
 log = logging.getLogger(__name__)
 
@@ -715,7 +715,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         Returns None on success, STUCK if ingredients are insufficient or
         the item is not hand-craftable.
         """
-        from agent.preconditions import check_crafting_preconditions
+        from execution.preconditions import check_crafting_preconditions
 
         item, target_count = _parse_collection_condition(goal.success_condition)
         if item is None:
@@ -767,7 +767,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
         # Build expected post-crafting inventory for the agent's stall detection.
         # The agent reads this directly from the INTENTION entry so it needs no
         # KB access to compute ingredient costs itself.
-        from agent.preconditions import post_crafting_inventory
+        from execution.preconditions import post_crafting_inventory
         current: dict[str, int] = {}
         for slot in wq.state.player.inventory.slots:
             current[slot.item] = current.get(slot.item, 0) + slot.count
@@ -829,7 +829,7 @@ class RuleBasedCoordinator(CoordinatorProtocol):
 
         Uses post_crafting_inventory() and diffs against current inventory.
         """
-        from agent.preconditions import post_crafting_inventory
+        from execution.preconditions import post_crafting_inventory
 
         current: dict[str, int] = {}
         for slot in wq.state.player.inventory.slots:
@@ -1272,8 +1272,8 @@ def _build_condition_namespace(wq: "WorldQuery", tick: int, start_tick: int = 0,
     Any entry added to build_core_namespace is automatically available here
     without any changes to this function.
     """
-    from planning.condition_namespace import build_core_namespace, safe_builtins
-    from agent.preconditions import is_at as _is_at, is_reachable as _is_reachable
+    from planning import build_core_namespace, safe_builtins
+    from execution.preconditions import is_at as _is_at, is_reachable as _is_reachable
 
     def is_at(pos: Position, tolerance: float = 1.5) -> bool:
         return _is_at(pos, wq, tolerance)

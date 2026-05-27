@@ -1,5 +1,5 @@
 """
-agent/network/agents/navigation.py
+execution/agents/navigation.py
 
 NavigationAgent — rule-based movement agent for Phase 6.
 
@@ -57,18 +57,18 @@ import logging
 import math
 from typing import Optional, TYPE_CHECKING
 
-from agent.blackboard import EntryCategory, EntryScope
-from agent.network.agent_protocol import AgentProtocol
-from agent.preconditions import is_at, is_reachable
-from bridge.actions import Action, MoveTo, StopMovement
-from world.state import Position
+from execution.blackboard import EntryCategory, EntryScope
+from execution.agents.base import AgentProtocol
+from execution.preconditions import is_at, is_reachable
+from bridge import Action, MoveTo, StopMovement
+from world import Position
 
 if TYPE_CHECKING:
-    from agent.blackboard import Blackboard
-    from agent.subtask import Subtask
-    from world.knowledge import KnowledgeBase
-    from world.query import WorldQuery
-    from world.writer import WorldWriter
+    from execution.blackboard import Blackboard
+    from planning.tasks.task import Task as Subtask
+    from world import KnowledgeBase
+    from world import WorldQuery
+    from world import WorldWriter
 
 log = logging.getLogger(__name__)
 

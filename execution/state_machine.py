@@ -1,5 +1,5 @@
 """
-agent/state_machine.py
+execution/state_machine.py
 
 AgentState — the top-level state machine enum for the agent loop.
 
