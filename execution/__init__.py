@@ -45,6 +45,7 @@ from execution.blackboard import (
 )
 from execution.loop import FactorioLoop, LoopConfig, LoopStats
 from execution.state_machine import AgentState, ExamineMode
+from execution.predicates import is_at, is_reachable, can_mine, player_has_item
 
 __all__ = [
     "ExecutionLayerProtocol",
@@ -60,4 +61,8 @@ __all__ = [
     "LoopStats",
     "AgentState",
     "ExamineMode",
+    "is_at",
+    "is_reachable",
+    "can_mine",
+    "player_has_item",
 ]

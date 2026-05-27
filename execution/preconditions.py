@@ -1,18 +1,22 @@
 """
 execution/preconditions.py
 
-Precondition helpers — check action validity against the current WorldQuery.
+Precondition helpers — check action feasibility against the current WorldQuery
+and KnowledgeBase before committing to a task or dispatching an action.
 
-Used by the coordinator and navigation agent to filter candidate actions before
-dispatch, avoiding invalid or impossible RCON commands.
+These functions answer "can we start action X given current state?" — they
+involve inventory arithmetic, recipe lookups, and KB queries. They are called
+by the coordinator and agents before deriving tasks or dispatching actions.
+
+For pure world-state observation predicates (is_at, is_reachable, can_mine),
+see execution/predicates.py.
 
 Rules
 -----
-- Pure predicate functions. No LLM calls. No RCON. No mutations.
-- All functions return bool or a filtered list; none raise on missing data.
+- No LLM calls. No RCON. No mutations.
+- Functions return bool, tuple, or dict; none raise on missing data.
 - Reach distance is derived exclusively from WorldQuery (player.reachable list),
-  never from a hardcoded constant. is_reachable() is the canonical arrival
-  criterion for the navigation agent.
+  never from a hardcoded constant.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from bridge import (
     Wait,
 )
 from world import Position
+from execution.predicates import is_at, is_reachable, can_mine
 
 if TYPE_CHECKING:
     from world import WorldQuery
@@ -52,58 +57,6 @@ _HAND_CRAFT_CATEGORY = "crafting"
 
 # The entity name Factorio uses for the player character in made_in lists.
 _CHARACTER_ENTITY = "character"
-
-
-# ---------------------------------------------------------------------------
-# Position / proximity
-# ---------------------------------------------------------------------------
-
-def is_at(target: Position, wq: "WorldQuery", tolerance: float = 1.0) -> bool:
-    """
-    True if the player is within *tolerance* tiles of *target*.
-
-    Used by the coordinator to check whether a position-targeted movement
-    subtask is complete. Tolerance defaults to 1.0 tile — sufficient for
-    most interaction purposes without requiring pixel-perfect positioning.
-    """
-    player_pos = wq.player_position()
-    dx = player_pos.x - target.x
-    dy = player_pos.y - target.y
-    return math.sqrt(dx * dx + dy * dy) <= tolerance
-
-
-def is_reachable(entity_id: int, wq: "WorldQuery") -> bool:
-    """
-    True if *entity_id* is in the player's current reachable set.
-
-    The reachable set is populated by the bridge from Factorio's reach radius
-    as reported by the Lua mod — it reflects the actual game-engine reach,
-    not a hardcoded Python constant.
-
-    This is the canonical arrival criterion for the navigation agent. When
-    is_reachable() returns True for the target entity, the navigator signals
-    waypoint completion.
-
-    Returns False if the entity is not present in the scan or not reachable.
-    """
-    return entity_id in wq.state.player.reachable
-
-
-# ---------------------------------------------------------------------------
-# Mining
-# ---------------------------------------------------------------------------
-
-def can_mine(entity_id: int, wq: "WorldQuery") -> bool:
-    """
-    True if the entity is present in the current scan and reachable.
-
-    Delegates the reach check to is_reachable(), which derives reach from
-    WorldQuery rather than a hardcoded constant.
-    """
-    entity = wq.entity_by_id(entity_id)
-    if entity is None:
-        return False
-    return is_reachable(entity_id, wq)
 
 
 # ---------------------------------------------------------------------------
