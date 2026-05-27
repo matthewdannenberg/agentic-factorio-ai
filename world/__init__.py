@@ -71,6 +71,8 @@ from world.observable.state import (
     # Inventory
     InventorySlot,
     Inventory,
+    # Crafting
+    CraftingQueueEntry,
     # Research
     ResearchState,
     # Logistics
@@ -143,6 +145,7 @@ __all__ = [
     "Position",
     "Direction",
     "ChunkCoord",
+    "CraftingQueueEntry",
     "EntityState",
     "EntityStatus",
     "ResourcePatch",

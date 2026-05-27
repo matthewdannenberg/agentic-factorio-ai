@@ -23,7 +23,8 @@ from __future__ import annotations
 import unittest
 
 from world import (
-    BeltLane, BeltSegment, BiterBase, ChunkCoord, DamagedEntity, DestroyedEntity,
+    BeltLane, BeltSegment, BiterBase, ChunkCoord, CraftingQueueEntry,
+    DamagedEntity, DestroyedEntity,
     Direction, EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
@@ -114,6 +115,112 @@ class TestPlayerState(unittest.TestCase):
         self.assertEqual(ps.inventory_size, 80)
         self.assertEqual(ps.inventory.count("coal"), 50)
 
+
+
+
+class TestCraftingQueueEntry(unittest.TestCase):
+
+    def test_defaults(self):
+        e = CraftingQueueEntry(recipe="iron-gear-wheel", count=5)
+        self.assertEqual(e.recipe, "iron-gear-wheel")
+        self.assertEqual(e.count, 5)
+        self.assertAlmostEqual(e.progress, 0.0)
+
+    def test_progress_set_explicitly(self):
+        e = CraftingQueueEntry(recipe="copper-cable", count=10, progress=0.75)
+        self.assertAlmostEqual(e.progress, 0.75)
+
+    def test_distinct_instances_independent(self):
+        a = CraftingQueueEntry("iron-gear-wheel", 5, 0.5)
+        b = CraftingQueueEntry("copper-cable", 3, 0.0)
+        self.assertNotEqual(a.recipe, b.recipe)
+        self.assertNotEqual(a.count, b.count)
+
+
+class TestPlayerStateCraftingQueue(unittest.TestCase):
+
+    def test_crafting_queue_defaults_empty(self):
+        self.assertEqual(PlayerState().crafting_queue, [])
+
+    def test_crafting_queue_size_defaults_zero(self):
+        self.assertEqual(PlayerState().crafting_queue_size, 0)
+
+    def test_crafting_queue_stored(self):
+        entries = [
+            CraftingQueueEntry("iron-gear-wheel", 5, 0.3),
+            CraftingQueueEntry("copper-cable", 10, 0.0),
+        ]
+        ps = PlayerState(crafting_queue=entries, crafting_queue_size=2)
+        self.assertEqual(len(ps.crafting_queue), 2)
+        self.assertEqual(ps.crafting_queue[0].recipe, "iron-gear-wheel")
+        self.assertAlmostEqual(ps.crafting_queue[0].progress, 0.3)
+        self.assertEqual(ps.crafting_queue[1].recipe, "copper-cable")
+
+    def test_crafting_queue_size_independent_of_list(self):
+        # crafting_queue_size mirrors the Lua value and is stored separately
+        entries = [CraftingQueueEntry("iron-gear-wheel", 5)]
+        ps = PlayerState(crafting_queue=entries, crafting_queue_size=99)
+        self.assertEqual(len(ps.crafting_queue), 1)
+        self.assertEqual(ps.crafting_queue_size, 99)
+
+    def test_all_player_fields_coexist(self):
+        ps = PlayerState(
+            inventory_size=80,
+            crafting_queue=[CraftingQueueEntry("iron-gear-wheel", 5, 0.5)],
+            crafting_queue_size=1,
+            exploration=ExplorationState(charted_chunks=25),
+        )
+        self.assertEqual(ps.inventory_size, 80)
+        self.assertEqual(len(ps.crafting_queue), 1)
+        self.assertEqual(ps.crafting_queue_size, 1)
+        self.assertEqual(ps.exploration.charted_chunks, 25)
+
+
+class TestWorldQueryCraftingQueueProperties(unittest.TestCase):
+
+    def _wq_with_queue(self, entries, size=None):
+        from world.observable.state import WorldState
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            crafting_queue=entries,
+            crafting_queue_size=size if size is not None else len(entries),
+        ))
+        return WorldQuery(ws)
+
+    def test_crafting_queue_property_empty(self):
+        wq = self._wq_with_queue([])
+        self.assertEqual(wq.crafting_queue, [])
+
+    def test_crafting_queue_size_property_zero(self):
+        wq = self._wq_with_queue([])
+        self.assertEqual(wq.crafting_queue_size, 0)
+
+    def test_crafting_queue_property_populated(self):
+        entries = [
+            CraftingQueueEntry("iron-gear-wheel", 5, 0.4),
+            CraftingQueueEntry("electronic-circuit", 3, 0.0),
+        ]
+        wq = self._wq_with_queue(entries)
+        self.assertEqual(len(wq.crafting_queue), 2)
+        self.assertEqual(wq.crafting_queue[0].recipe, "iron-gear-wheel")
+        self.assertAlmostEqual(wq.crafting_queue[0].progress, 0.4)
+
+    def test_crafting_queue_size_property(self):
+        entries = [CraftingQueueEntry("iron-gear-wheel", 5)]
+        wq = self._wq_with_queue(entries, size=1)
+        self.assertEqual(wq.crafting_queue_size, 1)
+
+    def test_crafting_queue_reflects_state(self):
+        # Verify the property delegates correctly to PlayerState
+        from world.observable.state import WorldState
+        ws = WorldState(player=PlayerState(
+            position=Position(0, 0),
+            crafting_queue=[CraftingQueueEntry("coal", 1, 0.9)],
+            crafting_queue_size=1,
+        ))
+        wq = WorldQuery(ws)
+        self.assertEqual(wq.crafting_queue[0].recipe, "coal")
+        self.assertAlmostEqual(wq.crafting_queue[0].progress, 0.9)
 
 class TestWorldStateBasics(unittest.TestCase):
     def _ws(self) -> WorldState:

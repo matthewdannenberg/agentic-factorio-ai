@@ -372,6 +372,30 @@ class WorldQuery:
         return self._state.player.health
 
     # ------------------------------------------------------------------
+    # Crafting queue
+    # ------------------------------------------------------------------
+
+    @property
+    def crafting_queue(self) -> list:
+        """
+        The player's current hand-crafting queue as a list of
+        CraftingQueueEntry (recipe, count, progress).
+
+        NON-PROXIMAL. The first entry is the item currently being crafted;
+        its progress field is in [0.0, 1.0]. All other entries have
+        progress=0.0. Empty when nothing is queued.
+        """
+        return self._state.player.crafting_queue
+
+    @property
+    def crafting_queue_size(self) -> int:
+        """
+        Number of crafting batches currently queued. NON-PROXIMAL.
+        Mirrors Lua player.crafting_queue_size directly.
+        """
+        return self._state.player.crafting_queue_size
+
+    # ------------------------------------------------------------------
     # Exploration
     # ------------------------------------------------------------------
 

@@ -720,4 +720,114 @@ T.suite("edge_cases", {
 -- Return T so callers can run individual suites after loading:
 --   /c local T = require("test_bridge_live")
 --   /c T.run_suite("edge_cases")
+
+-- ============================================================
+-- Suite: crafting_queue
+-- Verifies fa.get_crafting_queue() and the crafting_queue /
+-- crafting_queue_size fields in fa.get_state() player section.
+-- ============================================================
+
+T.suite("crafting_queue", {
+
+    get_state_has_crafting_queue_field = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player ~= nil, "must have player section")
+        t.ok(parsed.player.crafting_queue ~= nil,
+            "player must have crafting_queue field")
+        t.ok(type(parsed.player.crafting_queue) == "table",
+            "crafting_queue must be a table")
+    end,
+
+    get_state_has_crafting_queue_size_field = function(t)
+        local raw = fa.get_state({radius=4, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.player.crafting_queue_size ~= nil,
+            "player must have crafting_queue_size field")
+        t.ok(type(parsed.player.crafting_queue_size) == "number",
+            "crafting_queue_size must be a number")
+    end,
+
+    get_crafting_queue_standalone = function(t)
+        local raw = fa.get_crafting_queue()
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "fa.get_crafting_queue() must return valid JSON")
+        t.ok(parsed.crafting_queue ~= nil,
+            "must have crafting_queue field")
+        t.ok(parsed.crafting_queue_size ~= nil,
+            "must have crafting_queue_size field")
+        t.ok(type(parsed.crafting_queue) == "table",
+            "crafting_queue must be a table")
+        t.ok(type(parsed.crafting_queue_size) == "number",
+            "crafting_queue_size must be a number")
+    end,
+
+    queue_size_matches_queue_length = function(t)
+        local raw = fa.get_crafting_queue()
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local list_len = 0
+        for _ in pairs(parsed.crafting_queue) do list_len = list_len + 1 end
+        t.eq(parsed.crafting_queue_size, list_len,
+            "crafting_queue_size (" .. tostring(parsed.crafting_queue_size) ..
+            ") must equal length of crafting_queue list (" ..
+            tostring(list_len) .. ")")
+    end,
+
+    queue_entries_have_required_fields = function(t)
+        local raw = fa.get_crafting_queue()
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, entry in ipairs(parsed.crafting_queue) do
+            t.ok(entry.recipe ~= nil, "each queue entry must have recipe")
+            t.ok(type(entry.recipe) == "string",
+                "recipe must be a string; got " .. type(entry.recipe))
+            t.ok(entry.count ~= nil, "each queue entry must have count")
+            t.ok(type(entry.count) == "number",
+                "count must be a number; got " .. type(entry.count))
+            t.ok(entry.progress ~= nil, "each queue entry must have progress")
+            t.ok(type(entry.progress) == "number",
+                "progress must be a number; got " .. type(entry.progress))
+        end
+    end,
+
+    queue_progress_in_range = function(t)
+        local raw = fa.get_crafting_queue()
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for i, entry in ipairs(parsed.crafting_queue) do
+            t.ok(entry.progress >= 0.0 and entry.progress <= 1.0,
+                "entry " .. i .. " progress=" .. tostring(entry.progress) ..
+                " out of [0,1]")
+        end
+    end,
+
+    non_first_entries_have_zero_progress = function(t)
+        local raw = fa.get_crafting_queue()
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for i, entry in ipairs(parsed.crafting_queue) do
+            if i > 1 then
+                t.eq(entry.progress, 0.0,
+                    "entry " .. i .. " progress must be 0.0; got " ..
+                    tostring(entry.progress))
+            end
+        end
+    end,
+
+    get_state_and_standalone_agree = function(t)
+        local s1 = helpers.json_to_table(
+            fa.get_state({radius=4, resource_radius=32, item_radius=4}))
+        local s2 = helpers.json_to_table(fa.get_crafting_queue())
+        t.ok(s1 ~= nil and s2 ~= nil, "both calls must return valid JSON")
+        t.eq(s1.player.crafting_queue_size, s2.crafting_queue_size,
+            "queue_size must agree: state=" ..
+            tostring(s1.player.crafting_queue_size) ..
+            " standalone=" .. tostring(s2.crafting_queue_size))
+    end,
+})
+
+
 return T

@@ -343,6 +343,27 @@ class ThreatState:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class CraftingQueueEntry:
+    """
+    One entry in the player's hand-crafting queue.
+
+    Fields
+    ------
+    recipe   : Recipe name being crafted (e.g. "iron-gear-wheel").
+    count    : Number of items still queued in this batch.
+    progress : Crafting progress in [0.0, 1.0]. Only meaningful for the
+               first entry (the one currently being crafted). All other
+               entries report 0.0.
+
+    NON-PROXIMAL -- the crafting queue belongs to the player character,
+    not the entity scan radius.
+    """
+    recipe: str
+    count: int
+    progress: float = 0.0
+
+
+@dataclass
 class PlayerState:
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
     health: float = 100.0
@@ -350,6 +371,11 @@ class PlayerState:
     inventory_size: int = 0   # total slot count of the character main inventory
     reachable: list[int] = field(default_factory=list)
     exploration: ExplorationState = field(default_factory=ExplorationState)
+    crafting_queue: list["CraftingQueueEntry"] = field(default_factory=list)
+    crafting_queue_size: int = 0
+    # crafting_queue_size mirrors Lua's player.crafting_queue_size;
+    # in practice equals len(crafting_queue) but kept separate so
+    # the bridge value is preserved without assuming list completeness.
 
 
 # ---------------------------------------------------------------------------

@@ -79,16 +79,19 @@ class _WQ:
         inventory: dict[str, int] = None,
         entities: list[_EntityState] = None,
         tick: int = 0,
+        crafting_queue_size: int = 0,
     ):
         self._position  = position or Position(x=0.0, y=0.0)
         self._reachable = reachable or []
         self._inventory = inventory or {}
         self._entities  = {e.entity_id: e for e in (entities or [])}
         self.tick       = tick
+        self._crafting_queue_size = crafting_queue_size
 
         # Build state sub-object that skills read via wq.state.*
         self.state = MagicMock()
         self.state.player.reachable = self._reachable
+        self.state.player.crafting_queue_size = crafting_queue_size
         self._rebuild_inventory()
 
     def _rebuild_inventory(self):
@@ -119,6 +122,14 @@ class _WQ:
     def add_to_inventory(self, item: str, count: int) -> None:
         self._inventory[item] = self._inventory.get(item, 0) + count
         self._rebuild_inventory()
+
+    def set_crafting_queue_size(self, n: int) -> None:
+        self._crafting_queue_size = n
+        self.state.player.crafting_queue_size = n
+
+    @property
+    def crafting_queue_size(self) -> int:
+        return self._crafting_queue_size
 
     def remove_entity(self, entity_id: int) -> None:
         self._entities.pop(entity_id, None)
@@ -559,11 +570,15 @@ class TestCraftSkillStart(unittest.TestCase):
         skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
+    def test_restart_while_running_allowed(self):
+        skill = CraftSkill()
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        skill.start([CraftTarget("copper-cable", "copper-cable", 10)])
+        self.assertEqual(skill.status(), SkillStatus.RUNNING)
+        self.assertEqual(skill._targets[0].item, "copper-cable")
+
 
 class TestCraftSkillDispatch(unittest.TestCase):
-
-    def _make_wq(self, inventory=None):
-        return _WQ(inventory=inventory or {"iron-plate": 100})
 
     def test_dispatches_craft_items_on_first_tick(self):
         skill = CraftSkill()
@@ -571,7 +586,7 @@ class TestCraftSkillDispatch(unittest.TestCase):
             CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5),
             CraftTarget("copper-cable", "copper-cable", 10),
         ])
-        wq = self._make_wq()
+        wq = _WQ(inventory={"iron-plate": 100})
         actions = skill.tick(wq, _WW, tick=0)
         self.assertEqual(len(actions), 2)
         self.assertTrue(all(isinstance(a, CraftItem) for a in actions))
@@ -579,98 +594,86 @@ class TestCraftSkillDispatch(unittest.TestCase):
     def test_craft_item_has_correct_recipe_and_count(self):
         skill = CraftSkill()
         skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 7)])
-        wq = self._make_wq()
+        wq = _WQ(inventory={})
         actions = skill.tick(wq, _WW, tick=0)
         self.assertEqual(actions[0].recipe, "iron-gear-wheel")
         self.assertEqual(actions[0].count, 7)
 
     def test_no_second_dispatch_within_grace(self):
-        skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},
-        )
-        wq = self._make_wq({"iron-plate": 100})
-        skill.tick(wq, _WW, tick=0)
-        actions = skill.tick(wq, _WW, tick=10)
-        self.assertEqual(actions, [])
-
-
-class TestCraftSkillFireAndForget(unittest.TestCase):
-
-    def test_succeeds_immediately_without_expected_post(self):
+        # After dispatch: queue empty AND items not yet in inventory → RUNNING
         skill = CraftSkill()
         skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
-        wq = _WQ(inventory={"iron-plate": 100})
-        skill.tick(wq, _WW, tick=0)
-        self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
+        wq = _WQ(inventory={})
+        skill.tick(wq, _WW, tick=0)   # dispatch
+        actions = skill.tick(wq, _WW, tick=10)
+        self.assertEqual(actions, [])
+        self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
-    def test_fire_and_forget_dispatches_actions(self):
+
+class TestCraftSkillConfirmation(unittest.TestCase):
+
+    def test_succeeds_when_queue_populated(self):
+        # Primary signal: crafting_queue_size > 0 on the tick after dispatch
         skill = CraftSkill()
-        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 3)])
-        wq = _WQ(inventory={"iron-plate": 100})
-        actions = skill.tick(wq, _WW, tick=0)
-        self.assertEqual(len(actions), 1)
-
-
-class TestCraftSkillDepletion(unittest.TestCase):
-
-    def test_succeeds_when_ingredients_depleted(self):
-        # Craft 5 gears: costs 10 iron-plate per 5 gears
-        skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},   # 100 → 90 = 10 consumed
-        )
-        wq = _WQ(inventory={"iron-plate": 100})
-        skill.tick(wq, _WW, tick=0)          # snapshot: 100
-        wq.set_inventory({"iron-plate": 90}) # 10 consumed
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        wq = _WQ(inventory={})
+        skill.tick(wq, _WW, tick=0)   # dispatch
+        # Simulate Factorio accepting the jobs — queue now populated
+        wq.set_crafting_queue_size(2)
         skill.tick(wq, _WW, tick=10)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
-    def test_running_when_partially_depleted(self):
+    def test_succeeds_via_inventory_fallback(self):
+        # Fallback: items already in inventory (crafting finished before we polled)
         skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},
-        )
-        wq = _WQ(inventory={"iron-plate": 100})
+        skill.start([
+            CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5),
+            CraftTarget("copper-cable", "copper-cable", 10),
+        ])
+        wq = _WQ(inventory={})
+        skill.tick(wq, _WW, tick=0)   # dispatch
+        # Items arrive in inventory before we check queue
+        wq.set_inventory({"iron-gear-wheel": 5, "copper-cable": 10})
+        skill.tick(wq, _WW, tick=10)
+        self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
+
+    def test_running_when_items_partial(self):
+        # Only some items present — not enough for fallback
+        skill = CraftSkill()
+        skill.start([
+            CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5),
+            CraftTarget("copper-cable", "copper-cable", 10),
+        ])
+        wq = _WQ(inventory={})
         skill.tick(wq, _WW, tick=0)
-        wq.set_inventory({"iron-plate": 95})  # only 5 consumed, need 10
+        wq.set_inventory({"iron-gear-wheel": 5})  # copper-cable missing
         skill.tick(wq, _WW, tick=10)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
-    def test_unrelated_inventory_changes_dont_trigger_success(self):
-        # Adding ore to inventory shouldn't look like ingredient depletion
+    def test_running_when_items_insufficient_count(self):
         skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},
-        )
-        wq = _WQ(inventory={"iron-plate": 100})
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 10)])
+        wq = _WQ(inventory={})
         skill.tick(wq, _WW, tick=0)
-        # iron-plate unchanged; iron-ore added
-        wq.set_inventory({"iron-plate": 100, "iron-ore": 50})
+        wq.set_inventory({"iron-gear-wheel": 5})  # only 5 of 10
         skill.tick(wq, _WW, tick=10)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
 
 class TestCraftSkillStall(unittest.TestCase):
 
-    def _tick_to_stall(self, skill, wq, n_reissues):
+    def _tick_to_grace(self, skill, wq, n):
+        """Tick past grace period n times with no confirmation."""
         tick = 0
-        for _ in range(n_reissues):
+        for _ in range(n):
             tick += _CRAFTING_GRACE_TICKS + 10
             skill.tick(wq, _WW, tick=tick)
         return tick
 
     def test_reissues_on_stall(self):
         skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},
-        )
-        wq = _WQ(inventory={"iron-plate": 100})
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        wq = _WQ(inventory={})
         skill.tick(wq, _WW, tick=0)
         actions = skill.tick(wq, _WW, tick=_CRAFTING_GRACE_TICKS + 10)
         self.assertEqual(len(actions), 1)
@@ -678,14 +681,19 @@ class TestCraftSkillStall(unittest.TestCase):
 
     def test_stuck_after_max_reissues(self):
         skill = CraftSkill()
-        skill.start(
-            [CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)],
-            expected_post_inv={"iron-plate": 90},
-        )
-        wq = _WQ(inventory={"iron-plate": 100})
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        wq = _WQ(inventory={})
         skill.tick(wq, _WW, tick=0)
-        self._tick_to_stall(skill, wq, _CRAFT_MAX_REISSUE + 1)
+        self._tick_to_grace(skill, wq, _CRAFT_MAX_REISSUE + 1)
         self.assertEqual(skill.status(), SkillStatus.STUCK)
+
+    def test_no_stuck_before_max_reissues(self):
+        skill = CraftSkill()
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        wq = _WQ(inventory={})
+        skill.tick(wq, _WW, tick=0)
+        self._tick_to_grace(skill, wq, _CRAFT_MAX_REISSUE)
+        self.assertNotEqual(skill.status(), SkillStatus.STUCK)
 
 
 class TestCraftSkillReset(unittest.TestCase):
@@ -695,6 +703,19 @@ class TestCraftSkillReset(unittest.TestCase):
         skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
         skill.reset()
         self.assertEqual(skill.status(), SkillStatus.IDLE)
+
+    def test_reset_clears_targets(self):
+        skill = CraftSkill()
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        skill.reset()
+        self.assertEqual(skill._targets, [])
+
+    def test_tick_after_reset_returns_empty(self):
+        skill = CraftSkill()
+        skill.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 5)])
+        skill.reset()
+        actions = skill.tick(_WQ(), _WW, tick=100)
+        self.assertEqual(actions, [])
 
     def test_observe_keys(self):
         skill = CraftSkill()

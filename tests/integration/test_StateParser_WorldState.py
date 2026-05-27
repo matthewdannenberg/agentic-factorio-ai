@@ -16,7 +16,7 @@ import json
 import unittest
 
 from bridge import StateParser
-from world import WorldQuery, EntityStatus, ChunkCoord
+from world import WorldQuery, EntityStatus, ChunkCoord, CraftingQueueEntry
 
 
 class TestStateParserWorldQueryAPI(unittest.TestCase):
@@ -321,6 +321,219 @@ class TestStateParserExplorationFullRoundtrip(unittest.TestCase):
         self.assertEqual(exp.charted_chunks, 25)
         self.assertEqual(len(exp.newly_charted_chunks), 2)
         self.assertEqual(len(exp.nearby_uncharted_chunks), 3)
+
+
+
+class TestStateParserCraftingQueue(unittest.TestCase):
+    """
+    Verify that StateParser correctly parses crafting_queue and
+    crafting_queue_size from bridge JSON into PlayerState and exposes
+    them via WorldQuery.
+    """
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def _parse_player(self, extra_player_fields: dict) -> WorldQuery:
+        player = {
+            "position": {"x": 0.0, "y": 0.0},
+            "health": 100.0,
+            "inventory": [],
+            "reachable": [],
+            "charted_chunks": 0,
+        }
+        player.update(extra_player_fields)
+        raw = json.dumps({"tick": 100, "player": player})
+        return WorldQuery(self.parser.parse(raw, current_tick=100))
+
+    # --- crafting_queue entries ---
+
+    def test_empty_queue_parsed(self):
+        wq = self._parse_player({"crafting_queue": [], "crafting_queue_size": 0})
+        self.assertEqual(wq.crafting_queue, [])
+        self.assertEqual(wq.crafting_queue_size, 0)
+
+    def test_single_entry_parsed(self):
+        wq = self._parse_player({
+            "crafting_queue": [
+                {"recipe": "iron-gear-wheel", "count": 5, "progress": 0.4}
+            ],
+            "crafting_queue_size": 1,
+        })
+        self.assertEqual(len(wq.crafting_queue), 1)
+        entry = wq.crafting_queue[0]
+        self.assertIsInstance(entry, CraftingQueueEntry)
+        self.assertEqual(entry.recipe, "iron-gear-wheel")
+        self.assertEqual(entry.count, 5)
+        self.assertAlmostEqual(entry.progress, 0.4)
+
+    def test_multiple_entries_parsed(self):
+        wq = self._parse_player({
+            "crafting_queue": [
+                {"recipe": "iron-gear-wheel", "count": 5, "progress": 0.75},
+                {"recipe": "copper-cable",    "count": 20, "progress": 0.0},
+                {"recipe": "electronic-circuit", "count": 3, "progress": 0.0},
+            ],
+            "crafting_queue_size": 3,
+        })
+        self.assertEqual(len(wq.crafting_queue), 3)
+        self.assertEqual(wq.crafting_queue_size, 3)
+        self.assertEqual(wq.crafting_queue[0].recipe, "iron-gear-wheel")
+        self.assertAlmostEqual(wq.crafting_queue[0].progress, 0.75)
+        self.assertEqual(wq.crafting_queue[1].recipe, "copper-cable")
+        self.assertAlmostEqual(wq.crafting_queue[1].progress, 0.0)
+        self.assertEqual(wq.crafting_queue[2].recipe, "electronic-circuit")
+
+    def test_entries_are_crafting_queue_entry_instances(self):
+        wq = self._parse_player({
+            "crafting_queue": [{"recipe": "coal", "count": 1, "progress": 0.0}],
+            "crafting_queue_size": 1,
+        })
+        self.assertIsInstance(wq.crafting_queue[0], CraftingQueueEntry)
+
+    def test_absent_queue_defaults_to_empty(self):
+        """Older bridge payloads without crafting_queue parse safely."""
+        wq = self._parse_player({})
+        self.assertEqual(wq.crafting_queue, [])
+        self.assertEqual(wq.crafting_queue_size, 0)
+
+    def test_absent_queue_size_defaults_to_zero(self):
+        wq = self._parse_player({"crafting_queue": []})
+        self.assertEqual(wq.crafting_queue_size, 0)
+
+    def test_malformed_entry_skipped(self):
+        """Entries missing recipe or count are silently dropped."""
+        wq = self._parse_player({
+            "crafting_queue": [
+                {"recipe": "iron-gear-wheel", "count": 5, "progress": 0.5},  # valid
+                {"count": 3, "progress": 0.0},                                # missing recipe
+                {"recipe": "coal"},                                            # missing count
+                {"recipe": "copper-cable", "count": 10, "progress": 0.0},    # valid
+            ],
+            "crafting_queue_size": 2,
+        })
+        self.assertEqual(len(wq.crafting_queue), 2)
+        self.assertEqual(wq.crafting_queue[0].recipe, "iron-gear-wheel")
+        self.assertEqual(wq.crafting_queue[1].recipe, "copper-cable")
+
+    def test_progress_defaults_to_zero_when_absent(self):
+        wq = self._parse_player({
+            "crafting_queue": [{"recipe": "iron-gear-wheel", "count": 5}],
+            "crafting_queue_size": 1,
+        })
+        self.assertAlmostEqual(wq.crafting_queue[0].progress, 0.0)
+
+    def test_queue_size_independent_of_list_length(self):
+        """crafting_queue_size is parsed as-is from the bridge, not derived
+        from len(crafting_queue). They should match in practice but the parser
+        does not enforce this."""
+        wq = self._parse_player({
+            "crafting_queue": [{"recipe": "iron-gear-wheel", "count": 5, "progress": 0.0}],
+            "crafting_queue_size": 7,   # intentionally mismatched for this test
+        })
+        self.assertEqual(len(wq.crafting_queue), 1)
+        self.assertEqual(wq.crafting_queue_size, 7)
+
+    def test_other_player_fields_unaffected(self):
+        wq = self._parse_player({
+            "inventory": [{"item": "iron-ore", "count": 10}],
+            "charted_chunks": 5,
+            "crafting_queue": [{"recipe": "iron-gear-wheel", "count": 5, "progress": 0.3}],
+            "crafting_queue_size": 1,
+        })
+        self.assertEqual(wq.inventory_count("iron-ore"), 10)
+        self.assertEqual(wq.charted_chunks, 5)
+        self.assertEqual(len(wq.crafting_queue), 1)
+
+
+class TestStateParserCraftingQueueRoundtrip(unittest.TestCase):
+    """
+    End-to-end: a realistic bridge payload with crafting queue data flows
+    correctly through StateParser -> WorldState -> WorldQuery.
+    """
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def _realistic_state(self, queue=None, queue_size=0) -> str:
+        return json.dumps({
+            "tick": 1200,
+            "player": {
+                "position": {"x": 16.0, "y": 16.0},
+                "health": 100.0,
+                "inventory": [
+                    {"item": "iron-plate", "count": 100},
+                    {"item": "copper-plate", "count": 50},
+                ],
+                "reachable": [],
+                "charted_chunks": 10,
+                "newly_charted_chunks": [],
+                "nearby_uncharted_chunks": [],
+                "movement_status": "idle",
+                "inventory_size": 80,
+                "crafting_queue": queue or [],
+                "crafting_queue_size": queue_size,
+            },
+            "entities": [],
+            "resource_map": [],
+            "research": {"unlocked": [], "queued": []},
+        })
+
+    def test_idle_player_has_empty_queue(self):
+        wq = WorldQuery(self.parser.parse(
+            self._realistic_state(), current_tick=1200
+        ))
+        self.assertEqual(wq.crafting_queue, [])
+        self.assertEqual(wq.crafting_queue_size, 0)
+
+    def test_active_queue_roundtrip(self):
+        queue = [
+            {"recipe": "iron-gear-wheel", "count": 10, "progress": 0.6},
+            {"recipe": "electronic-circuit", "count": 5, "progress": 0.0},
+        ]
+        wq = WorldQuery(self.parser.parse(
+            self._realistic_state(queue=queue, queue_size=2), current_tick=1200
+        ))
+        self.assertEqual(len(wq.crafting_queue), 2)
+        self.assertEqual(wq.crafting_queue_size, 2)
+        self.assertEqual(wq.crafting_queue[0].recipe, "iron-gear-wheel")
+        self.assertEqual(wq.crafting_queue[0].count, 10)
+        self.assertAlmostEqual(wq.crafting_queue[0].progress, 0.6)
+        self.assertEqual(wq.crafting_queue[1].recipe, "electronic-circuit")
+        self.assertAlmostEqual(wq.crafting_queue[1].progress, 0.0)
+
+    def test_first_entry_has_progress_others_zero(self):
+        queue = [
+            {"recipe": "iron-gear-wheel", "count": 5, "progress": 0.8},
+            {"recipe": "copper-cable",    "count": 10, "progress": 0.0},
+            {"recipe": "iron-chest",      "count": 2,  "progress": 0.0},
+        ]
+        wq = WorldQuery(self.parser.parse(
+            self._realistic_state(queue=queue, queue_size=3), current_tick=1200
+        ))
+        self.assertGreater(wq.crafting_queue[0].progress, 0.0)
+        self.assertAlmostEqual(wq.crafting_queue[1].progress, 0.0)
+        self.assertAlmostEqual(wq.crafting_queue[2].progress, 0.0)
+
+    def test_inventory_and_queue_coexist(self):
+        queue = [{"recipe": "iron-gear-wheel", "count": 5, "progress": 0.0}]
+        wq = WorldQuery(self.parser.parse(
+            self._realistic_state(queue=queue, queue_size=1), current_tick=1200
+        ))
+        self.assertEqual(wq.inventory_count("iron-plate"), 100)
+        self.assertEqual(wq.inventory_count("copper-plate"), 50)
+        self.assertEqual(len(wq.crafting_queue), 1)
+
+    def test_state_player_crafting_queue_accessible_directly(self):
+        """White-box: verify crafting_queue is on state.player, not just wq."""
+        from world.observable.state import WorldState
+        queue = [{"recipe": "coal", "count": 1, "progress": 0.1}]
+        state = self.parser.parse(
+            self._realistic_state(queue=queue, queue_size=1), current_tick=1200
+        )
+        self.assertEqual(len(state.player.crafting_queue), 1)
+        self.assertEqual(state.player.crafting_queue[0].recipe, "coal")
+        self.assertAlmostEqual(state.player.crafting_queue[0].progress, 0.1)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

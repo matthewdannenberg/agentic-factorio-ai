@@ -500,6 +500,46 @@ function fa.get_state(opts)
     return safe_json(state)
 end
 
+function fa.get_crafting_queue()
+    -- Returns the player's current hand-crafting queue.
+    -- Each entry: {recipe, count, progress} where progress is in [0,1].
+    --
+    -- crafting_queue_size is an integer on LuaPlayer (Factorio 2.x).
+    -- crafting_queue is a LuaCustomTable of CraftingQueueItem:
+    --   .recipe  -> LuaRecipe  (.name gives the string name)
+    --   .count   -> integer    (items still queued in this batch)
+    -- crafting_queue_progress is a float [0,1] for the *current* item.
+    --
+    -- NON-PROXIMAL: the crafting queue belongs to the player, not the scan.
+    local player = get_player()
+    if not player or not player.valid then
+        return err_response("no_player")
+    end
+    local queue = {}
+    local ok_q = pcall(function()
+        for i = 1, player.crafting_queue_size do
+            local entry = player.crafting_queue[i]
+            if entry then
+                table.insert(queue, {
+                    recipe   = tostring(entry.recipe),
+                    count    = entry.count,
+                    progress = (i == 1) and player.crafting_queue_progress or 0.0,
+                })
+            end
+        end
+    end)
+    if not ok_q then
+        -- crafting_queue unavailable (e.g. no character) — return empty
+        queue = {}
+    end
+    return safe_json({
+        tick               = game.tick,
+        crafting_queue     = queue,
+        crafting_queue_size = player.crafting_queue_size or 0,
+    })
+end
+
+
 function fa.get_player()
     local player = get_player()
     if not player or not player.valid then
@@ -675,6 +715,28 @@ function fa._player_table(player, exploration_scan_radius)
         mov_status = "walking"
     end
 
+    -- ---- Crafting queue ----
+    -- Player's current hand-crafting queue. NON-PROXIMAL — belongs to the
+    -- player, not the scan radius. Each entry: {recipe, count, progress}.
+    -- crafting_queue_progress applies to the first (currently-crafting) entry.
+    local crafting_queue = {}
+    local crafting_queue_size = 0
+    pcall(function()
+        crafting_queue_size = player.crafting_queue_size or 0
+        for i = 1, crafting_queue_size do
+            local entry = player.crafting_queue[i]
+            if entry then
+                -- entry.recipe is a string (recipe name) in Factorio 2.x,
+                -- not a LuaRecipe object. Guard with tostring() for safety.
+                table.insert(crafting_queue, {
+                    recipe   = tostring(entry.recipe),
+                    count    = entry.count,
+                    progress = (i == 1) and player.crafting_queue_progress or 0.0,
+                })
+            end
+        end
+    end)
+
     return {
         position             = {x = player.position.x, y = player.position.y},
         health               = player.character and player.character.health or 100.0,
@@ -685,6 +747,8 @@ function fa._player_table(player, exploration_scan_radius)
         newly_charted_chunks      = newly_charted_chunks,
         nearby_uncharted_chunks   = nearby_uncharted_chunks,
         movement_status           = mov_status,
+        crafting_queue            = crafting_queue,
+        crafting_queue_size       = crafting_queue_size,
     }
 end
 

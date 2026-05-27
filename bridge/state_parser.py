@@ -47,6 +47,7 @@ from world.observable.state import (
     EntityState,
     EntityStatus,
     ChunkCoord,
+    CraftingQueueEntry,
     ExplorationState,
     GroundItem,
     Inventory,
@@ -259,6 +260,17 @@ class StateParser:
                 if isinstance(c, dict) and "cx" in c and "cy" in c
             ]
 
+        crafting_queue = [
+            CraftingQueueEntry(
+                recipe=str(e["recipe"]),
+                count=int(e["count"]),
+                progress=float(e.get("progress", 0.0)),
+            )
+            for e in d.get("crafting_queue", [])
+            if isinstance(e, dict) and "recipe" in e and "count" in e
+        ]
+        crafting_queue_size = int(d.get("crafting_queue_size", 0))
+
         return PlayerState(
             position=pos,
             health=health,
@@ -270,6 +282,8 @@ class StateParser:
                 newly_charted_chunks=_parse_chunk_list("newly_charted_chunks"),
                 nearby_uncharted_chunks=_parse_chunk_list("nearby_uncharted_chunks"),
             ),
+            crafting_queue=crafting_queue,
+            crafting_queue_size=crafting_queue_size,
         )
 
     def _parse_entities(self, lst: Any) -> list[EntityState]:
