@@ -87,6 +87,7 @@ class MineSkill(SkillProtocol):
         self._count: int = 0
         self._issued_at: int = 0
         self._reissue_count: int = 0
+        self._snapshot_taken: bool = False
         self._snapshot_at_start: dict[str, int] = {}
         self._last_inventory: dict[str, int] = {}
 
@@ -115,6 +116,7 @@ class MineSkill(SkillProtocol):
         self._count      = count
         self._issued_at  = 0
         self._reissue_count = 0
+        self._snapshot_taken    = False
         self._snapshot_at_start = {}
         self._last_inventory    = {}
         self._status = SkillStatus.RUNNING
@@ -135,8 +137,9 @@ class MineSkill(SkillProtocol):
         current_inv = self._inventory_snapshot(wq)
 
         # Capture inventory at first tick so we can measure delta.
-        if not self._snapshot_at_start:
+        if not self._snapshot_taken:
             self._snapshot_at_start = current_inv
+            self._snapshot_taken = True
 
         # --- Completion check (only when count > 0) ---
         if self._count > 0:
@@ -201,6 +204,7 @@ class MineSkill(SkillProtocol):
         self._count             = 0
         self._issued_at         = 0
         self._reissue_count     = 0
+        self._snapshot_taken    = False
         self._snapshot_at_start = {}
         self._last_inventory    = {}
 

@@ -217,15 +217,12 @@ class TestNavigateSkillPositionTarget(unittest.TestCase):
         self.assertAlmostEqual(actions[0].position.y, 75.0)
 
     def test_arrives_when_within_tolerance(self):
-        # Player within _POSITION_ARRIVAL_TOLERANCE of target
+        # Player starts within _POSITION_ARRIVAL_TOLERANCE of target.
+        # Arrival is detected on the first tick — no movement needed.
         target = Position(x=10, y=10)
         wq = _WQ(position=Position(x=10.0 + _POSITION_ARRIVAL_TOLERANCE - 0.1, y=10.0))
         self.skill.start(target_position=target)
-        # First tick captures start position and issues MoveTo
-        self.skill.tick(wq, _WW, tick=0)
-        # Move player to arrival position
-        wq.move_to(10.0 + _POSITION_ARRIVAL_TOLERANCE - 0.1, 10.0)
-        actions = self.skill.tick(wq, _WW, tick=10)
+        actions = self.skill.tick(wq, _WW, tick=1)
         self.assertEqual(self.skill.status(), SkillStatus.SUCCEEDED)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], StopMovement)
@@ -234,7 +231,7 @@ class TestNavigateSkillPositionTarget(unittest.TestCase):
         target = Position(x=0, y=0)
         wq = _WQ(position=Position(x=_POSITION_ARRIVAL_TOLERANCE + 1.0, y=0))
         self.skill.start(target_position=target)
-        self.skill.tick(wq, _WW, tick=0)
+        self.skill.tick(wq, _WW, tick=1)
         self.assertEqual(self.skill.status(), SkillStatus.RUNNING)
 
     def test_suppresses_redundant_move_to(self):
@@ -310,41 +307,47 @@ class TestNavigateSkillStall(unittest.TestCase):
     def test_stuck_after_standard_grace_if_player_moved_then_stopped(self):
         wq = _WQ(position=Position(x=0, y=0))
         self.skill.start(target_position=Position(x=100, y=100))
-        # First tick — issues MoveTo; move player slightly so never_moved=False
-        self.skill.tick(wq, _WW, tick=0)
-        wq.move_to(1.0, 0.0)   # player moved — triggers standard grace path
+        # First tick — issues MoveTo; captures start_position at (0,0)
+        self.skill.tick(wq, _WW, tick=1)
+        wq.move_to(1.0, 0.0)   # player moved — never_moved=False, standard grace
         # Tick up to just before grace — should still be RUNNING
         ticks_before_grace = _STALL_GRACE_TICKS // 10
         for i in range(1, ticks_before_grace):
-            self.skill.tick(wq, _WW, tick=i * 10)
+            self.skill.tick(wq, _WW, tick=1 + i * 10)
         self.assertEqual(self.skill.status(), SkillStatus.RUNNING)
         # One more tick past grace
-        self.skill.tick(wq, _WW, tick=_STALL_GRACE_TICKS + 10)
+        self.skill.tick(wq, _WW, tick=1 + _STALL_GRACE_TICKS + 10)
         self.assertEqual(self.skill.status(), SkillStatus.STUCK)
 
     def test_stuck_after_unreachable_grace_if_player_never_moved(self):
         wq = _WQ(position=Position(x=0, y=0))
         self.skill.start(target_position=Position(x=100, y=100))
-        self.skill.tick(wq, _WW, tick=0)   # captures start position
+        self.skill.tick(wq, _WW, tick=1)   # captures start position, issues MoveTo
         # Player never moves — fast grace path
         for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 2):
-            self.skill.tick(wq, _WW, tick=i * 10)
+            self.skill.tick(wq, _WW, tick=1 + i * 10)
         self.assertEqual(self.skill.status(), SkillStatus.STUCK)
 
     def test_stuck_emits_stop_movement(self):
         wq = _WQ(position=Position(x=0, y=0))
         self.skill.start(target_position=Position(x=100, y=100))
-        self.skill.tick(wq, _WW, tick=0)
-        for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 2):
-            actions = self.skill.tick(wq, _WW, tick=i * 10)
-        self.assertIsInstance(actions[0], StopMovement)
+        self.skill.tick(wq, _WW, tick=1)   # issues MoveTo; start_position captured
+        stuck_actions = []
+        for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 3):
+            actions = self.skill.tick(wq, _WW, tick=1 + i * 10)
+            if self.skill.status() == SkillStatus.STUCK:
+                stuck_actions = actions
+                break
+        self.assertEqual(self.skill.status(), SkillStatus.STUCK)
+        self.assertEqual(len(stuck_actions), 1)
+        self.assertIsInstance(stuck_actions[0], StopMovement)
 
     def test_no_ticks_after_stuck(self):
         wq = _WQ(position=Position(x=0, y=0))
         self.skill.start(target_position=Position(x=100, y=100))
-        self.skill.tick(wq, _WW, tick=0)
+        self.skill.tick(wq, _WW, tick=1)
         for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 2):
-            self.skill.tick(wq, _WW, tick=i * 10)
+            self.skill.tick(wq, _WW, tick=1 + i * 10)
         self.assertEqual(self.skill.status(), SkillStatus.STUCK)
         actions = self.skill.tick(wq, _WW, tick=9999)
         self.assertEqual(actions, [])
@@ -362,7 +365,7 @@ class TestNavigateSkillReset(unittest.TestCase):
         skill = NavigateSkill()
         skill.start(target_position=Position(x=10, y=10))
         wq = _WQ(position=Position(x=0, y=0))
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         skill.reset()
         # After reset, a new start() should issue a fresh MoveTo
         skill.start(target_position=Position(x=20, y=20))
@@ -380,7 +383,7 @@ class TestNavigateSkillReset(unittest.TestCase):
         target = Position(x=0, y=0)
         wq = _WQ(position=Position(x=0, y=0))
         skill.start(target_position=target)
-        skill.tick(wq, _WW, tick=0)  # arrives immediately
+        skill.tick(wq, _WW, tick=1)  # arrives immediately (player at target)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
         actions = skill.tick(wq, _WW, tick=10)
         self.assertEqual(actions, [])
@@ -411,7 +414,7 @@ class TestMineSkillStart(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=10, y=10), "iron-ore", count=50)
         wq = _WQ()
-        actions = skill.tick(wq, _WW, tick=0)
+        actions = skill.tick(wq, _WW, tick=1)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineResource)
 
@@ -420,7 +423,7 @@ class TestMineSkillStart(unittest.TestCase):
         pos = Position(x=33, y=44)
         skill.start(pos, "coal", count=10)
         wq = _WQ()
-        actions = skill.tick(wq, _WW, tick=0)
+        actions = skill.tick(wq, _WW, tick=1)
         self.assertAlmostEqual(actions[0].position.x, 33.0)
         self.assertAlmostEqual(actions[0].position.y, 44.0)
 
@@ -429,15 +432,15 @@ class TestMineSkillStart(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=5)
         wq = _WQ()
-        actions = skill.tick(wq, _WW, tick=0)
+        actions = skill.tick(wq, _WW, tick=1)
         self.assertEqual(actions[0].count, 0)
 
     def test_no_action_on_second_tick_without_stall(self):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=50)
         wq = _WQ()
-        skill.tick(wq, _WW, tick=0)
-        actions = skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=1)
+        actions = skill.tick(wq, _WW, tick=11)
         self.assertEqual(actions, [])
 
 
@@ -447,29 +450,29 @@ class TestMineSkillCompletion(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=10)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)   # snapshot taken: 0 iron-ore
+        skill.tick(wq, _WW, tick=1)   # snapshot taken: 0 iron-ore
         # Add 10 iron-ore to simulate mining
         wq.set_inventory({"iron-ore": 10})
-        skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
     def test_not_succeeded_when_count_not_reached(self):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=20)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         wq.set_inventory({"iron-ore": 10})   # only 10 of 20
-        skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
     def test_count_zero_never_succeeds(self):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=0)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         wq.set_inventory({"iron-ore": 1000})
         for i in range(1, 10):
-            skill.tick(wq, _WW, tick=i * 10)
+            skill.tick(wq, _WW, tick=1 + i * 10)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
     def test_delta_measured_from_start_not_absolute(self):
@@ -477,9 +480,9 @@ class TestMineSkillCompletion(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=3)
         wq = _WQ(inventory={"iron-ore": 5})
-        skill.tick(wq, _WW, tick=0)   # snapshot: 5
+        skill.tick(wq, _WW, tick=1)   # snapshot: 5
         wq.set_inventory({"iron-ore": 8})   # delta = 3
-        skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
 
@@ -497,9 +500,9 @@ class TestMineSkillStall(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=50)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)   # first issue
+        skill.tick(wq, _WW, tick=1)   # first issue
         # Advance past grace with no inventory change
-        actions = skill.tick(wq, _WW, tick=_MINING_GRACE_TICKS + 10)
+        actions = skill.tick(wq, _WW, tick=1 + _MINING_GRACE_TICKS + 10)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineResource)
 
@@ -507,7 +510,7 @@ class TestMineSkillStall(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=50)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, _MINE_MAX_REISSUE + 1)
         self.assertEqual(skill.status(), SkillStatus.STUCK)
 
@@ -515,7 +518,7 @@ class TestMineSkillStall(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=50)
         wq = _WQ(inventory={"iron-ore": 0})
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, _MINE_MAX_REISSUE)
         self.assertNotEqual(skill.status(), SkillStatus.STUCK)
 
@@ -532,7 +535,7 @@ class TestMineSkillReset(unittest.TestCase):
         skill = MineSkill()
         skill.start(Position(x=0, y=0), "iron-ore", count=10)
         wq = _WQ(inventory={"iron-ore": 5})
-        skill.tick(wq, _WW, tick=0)   # snapshot = 5
+        skill.tick(wq, _WW, tick=1)   # snapshot = 5
         skill.reset()
         # Start fresh — snapshot should be taken anew
         skill.start(Position(x=0, y=0), "iron-ore", count=3)
@@ -749,7 +752,7 @@ class TestDestroySkillFirstIssue(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=10)
-        actions = skill.tick(wq, _WW, tick=0)
+        actions = skill.tick(wq, _WW, tick=1)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineEntity)
         self.assertEqual(actions[0].entity_id, 10)
@@ -759,8 +762,8 @@ class TestDestroySkillFirstIssue(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=10)
-        skill.tick(wq, _WW, tick=0)
-        actions = skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=1)
+        actions = skill.tick(wq, _WW, tick=11)
         self.assertEqual(actions, [])
 
 
@@ -771,16 +774,16 @@ class TestDestroySkillEntityGone(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=7)
-        skill.tick(wq, _WW, tick=0)    # issues MineEntity
+        skill.tick(wq, _WW, tick=1)    # issues MineEntity
         wq.remove_entity(7)
-        skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
     def test_succeeds_immediately_if_entity_already_gone(self):
         wq = _WQ()   # no entities
         skill = DestroySkill()
         skill.start(entity_id=99)
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
     def test_no_actions_after_succeeded(self):
@@ -788,17 +791,17 @@ class TestDestroySkillEntityGone(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=7)
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         wq.remove_entity(7)
-        skill.tick(wq, _WW, tick=10)
-        actions = skill.tick(wq, _WW, tick=20)
+        skill.tick(wq, _WW, tick=11)
+        actions = skill.tick(wq, _WW, tick=21)
         self.assertEqual(actions, [])
 
 
 class TestDestroySkillStall(unittest.TestCase):
 
     def _tick_to_stall(self, skill, wq, n_reissues):
-        tick = 0
+        tick = 1
         for _ in range(n_reissues):
             tick += _DESTROY_GRACE + 10
             skill.tick(wq, _WW, tick=tick)
@@ -809,8 +812,8 @@ class TestDestroySkillStall(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=3)
-        skill.tick(wq, _WW, tick=0)
-        actions = skill.tick(wq, _WW, tick=_DESTROY_GRACE + 10)
+        skill.tick(wq, _WW, tick=1)
+        actions = skill.tick(wq, _WW, tick=1 + _DESTROY_GRACE + 10)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineEntity)
         self.assertEqual(actions[0].entity_id, 3)
@@ -820,7 +823,7 @@ class TestDestroySkillStall(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=3)
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, _DESTROY_MAX_REISSUE + 1)
         self.assertEqual(skill.status(), SkillStatus.STUCK)
 
@@ -829,7 +832,7 @@ class TestDestroySkillStall(unittest.TestCase):
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
         skill.start(entity_id=3)
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, 2)
         obs = skill.observe()
         self.assertEqual(obs["destroy_reissue_count"], 2)
@@ -850,14 +853,14 @@ class TestDestroySkillReset(unittest.TestCase):
         skill = DestroySkill()
 
         skill.start(entity_id=1)
-        skill.tick(wq, _WW, tick=0)
+        skill.tick(wq, _WW, tick=1)
         wq.remove_entity(1)
-        skill.tick(wq, _WW, tick=10)
+        skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
         skill.reset()
         skill.start(entity_id=2)
-        actions = skill.tick(wq, _WW, tick=20)
+        actions = skill.tick(wq, _WW, tick=21)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
         self.assertIsInstance(actions[0], MineEntity)
         self.assertEqual(actions[0].entity_id, 2)
