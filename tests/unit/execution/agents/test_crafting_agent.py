@@ -216,9 +216,7 @@ class TestCraftingAgentTick(unittest.TestCase):
         agent = _make_agent()
         task = _Task(targets=_gear_targets())
         bb = _make_bb()
-        actions = agent.activate(task, bb, _WQ(), _KB) or \
-                  agent.tick(task, bb, _WQ(), _WW, 1, _KB)
-        # tick() should return CraftItem actions
+        agent.activate(task, bb, _WQ(), _KB)
         actions = agent.tick(task, bb, _WQ(), _WW, 1, _KB)
         self.assertTrue(any(isinstance(a, CraftItem) for a in actions))
 

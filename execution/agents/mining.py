@@ -62,7 +62,7 @@ from typing import Optional, TYPE_CHECKING
 
 from execution.agents.base import AgentProtocol
 from execution.blackboard import EntryCategory, EntryScope
-from execution.predicates import is_reachable
+from execution.predicates import is_reachable, can_destroy
 from execution.skills.base import SkillStatus
 from execution.skills.navigate import NavigateSkill
 from execution.skills.mine import MineSkill
@@ -207,7 +207,7 @@ class MiningAgent(AgentProtocol):
         if self._task_kind == _TaskKind.GATHER:
             return self._tick_gather(task, blackboard, wq, ww, tick)
         elif self._task_kind == _TaskKind.CLEAR:
-            return self._tick_clear(task, blackboard, wq, ww, tick)
+            return self._tick_clear(task, blackboard, wq, ww, tick, kb)
         return []
 
     def observe(
@@ -318,11 +318,12 @@ class MiningAgent(AgentProtocol):
         wq: "WorldQuery",
         ww: "WorldWriter",
         tick: int,
+        kb: "KnowledgeBase",
     ) -> list[Action]:
         # Build target list on first tick.
         if not self._clear_targets and self._current_target is None \
                 and self._targets_total == 0:
-            self._build_target_list(task, wq)
+            self._build_target_list(task, wq, kb, blackboard, tick)
             if not self._clear_targets and self._current_target is None:
                 log.info("MiningAgent: no targets in clear region — done")
                 return []
@@ -434,7 +435,14 @@ class MiningAgent(AgentProtocol):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _build_target_list(self, task: "Task", wq: "WorldQuery") -> None:
+    def _build_target_list(
+        self,
+        task: "Task",
+        wq: "WorldQuery",
+        kb: "KnowledgeBase",
+        blackboard: "Blackboard",
+        tick: int,
+    ) -> None:
         bbox = getattr(task, "bbox", None)
         if bbox is None:
             log.warning(
@@ -443,17 +451,51 @@ class MiningAgent(AgentProtocol):
             return
 
         clear_mode: str = getattr(task, "clear_mode", "clear_natural")
-        natural_only = (clear_mode == "clear_natural")
 
         targets: list[_ClearTarget] = []
-        for entity in wq.state.entities:
-            pos = entity.position
-            if not (bbox.x_min <= pos.x <= bbox.x_max
-                    and bbox.y_min <= pos.y <= bbox.y_max):
-                continue
-            if natural_only and not _is_natural(entity):
-                continue
-            targets.append(_ClearTarget(entity_id=entity.entity_id, position=pos))
+        blocked: list = []   # objects in bbox that can't be destroyed yet
+        if clear_mode == "clear_natural":
+            # Use wq.natural_objects — the dedicated natural-object scan that
+            # returns trees, rocks, and cliffs. These are excluded from
+            # wq.state.entities because they have no unit_number in Factorio.
+            for obj in wq.natural_objects:
+                pos = obj.position
+                if not (bbox.x_min <= pos.x <= bbox.x_max
+                        and bbox.y_min <= pos.y <= bbox.y_max):
+                    continue
+                if not obj.is_minable:
+                    log.debug(
+                        "MiningAgent: skipping non-minable %s at %s",
+                        obj.name, pos,
+                    )
+                    blocked.append(obj.name)
+                    continue
+                if not can_destroy(obj, kb):
+                    log.debug(
+                        "MiningAgent: %s at %s requires trigger/special "
+                        "action — not yet supported, skipping",
+                        obj.name, pos,
+                    )
+                    blocked.append(obj.name)
+                    continue
+                targets.append(_ClearTarget(entity_id=obj.entity_id, position=pos))
+        else:
+            # clear_all — use both natural objects and player-built entities
+            for obj in wq.natural_objects:
+                pos = obj.position
+                if not (bbox.x_min <= pos.x <= bbox.x_max
+                        and bbox.y_min <= pos.y <= bbox.y_max):
+                    continue
+                if not obj.is_minable or not can_destroy(obj, kb):
+                    blocked.append(obj.name)
+                    continue
+                targets.append(_ClearTarget(entity_id=obj.entity_id, position=pos))
+            for entity in wq.state.entities:
+                pos = entity.position
+                if bbox.x_min <= pos.x <= bbox.x_max and bbox.y_min <= pos.y <= bbox.y_max:
+                    targets.append(_ClearTarget(
+                        entity_id=entity.entity_id, position=pos
+                    ))
 
         player_pos = wq.player_position()
         targets.sort(
@@ -465,26 +507,29 @@ class MiningAgent(AgentProtocol):
         self._clear_targets = targets
         self._targets_total = len(targets)
         log.info(
-            "MiningAgent: %d targets in clear region (mode=%s)",
-            len(targets), clear_mode,
+            "MiningAgent: %d targets in clear region (mode=%s), %d blocked",
+            len(targets), clear_mode, len(blocked),
         )
 
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-def _is_natural(entity) -> bool:
-    """
-    True if the entity appears to be a natural world object.
-    Uses name heuristics — KB-free. Replace with prototype_type check
-    when EntityState gains that field (Phase 9).
-    """
-    name = entity.name.lower()
-    return (
-        "tree"    in name
-        or "rock"    in name
-        or "boulder" in name
-        or "cliff"   in name
-        or "fish"    in name
-    )
+        if blocked:
+            # Some objects in the bbox cannot be destroyed with current
+            # capabilities (trigger-mining not yet supported, or unknown
+            # prototype). Notify the coordinator so it can decide whether
+            # to treat the clear as partial success or failure.
+            blackboard.write(
+                category=EntryCategory.OBSERVATION,
+                scope=EntryScope.TASK,
+                owner_agent=self.AGENT_ID,
+                created_at=tick,
+                data={
+                    "type":          "clear_partially_blocked",
+                    "task_id":       task.id,
+                    "blocked_names": list(set(blocked)),
+                    "blocked_count": len(blocked),
+                },
+            )
+            log.warning(
+                "MiningAgent: %d object(s) in clear region cannot be "
+                "destroyed — %s",
+                len(blocked), list(set(blocked)),
+            )

@@ -35,7 +35,8 @@ from typing import TYPE_CHECKING
 from world import Position
 
 if TYPE_CHECKING:
-    from world import WorldQuery
+    from world import WorldQuery, KnowledgeBase
+    from world import NaturalObject
 
 
 def is_at(
@@ -98,3 +99,35 @@ def player_has_item(item: str, count: int, wq: "WorldQuery") -> bool:
     completion checks without importing WorldQuery directly in agents.
     """
     return wq.inventory_count(item) >= count
+
+def can_destroy(obj: "NaturalObject", kb: "KnowledgeBase") -> bool:
+    """
+    True if the player can destroy this natural object with a plain MineEntity
+    action (no special item or technology required).
+
+    The check is made against the KnowledgeBase's EntityRecord, which stores
+    prototype mineable_properties.minable learned at runtime from
+    fa.get_entity_prototype. This works correctly for any total-conversion
+    mod — nothing is hardcoded about entity names.
+
+    How mineable_properties.minable maps to destroyability (from live testing):
+      minable=True  — MineEntity works: trees, rocks, machines, chests all
+                      have minable=True. Trees have a mining_trigger but it
+                      fires cosmetic particle effects only — MineEntity still
+                      completes normally.
+      minable=False — MineEntity does NOT work: cliffs in vanilla have
+                      minable=False and require cliff explosives via a
+                      UseItemOnEntity action (Phase 7, not yet implemented).
+
+    Returns False when:
+    - entity_id=0: NaturalObject.is_minable is False (some cliff variants).
+    - KB returns None or a placeholder: unknown entity — conservative,
+      assume not destroyable until prototype is learned.
+    - record.minable=False: entity requires special handling (Phase 7).
+    """
+    if not obj.is_minable:
+        return False
+    record = kb.get_entity(obj.name)
+    if record is None or record.is_placeholder:
+        return False   # unknown — conservative
+    return record.minable
