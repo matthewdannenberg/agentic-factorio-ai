@@ -441,14 +441,16 @@ class TestHandleCollection(unittest.TestCase):
         coord.tick(_WQ(), _WW, 1)
         self.assertTrue(coord._goal_stack[0].failed)
 
-    def test_patch_found_activates_navigate_task(self):
-        nav = _make_agent("RUNNING")
-        coord = _make_coord(agents={"navigation": nav, "mining": _make_agent()})
+    def test_patch_found_activates_gather_task_directly(self):
+        # MiningAgent handles its own approach navigation — the coordinator
+        # pushes a single gather_resource task, not a separate navigate first.
+        mine = _make_agent("RUNNING")
+        coord = _make_coord(agents={"mining": mine})
         coord.reset(GOAL_COLLECTION, {"item": "iron-ore", "count": 10}, _WQ())
         wq = _WQ(resources={"iron-ore": [_ResourcePatch(Position(x=100, y=100))]})
         coord.tick(wq, _WW, 1)
         self.assertIsNotNone(coord._active_task)
-        self.assertEqual(coord._active_task.task_type, "navigate_to_position")
+        self.assertEqual(coord._active_task.task_type, "gather_resource")
 
     def test_navigate_task_target_position_set(self):
         nav = _make_agent("RUNNING")
@@ -483,50 +485,38 @@ class TestHandleCollection(unittest.TestCase):
         self.assertAlmostEqual(ctx["patch_pos"].x, 33.0)
         self.assertAlmostEqual(ctx["patch_pos"].y, 44.0)
 
-    def test_gather_task_pushed_after_nav_succeeds(self):
-        nav  = _make_agent("RUNNING")
+    def test_gather_task_has_resource_type_and_position(self):
+        # Single gather_resource task — no separate nav task.
         mine = _make_agent("RUNNING")
-        coord = _make_coord(agents={"navigation": nav, "mining": mine})
+        coord = _make_coord(agents={"mining": mine})
         coord.reset(GOAL_COLLECTION, {"item": "iron-ore", "count": 5}, _WQ())
         wq = _WQ(resources={"iron-ore": [_ResourcePatch(Position(x=10, y=10))]})
         coord.tick(wq, _WW, 1)
-
-        # Succeed the nav task
-        coord._active_task.success_condition = "True"
-        coord._active_task.failure_condition = ""
-        coord.tick(wq, _WW, 2)
-
-        self.assertIsNotNone(coord._active_task)
         self.assertEqual(coord._active_task.task_type, "gather_resource")
+        self.assertEqual(coord._active_task.resource_type, "iron-ore")
+        self.assertAlmostEqual(coord._active_task.target_position.x, 10.0)
 
-    def test_gather_task_resource_type_set(self):
-        nav  = _make_agent("RUNNING")
+    def test_gather_task_resource_type_set_for_coal(self):
         mine = _make_agent("RUNNING")
-        coord = _make_coord(agents={"navigation": nav, "mining": mine})
+        coord = _make_coord(agents={"mining": mine})
         coord.reset(GOAL_COLLECTION, {"item": "coal", "count": 20}, _WQ())
         wq = _WQ(resources={"coal": [_ResourcePatch(Position(x=10, y=10))]})
         coord.tick(wq, _WW, 1)
-        coord._active_task.success_condition = "True"
-        coord._active_task.failure_condition = ""
-        coord.tick(wq, _WW, 2)
         self.assertEqual(coord._active_task.resource_type, "coal")
 
     def test_inventory_satisfied_after_gather_completes_goal(self):
-        nav  = _make_agent("RUNNING")
         mine = _make_agent("RUNNING")
-        coord = _make_coord(agents={"navigation": nav, "mining": mine})
+        coord = _make_coord(agents={"mining": mine})
         coord.reset(GOAL_COLLECTION, {"item": "iron-ore", "count": 5}, _WQ())
         patch = _ResourcePatch(Position(x=10, y=10))
         wq = _WQ(resources={"iron-ore": [patch]})
-        coord.tick(wq, _WW, 1)
-        coord._active_task.success_condition = "True"
-        coord._active_task.failure_condition = ""
-        coord.tick(wq, _WW, 2)
+        coord.tick(wq, _WW, 1)   # activates gather_resource task
+        # Succeed the gather task
         coord._active_task.success_condition = "True"
         coord._active_task.failure_condition = ""
         wq_done = _WQ(inventory={"iron-ore": 5},
                       resources={"iron-ore": [patch]})
-        coord.tick(wq_done, _WW, 3)
+        coord.tick(wq_done, _WW, 2)
         self.assertTrue(coord._goal_stack[0].completed)
 
     def test_step_resets_to_zero_if_insufficient_after_gather(self):

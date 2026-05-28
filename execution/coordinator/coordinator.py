@@ -425,28 +425,21 @@ class RuleBasedCoordinator:
             )
             frame.context["patch_pos"] = nearest.position
 
-            # Push: navigate to patch, then gather.
+            # Push a single gather_resource task. MiningAgent handles its
+            # own approach navigation internally via NavigateSkill — a
+            # separate navigate_to_position task would cause two navigation
+            # hops (coordinator nav to patch centre, then agent nav to
+            # mining position) where one is sufficient.
             gather_target = wq.inventory_count(item) + count
             self._push_task(
                 task_type   = "gather_resource",
                 description = f"Gather {count}x {item}",
                 agent_hint  = "mining",
                 tick        = tick,
-                resource_type    = item,
-                target_position  = nearest.position,
-                count            = count,
-                success_condition = f"inventory('{item}') >= {gather_target}",
-            )
-            self._push_task(
-                task_type   = "navigate_to_position",
-                description = f"Approach {item} patch at {nearest.position}",
-                agent_hint  = "navigation",
-                tick        = tick,
+                resource_type     = item,
                 target_position   = nearest.position,
-                success_condition = (
-                    f"is_at(Position({nearest.position.x}, "
-                    f"{nearest.position.y}), tolerance=1.5)"
-                ),
+                count             = count,
+                success_condition = f"inventory('{item}') >= {gather_target}",
             )
             return CoordinatorStatus.PROGRESSING, []
 
@@ -509,8 +502,47 @@ class RuleBasedCoordinator:
                 frame.failed = True
                 return CoordinatorStatus.STUCK, []
 
+            # No resource patch and no recipe — STUCK.
+            #
+            # Known gap: items obtained by clearing natural objects (most
+            # notably wood from trees in the base game) fall into this
+            # branch. Wood is not a mineable resource patch and has no
+            # crafting recipe, so _handle_acquire cannot satisfy a wood
+            # request directly.
+            #
+            # The correct long-term fix is a third acquisition category:
+            # "harvest from natural object". This requires:
+            #
+            #   1. KnowledgeBase.EntityRecord gaining a field:
+            #          mining_products: dict[str, int]
+            #      populated from proto.mineable_properties.products at
+            #      runtime via fa.get_entity_prototype. This keeps the
+            #      knowledge learned, not hardcoded.
+            #
+            #   2. A KB query:
+            #          kb.entities_that_produce(item) -> list[str]
+            #      returning entity names whose mining drops the target
+            #      item (e.g. "wood" → ["tree-01", "tree-dead-dry", ...]).
+            #
+            #   3. A "harvest_natural" task type: MiningAgent locates
+            #      entities of the returned type in wq.natural_objects,
+            #      navigates to them, and destroys them. The scan radius
+            #      already provides natural_objects so this is feasible.
+            #
+            # This is deferred to Phase 7. Until then:
+            #   - In the base game, wood demands are small enough that
+            #     incidental tree clearing from prep_region / clear_region
+            #     goals typically covers them without a dedicated acquire.
+            #   - A scenario or mod requiring large quantities of a
+            #     natural-object drop will STUCK and require LLM escalation.
+            #
+            # DO NOT work around this with `if item == "wood"` — that
+            # hardcodes a Factorio item name and breaks total-conversion mods.
             log.warning(
-                "Acquire: no known source for %s — STUCK", item
+                "Acquire: no known source for %s — STUCK. "
+                "(If this is a natural-object drop such as wood, see the "
+                "harvest_natural gap comment in _handle_acquire.)",
+                item,
             )
             frame.failed = True
             return CoordinatorStatus.STUCK, []
@@ -675,7 +707,7 @@ class RuleBasedCoordinator:
         Step 0 — Check for undestroyable blockers:
           Scan natural_objects in bbox for objects where can_destroy=False.
           If any present → fail immediately (caller should use prep_region
-          which has a softer handling, or wait for cliff-explosives tech).
+          which has a softer handling, or wait for relevant tech).
         Step 1 — Push clear Task.
         Step 2 — Verify region empty (no natural_objects in bbox) → complete.
         """
@@ -686,11 +718,46 @@ class RuleBasedCoordinator:
             # Check for undestroyable objects.
             blocked = _undestroyable_in_bbox(bbox, wq, self._kb)
             if blocked:
+                # Known gap: cliffs (and any mod entity with minable=False)
+                # make a clear_region goal fail immediately with no recovery
+                # path. This is the correct conservative behaviour right now,
+                # but it means any bbox that contains a cliff is permanently
+                # unclearable until the following capabilities are added:
+                #
+                #   1. Technology change detection.
+                #      EntityRecord.minable can change when the player
+                #      researches a technology (e.g. "cliff-explosives" makes
+                #      cliffs minable). Currently the KB learns minable=False
+                #      at startup and never re-queries. The examination layer
+                #      (Phase 10) or a dedicated on_research_finished hook
+                #      should invalidate affected EntityRecords and re-query
+                #      fa.get_entity_prototype when research completes.
+                #
+                #   2. UseItemOnEntity bridge action.
+                #      Even once the technology is researched and minable
+                #      becomes True, destroying a cliff requires placing a
+                #      cliff explosive via a UseItemOnEntity action, not the
+                #      plain MineEntity that DestroySkill currently issues.
+                #      DestroySkill needs a trigger_item parameter and a
+                #      corresponding new bridge action (Phase 7).
+                #
+                #   3. Coordinator retry after technology unlock.
+                #      Once (1) and (2) are in place, the coordinator should
+                #      not permanently fail a goal because cliffs are present.
+                #      Instead it could: push a GOAL_RESEARCH sub-goal to
+                #      unlock cliff-explosives, push a GOAL_ACQUIRE sub-goal
+                #      to obtain the explosives, then retry the clear. This
+                #      would make cliff clearing fully automatic. For now,
+                #      STUCK is the only honest response.
+                #
+                # DO NOT special-case "cliff" by name here — use the minable
+                # flag from the KB, which is already what _undestroyable_in_bbox
+                # does. The fix is in the KB update loop and bridge action, not
+                # in naming specific entity types in coordinator logic.
                 log.warning(
-                    "Clear region: %d undestroyable objects in bbox "
-                    "(e.g. cliffs requiring explosives) — FAIL. "
-                    "Use prep_region to handle partial clearing, or wait "
-                    "for cliff-explosives technology.",
+                    "Clear region: %d undestroyable object(s) in bbox — FAIL. "
+                    "(Likely cliffs requiring explosives. See cliff gap comment "
+                    "in _handle_clear_region for the full fix path.)",
                     len(blocked),
                 )
                 frame.failed = True
