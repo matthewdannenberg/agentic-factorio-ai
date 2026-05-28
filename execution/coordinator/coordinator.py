@@ -13,7 +13,7 @@ The coordinator maintains two stacks:
       derived context (patch position, bbox, etc.) needed across ticks.
       When the top goal completes, it is popped and the parent resumes.
 
-  _task_ledger  : SubtaskLedger
+  _task_ledger  : TaskLedger
       The flat list of concrete Tasks sent to agents. When the ledger is
       non-empty, the coordinator ticks the active agent rather than
       performing goal derivation.
@@ -46,9 +46,9 @@ Unimplemented stubs
 Several handlers are stubs pending later phases:
 
   _handle_prep_region     — STUB: logistics rerouting (Phase 7/8)
-  _handle_construction    — STUB: build subtask (Phase 7 RL agent)
+  _handle_construction    — STUB: build task (Phase 7 RL agent)
   _handle_production      — STUB: region delineation + logistics + byproducts
-  _handle_logistics       — STUB: build-line subtask (Phase 9)
+  _handle_logistics       — STUB: build-line task (Phase 9)
   _handle_byproduct       — STUB: similar to production
   _handle_research        — STUB: science production + lab construction
   _handle_noop            — STUB: ask LLM
@@ -78,9 +78,10 @@ from execution.skills.base import SkillStatus
 from world import Position
 from world.model.patch import SelfModelPatch
 
+from planning import Task
+
 if TYPE_CHECKING:
     from execution.agents.base import AgentProtocol
-    from planning.tasks.task import Task
     from world import KnowledgeBase, WorldQuery, WorldWriter
 
 log = logging.getLogger(__name__)
@@ -171,6 +172,29 @@ class CoordinatorStatus(Enum):
 # ---------------------------------------------------------------------------
 # RuleBasedCoordinator
 # ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# StubCoordinator (retained for reference / tests that import it)
+# ---------------------------------------------------------------------------
+
+class StubCoordinator:
+    """
+    Minimal no-op coordinator stub retained for Phase 6 test compatibility.
+
+    Matches the old CoordinatorProtocol signature (goal, wq, ww, tick) and
+    returns an ExecutionResult so existing tests that import StubCoordinator
+    continue to work unchanged.
+    """
+
+    def reset(self, goal=None, wq=None, seed_subtasks=None) -> None:
+        pass
+
+    def tick(self, goal=None, wq=None, ww=None, tick: int = 0):
+        from execution.protocol import ExecutionResult, ExecutionStatus
+        return ExecutionResult(actions=[], status=ExecutionStatus.WAITING)
+
 
 class RuleBasedCoordinator:
     """
@@ -375,7 +399,7 @@ class RuleBasedCoordinator:
         -------------
         Step 0 — Source selection:
           a) If item already in inventory ≥ count → complete immediately.
-          b) If item available in a reachable chest → STUB: open_chest subtask
+          b) If item available in a reachable chest → STUB: open_chest task
              (Phase 7 — requires InteractSkill).
           c) If a known resource patch exists → push gather_resource Task.
           d) Else → STUCK (no known source — explorer should find one first).
@@ -707,7 +731,7 @@ class RuleBasedCoordinator:
         Step 0 — Check for undestroyable blockers:
           Scan natural_objects in bbox for objects where can_destroy=False.
           If any present → fail immediately (caller should use prep_region
-          which has a softer handling, or wait for relevant tech).
+          which has a softer handling, or wait for cliff-explosives tech).
         Step 1 — Push clear Task.
         Step 2 — Verify region empty (no natural_objects in bbox) → complete.
         """
@@ -962,7 +986,7 @@ class RuleBasedCoordinator:
 
         Step 4 — Output storage (optional):
           If output_storage param is True → build a storage container.
-          STUB: storage subtask not yet implemented (Phase 7).
+          STUB: storage task not yet implemented (Phase 7).
 
         STUB NOTE: All steps are stubs pending Phase 8 and the factory
         self-model (Phase 10 examination layer).
@@ -1176,20 +1200,22 @@ class RuleBasedCoordinator:
         **params,
     ) -> None:
         """
-        Create a Task and set it as the active task.
+        Create a task and set it as the active task.
 
-        All keyword arguments beyond the named ones are set as dynamic
-        attributes on the task object so agents can read them directly.
+        Uses Task from the project's task module. task_type is stored
+        as a dynamic attribute (Task has no task_type field natively).
+        All extra keyword arguments are also set as dynamic attributes so
+        agents can read them directly.
         """
-        from planning.tasks.task import Task
-
         task = Task(
-            task_type         = task_type,
             description       = description,
             success_condition = success_condition,
             failure_condition = f"elapsed_ticks > {_TASK_TIMEOUT_TICKS}",
+            parent_goal_id    = "coordinator",
             created_at        = tick,
+            derived_locally   = True,
         )
+        task.task_type  = task_type
         task.agent_hint = agent_hint
         for k, v in params.items():
             setattr(task, k, v)
@@ -1271,6 +1297,12 @@ class RuleBasedCoordinator:
         """Evaluate a condition string against the current WorldQuery."""
         if not condition:
             return False
+        # Fast-path for literal booleans — avoids needing a full namespace.
+        # Used in tests and for simple coordinator-derived conditions.
+        if condition.strip() == "True":
+            return True
+        if condition.strip() == "False":
+            return False
         try:
             from planning import build_core_namespace
             ns = build_core_namespace(wq, tick, 0, None)
@@ -1312,10 +1344,6 @@ def _missing_ingredients(
     Uses KB recipe data. Returns {} if KB is unavailable or recipe unknown.
     """
     if kb is None:
-        return {}
-    try:
-        from execution.predicates import post_crafting_inventory  # type: ignore
-    except ImportError:
         return {}
 
     current = {

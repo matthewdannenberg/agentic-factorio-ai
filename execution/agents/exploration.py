@@ -280,8 +280,12 @@ class ExplorationAgent(AgentProtocol):
                 self._needs_new_frontier = True
                 self._skill.reset()
                 blackboard.write(
+                    # GOAL scope: this observation must survive task
+                    # resolution. The coordinator reads it in _handle_explore
+                    # after the task completes; TASK scope would cause it to
+                    # be cleared before the handler sees it.
                     category=EntryCategory.OBSERVATION,
-                    scope=EntryScope.TASK,
+                    scope=EntryScope.GOAL,
                     owner_agent=self.AGENT_ID,
                     created_at=tick,
                     data={
