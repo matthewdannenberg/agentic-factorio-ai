@@ -454,4 +454,157 @@ TP.suite("item_prototype", {
     end,
 })
 
+
+-- ============================================================
+-- Suite: entity_mineable_properties
+-- Verifies that get_entity_prototype() returns the minable field
+-- that supports can_destroy() in execution/predicates.py.
+--
+-- Key findings from live testing (informed the design):
+--   minable=true  — MineEntity works: trees, rocks, machines, chests.
+--                   Trees have a mining_trigger for cosmetic particle
+--                   effects; MineEntity still completes normally.
+--   minable=false — MineEntity does NOT work: cliffs require cliff
+--                   explosives via UseItemOnEntity (Phase 7).
+--
+-- has_mining_trigger was removed after discovering it signals cosmetic
+-- effects (leaf particles on trees) rather than resource requirements.
+-- ============================================================
+
+TP.suite("entity_mineable_properties", {
+
+    assembler_has_minable_field = function(t)
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.minable ~= nil,
+            "get_entity_prototype must return minable field")
+        t.is_bool(parsed.minable,
+            "minable must be boolean; got " .. type(parsed.minable))
+    end,
+
+    assembler_is_minable = function(t)
+        -- Placed machines can be hand-mined to pick them up.
+        -- mineable_properties.minable=true for all placed entities.
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.minable,
+            "assembling-machine-1 should be minable (can be picked up); " ..
+            "got minable=" .. tostring(parsed.minable))
+    end,
+
+    chest_is_minable = function(t)
+        local raw = fa.get_entity_prototype("iron-chest")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.minable,
+            "iron-chest should be minable; got minable=" ..
+            tostring(parsed.minable))
+    end,
+
+    tree_is_minable = function(t)
+        -- Trees are directly MineEntity-destroyable even though their
+        -- prototype has a mining_trigger for cosmetic particle effects.
+        local tree_proto = nil
+        for name, proto in pairs(prototypes.entity) do
+            if proto.type == "tree" then tree_proto = name break end
+        end
+        if not tree_proto then
+            test_print("[SKIP] No tree prototype found — skip")
+            return
+        end
+        local raw = fa.get_entity_prototype(tree_proto)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for " .. tree_proto)
+        t.ok(parsed.minable,
+            tree_proto .. " should be minable; got minable=" ..
+            tostring(parsed.minable))
+    end,
+
+    rock_is_minable = function(t)
+        local rock_proto = nil
+        for name, proto in pairs(prototypes.entity) do
+            if proto.type == "simple-entity" and proto.mineable_properties
+                    and proto.mineable_properties.minable then
+                rock_proto = name break
+            end
+        end
+        if not rock_proto then
+            test_print("[SKIP] No minable simple-entity found — skip")
+            return
+        end
+        local raw = fa.get_entity_prototype(rock_proto)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for " .. rock_proto)
+        t.ok(parsed.minable,
+            rock_proto .. " should be minable; got minable=" ..
+            tostring(parsed.minable))
+    end,
+
+    cliff_is_not_minable = function(t)
+        -- Cliffs have mineable_properties.minable=false in Factorio 2.x.
+        -- They require cliff explosives, not MineEntity.
+        local raw = fa.get_entity_prototype("cliff")
+        local parsed = parse_json(raw)
+        if parsed and parsed.ok == false then
+            test_print("[SKIP] cliff prototype not found — skip")
+            return
+        end
+        t.ok(parsed ~= nil, "must return valid JSON for cliff")
+        t.ok(not parsed.minable,
+            "cliff should have minable=false (requires explosives); " ..
+            "got minable=" .. tostring(parsed.minable))
+    end,
+
+    minable_field_present_on_multiple_entity_types = function(t)
+        -- Spot-check a range of entity types to ensure minable is always
+        -- returned and always boolean.
+        local entities = {
+            "assembling-machine-1", "iron-chest", "inserter",
+            "transport-belt", "electric-mining-drill",
+        }
+        for _, name in ipairs(entities) do
+            local raw = fa.get_entity_prototype(name)
+            local parsed = parse_json(raw)
+            if parsed and parsed.ok ~= false then
+                t.ok(parsed.minable ~= nil,
+                    name .. " must have minable field")
+                t.is_bool(parsed.minable,
+                    name .. " minable must be boolean; got " ..
+                    type(parsed.minable))
+            end
+        end
+    end,
+
+    new_field_coexists_with_existing_fields = function(t)
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.name ~= nil,            "name must still be present")
+        t.ok(parsed.type ~= nil,            "type must still be present")
+        t.ok(parsed.tile_width ~= nil,      "tile_width must still be present")
+        t.ok(parsed.tile_height ~= nil,     "tile_height must still be present")
+        t.ok(parsed.has_recipe_slot ~= nil, "has_recipe_slot must still be present")
+        t.ok(parsed.inventory_size ~= nil,  "inventory_size must still be present")
+        t.ok(parsed.minable ~= nil,         "minable must be present")
+    end,
+
+    minable_consistent_with_mineable_properties = function(t)
+        local entity_name = "assembling-machine-1"
+        local proto = prototypes.entity[entity_name]
+        t.ok(proto ~= nil, "prototype must exist")
+        local lua_minable = false
+        local ok_mp, mp = pcall(function() return proto.mineable_properties end)
+        if ok_mp and mp then lua_minable = mp.minable == true end
+        local raw = fa.get_entity_prototype(entity_name)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.eq(parsed.minable, lua_minable,
+            "minable must match proto.mineable_properties.minable; " ..
+            "lua=" .. tostring(lua_minable) ..
+            " returned=" .. tostring(parsed.minable))
+    end,
+})
+
 return TP

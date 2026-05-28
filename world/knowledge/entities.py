@@ -1,5 +1,5 @@
 """
-world/knowledge/entities.py
+world/observable/entities.py
 
 Thin facade over KnowledgeBase for entity and resource queries.
 

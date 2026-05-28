@@ -780,8 +780,13 @@ T.suite("crafting_queue", {
         local raw = fa.get_crafting_queue()
         local parsed = helpers.json_to_table(raw)
         t.ok(parsed ~= nil, "must return valid JSON")
+        if parsed.crafting_queue_size == 0 then
+            test_print("[SKIP] crafting queue is empty — skipping field checks")
+            return
+        end
         for _, entry in ipairs(parsed.crafting_queue) do
-            t.ok(entry.recipe ~= nil, "each queue entry must have recipe")
+            t.ok(entry.recipe ~= nil,
+                "each queue entry must have recipe (check entry.recipe.name fix)")
             t.ok(type(entry.recipe) == "string",
                 "recipe must be a string; got " .. type(entry.recipe))
             t.ok(entry.count ~= nil, "each queue entry must have count")
@@ -827,6 +832,110 @@ T.suite("crafting_queue", {
             tostring(s1.player.crafting_queue_size) ..
             " standalone=" .. tostring(s2.crafting_queue_size))
     end,
+})
+
+
+
+-- ============================================================
+-- Suite: entity_fields
+-- Verifies that fa.get_state() entities include force and
+-- prototype_type, and that natural_objects is populated with
+-- trees, rocks, and cliffs.
+-- ============================================================
+
+T.suite("entity_fields", {
+
+    get_state_has_natural_objects_field = function(t)
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.natural_objects ~= nil,
+            "state must have natural_objects field")
+        t.ok(type(parsed.natural_objects) == "table",
+            "natural_objects must be a table")
+    end,
+
+    natural_objects_entries_have_required_fields = function(t)
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, obj in ipairs(parsed.natural_objects) do
+            t.ok(obj.name ~= nil,           "natural_object must have name")
+            t.ok(obj.position ~= nil,       "natural_object must have position")
+            t.ok(obj.force ~= nil,          "natural_object must have force")
+            t.ok(obj.prototype_type ~= nil, "natural_object must have prototype_type")
+            t.ok(obj.entity_id ~= nil,      "natural_object must have entity_id")
+            t.is_string(obj.name,           "name must be string")
+            t.is_string(obj.force,          "force must be string")
+            t.is_string(obj.prototype_type, "prototype_type must be string")
+            t.is_number(obj.entity_id,      "entity_id must be number")
+        end
+    end,
+
+    natural_objects_are_neutral_force = function(t)
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, obj in ipairs(parsed.natural_objects) do
+            t.eq(obj.force, "neutral",
+                "natural_object " .. tostring(obj.name) ..
+                " should have force=neutral, got: " .. tostring(obj.force))
+        end
+    end,
+
+    natural_objects_have_valid_prototype_type = function(t)
+        -- All natural_objects entries must have a non-empty prototype_type
+        -- string. We no longer check against a fixed list of type names —
+        -- the filter is force="neutral" so any mod-added neutral entity type
+        -- is valid. The only exclusion is "resource" (handled separately).
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, obj in ipairs(parsed.natural_objects) do
+            t.is_string(obj.prototype_type,
+                "natural_object " .. tostring(obj.name) ..
+                " prototype_type must be a string; got " .. type(obj.prototype_type))
+            t.ok(obj.prototype_type ~= "",
+                "natural_object " .. tostring(obj.name) ..
+                " prototype_type must not be empty")
+            t.ok(obj.prototype_type ~= "resource",
+                "natural_object " .. tostring(obj.name) ..
+                " must not be a resource patch (those belong in resource_map)")
+        end
+    end,
+
+    entities_have_force_field = function(t)
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, entity in ipairs(parsed.entities) do
+            t.ok(entity.force ~= nil,
+                "entity " .. tostring(entity.name) .. " must have force field")
+            t.is_string(entity.force,
+                "entity force must be string; got " .. type(entity.force))
+        end
+    end,
+
+    entities_have_prototype_type_field = function(t)
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = helpers.json_to_table(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for _, entity in ipairs(parsed.entities) do
+            t.ok(entity.prototype_type ~= nil,
+                "entity " .. tostring(entity.name) ..
+                " must have prototype_type field")
+            t.is_string(entity.prototype_type,
+                "entity prototype_type must be string; got " ..
+                type(entity.prototype_type))
+        end
+    end,
+
+    -- Note: player_built_entities_are_player_force was removed.
+    -- Crash site wreckage entities (e.g. crash-site-spaceship-wreck-big-2)
+    -- are neutral-force but have unit_numbers, so the assumption
+    -- "unit_number → player force" does not hold in all maps.
+    -- The entities scan correctly includes them; they are minable and
+    -- will be handled correctly by can_destroy() via the KB.
 })
 
 

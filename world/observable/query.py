@@ -372,8 +372,26 @@ class WorldQuery:
         return self._state.player.health
 
     # ------------------------------------------------------------------
+    @property
+    def natural_objects(self) -> list:
+        """
+        Natural world objects in the current scan radius: trees, rocks,
+        boulders, and cliffs. PROXIMAL — scan radius limited.
+
+        Each entry is a NaturalObject with entity_id, name, position,
+        force (always 'neutral'), and prototype_type ('tree',
+        'simple-entity', or 'cliff').
+
+        The MiningAgent uses this list for clear_region tasks.
+        entity_id=0 means the object cannot be targeted with MineEntity
+        (some cliff variants); treat as position-only.
+        """
+        return self._state.natural_objects
+
+    # ------------------------------------------------------------------
     # Crafting queue
     # ------------------------------------------------------------------
+
 
     @property
     def crafting_queue(self) -> list:
@@ -407,12 +425,12 @@ class WorldQuery:
 
     @property
     def charted_tiles(self) -> int:
-        """NON-PROXIMAL. charted_chunks * 1024."""        
+        """NON-PROXIMAL. charted_chunks * 1024."""
         return self._state.player.exploration.charted_tiles
 
     @property
     def charted_area_km2(self) -> float:
-        """NON-PROXIMAL. charted_tiles / 1,000,000."""        
+        """NON-PROXIMAL. charted_tiles / 1,000,000."""
         return self._state.player.exploration.charted_area_km2
 
     @property

@@ -25,25 +25,30 @@ coordinate primitives with no operational logic, and Action objects are
 meaningless without them. No other bridge module imports from world/.
 """
 
-# --- Transport ----------------------------------------------------------------
+# --- Transport, world interaction, execution ----------------------------------
+# These modules require a live RCON connection and are not available in unit
+# tests. Guarded with try/except so that "from bridge import CraftItem" (and
+# other pure action types) works in test environments without infrastructure.
 
-from bridge.rcon_client import RconClient, BridgeError
-
-# --- World interaction --------------------------------------------------------
-
-from bridge.world_poller import WorldPoller
-from bridge.state_parser import StateParser
-
-# --- Prototype queries --------------------------------------------------------
-# make_prototype_query_fn is called once at startup in run.py to produce the
-# callable injected into KnowledgeBase. PrototypeQueryFn is the type alias
-# used in KnowledgeBase.__init__'s signature.
-
-from bridge.prototype_query import make_prototype_query_fn, PrototypeQueryFn
-
-# --- Action execution ---------------------------------------------------------
-
-from bridge.action_executor import ActionExecutor
+try:
+    from bridge.rcon_client import RconClient, BridgeError
+    from bridge.world_poller import WorldPoller
+    from bridge.state_parser import StateParser
+    from bridge.prototype_query import make_prototype_query_fn, PrototypeQueryFn
+    from bridge.action_executor import ActionExecutor
+except ImportError:
+    # Unit-test environment: infrastructure not available.
+    # Only action types and StateParser (pure parsing, no RCON) are needed.
+    RconClient = None          # type: ignore[assignment,misc]
+    BridgeError = Exception    # type: ignore[assignment,misc]
+    WorldPoller = None         # type: ignore[assignment,misc]
+    make_prototype_query_fn = None  # type: ignore[assignment]
+    PrototypeQueryFn = None    # type: ignore[assignment]
+    ActionExecutor = None      # type: ignore[assignment,misc]
+    try:
+        from bridge.state_parser import StateParser
+    except ImportError:
+        StateParser = None     # type: ignore[assignment,misc]
 
 # --- Actions — base and registry ----------------------------------------------
 

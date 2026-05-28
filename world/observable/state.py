@@ -109,6 +109,45 @@ class EntityState:
     recipe: Optional[str] = None
     inventory: Optional[Inventory] = None
     energy: float = 0.0
+    force: str = "player"
+    # The Factorio prototype type string: "assembling-machine", "inserter",
+    # "tree", "simple-entity", "cliff", "resource", etc.
+    prototype_type: str = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Natural objects
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NaturalObject:
+    """
+    A natural world object in the scan radius: tree, rock/boulder, or cliff.
+
+    Natural objects lack unit_numbers in Factorio so they are excluded from
+    the main EntityState scan. They are returned by _natural_objects_table
+    and stored in WorldState.natural_objects.
+
+    Fields
+    ------
+    entity_id      : Factorio unit_number, or 0 if the entity type lacks one
+                     (some cliff variants). The Python layer treats entity_id=0
+                     as position-only (navigate to position, no MineEntity).
+    name           : Prototype name (e.g. "tree-01", "rock-huge", "cliff").
+    position       : Tile-space position.
+    force          : Always "neutral" for natural objects.
+    prototype_type : "tree", "simple-entity", or "cliff".
+    """
+    entity_id: int
+    name: str
+    position: Position
+    force: str = "neutral"
+    prototype_type: str = "tree"
+
+    @property
+    def is_minable(self) -> bool:
+        """True if this object can be targeted with MineEntity (has a unit_number)."""
+        return self.entity_id != 0
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +444,8 @@ class WorldState:
 
     Section names used in observed_at
     ----------------------------------
-    "player", "entities", "resource_map", "ground_items", "research",
-    "logistics", "damaged_entities", "destroyed_entities", "threat"
+    "player", "entities", "natural_objects", "resource_map", "ground_items",
+    "research", "logistics", "damaged_entities", "destroyed_entities", "threat"
 
     Deferred sections
     -----------------
@@ -425,6 +464,7 @@ class WorldState:
 
     player: PlayerState = field(default_factory=PlayerState)
     entities: list[EntityState] = field(default_factory=list)
+    natural_objects: list["NaturalObject"] = field(default_factory=list)
     resource_map: list[ResourcePatch] = field(default_factory=list)
     ground_items: list[GroundItem] = field(default_factory=list)
     research: ResearchState = field(default_factory=ResearchState)

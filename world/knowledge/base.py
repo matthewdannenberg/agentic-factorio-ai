@@ -132,6 +132,15 @@ class EntityRecord:
     ingredient_slots: int
     output_slots: int
     is_placeholder: bool
+    # Prototype mineable_properties — learned at runtime from fa.get_entity_prototype.
+    # minable=True  → entity can be removed with a plain MineEntity action.
+    #                  (machines, chests, trees, rocks all have minable=True)
+    # minable=False → entity cannot be mined with MineEntity; requires special
+    #                  handling (e.g. cliffs need cliff explosives via
+    #                  UseItemOnEntity, Phase 7).
+    # Note: has_mining_trigger was removed — it fires for cosmetic effects on
+    # trees and does not indicate a resource requirement.
+    minable: bool = True
 
     @property
     def category_enum(self) -> EntityCategory:
@@ -146,7 +155,8 @@ class EntityRecord:
                    category=EntityCategory.OTHER.value,
                    tile_width=1, tile_height=1,
                    has_recipe_slot=False, ingredient_slots=0,
-                   output_slots=0, is_placeholder=True)
+                   output_slots=0, is_placeholder=True,
+                   minable=False)
 
     @classmethod
     def from_prototype_json(cls, name: str, data: dict) -> "EntityRecord":
@@ -160,6 +170,7 @@ class EntityRecord:
             ingredient_slots=int(data.get("ingredient_slots", 0)),
             output_slots=int(data.get("output_slots", 0)),
             is_placeholder=False,
+            minable=bool(data.get("minable", True)),
         )
 
 

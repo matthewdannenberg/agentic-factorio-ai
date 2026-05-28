@@ -441,13 +441,21 @@ end
 
 local function entity_to_table(entity)
     if not entity or not entity.valid then return nil end
+    -- force.name is the faction ("player", "neutral", "enemy", or modded names).
+    -- prototype_type is the Factorio entity type string ("assembling-machine",
+    -- "inserter", "tree", "simple-entity", "cliff", "resource", etc.).
+    -- Both are cheap field reads with no pcall overhead needed.
+    local force_name = entity.force and entity.force.name or "neutral"
+    local proto_type = entity.type or "unknown"
     local t = {
-        unit_number = entity.unit_number,
-        name        = entity.name,
-        position    = {x = entity.position.x, y = entity.position.y},
-        direction   = entity.direction or 0,
-        status      = entity_status_string(entity),
-        energy      = entity.energy or 0.0,
+        unit_number    = entity.unit_number,
+        name           = entity.name,
+        position       = {x = entity.position.x, y = entity.position.y},
+        direction      = entity.direction or 0,
+        status         = entity_status_string(entity),
+        energy         = entity.energy or 0.0,
+        force          = force_name,
+        prototype_type = proto_type,
     }
     -- 2.x: get_recipe() returns (LuaRecipe?, LuaQualityPrototype?) — two values.
     -- Capture only the first; pcall guards against entities without recipe support.
@@ -488,6 +496,7 @@ function fa.get_state(opts)
         tick               = game.tick,
         player             = fa._player_table(player, exploration_scan_radius),
         entities           = fa._entities_table(player, radius),
+        natural_objects    = fa._natural_objects_table(player, radius),
         resource_map       = fa._resource_map_table(player, res_radius),
         ground_items       = fa._ground_items_table(player, item_radius),
         research           = fa._research_table(),
@@ -521,7 +530,7 @@ function fa.get_crafting_queue()
             local entry = player.crafting_queue[i]
             if entry then
                 table.insert(queue, {
-                    recipe   = tostring(entry.recipe),
+                    recipe   = tostring(entry.recipe.name or entry.recipe),
                     count    = entry.count,
                     progress = (i == 1) and player.crafting_queue_progress or 0.0,
                 })
@@ -729,7 +738,7 @@ function fa._player_table(player, exploration_scan_radius)
                 -- entry.recipe is a string (recipe name) in Factorio 2.x,
                 -- not a LuaRecipe object. Guard with tostring() for safety.
                 table.insert(crafting_queue, {
-                    recipe   = tostring(entry.recipe),
+                    recipe   = tostring(entry.recipe.name or entry.recipe),
                     count    = entry.count,
                     progress = (i == 1) and player.crafting_queue_progress or 0.0,
                 })
@@ -799,6 +808,49 @@ function fa._entities_table(player, radius)
         end
     end
     return entities_list
+end
+
+
+function fa._natural_objects_table(player, radius)
+    -- Returns natural world objects in the scan radius: trees, rocks, cliffs,
+    -- fish, and any mod-added neutral-force entities that are not resource
+    -- patches. These are excluded from _entities_table because they lack
+    -- unit_numbers in Factorio.
+    --
+    -- Filter: force="neutral" captures all natural world objects. We exclude
+    -- type="resource" because ore patches are neutral-force but are already
+    -- handled by _resource_map_table and should not be treated as obstacles.
+    -- No entity type names are hardcoded — this works correctly for any mod.
+    --
+    -- Each entry carries:
+    --   entity_id      : unit_number, or 0 if the entity type lacks one
+    --                    (e.g. cliffs). entity_id=0 → position-only target,
+    --                    cannot be passed to MineEntity.
+    --   name           : Entity prototype name.
+    --   position       : {x, y} tile position.
+    --   force          : Always "neutral".
+    --   prototype_type : Factorio entity type string.
+    local surface = player.surface
+    local center  = player.position
+    local results = {}
+
+    local found = surface.find_entities_filtered({
+        position = center,
+        radius   = radius,
+        force    = "neutral",
+    })
+    for _, entity in ipairs(found) do
+        if entity.valid and entity.type ~= "resource" then
+            table.insert(results, {
+                entity_id      = entity.unit_number or 0,
+                name           = entity.name,
+                position       = {x = entity.position.x, y = entity.position.y},
+                force          = "neutral",
+                prototype_type = entity.type,
+            })
+        end
+    end
+    return results
 end
 
 function fa._resource_map_table(player, radius)
@@ -1151,6 +1203,25 @@ function fa.get_entity_prototype(entity_name)
     end)
     if ok_inv and inv then inventory_size = inv end
 
+    -- minable: true if the entity can be removed with a plain MineEntity action.
+    -- Read directly from proto.mineable_properties so it works for any mod.
+    --
+    -- Key findings from live testing:
+    --   - Machines and chests: minable=true (player can pick them up by mining)
+    --   - Trees: minable=true (mining_trigger fires particle effects only,
+    --            does not prevent MineEntity from working)
+    --   - Rocks (simple-entity): minable=true
+    --   - Cliffs: minable=false (destroyed via cliff explosives, not MineEntity)
+    --
+    -- Conclusion: minable=false is the correct signal for "cannot use MineEntity".
+    -- The has_mining_trigger field was removed — it fires for cosmetic triggers
+    -- (tree leaf particles etc.) and does not indicate a resource requirement.
+    local minable = false
+    local ok_mp, mp = pcall(function() return proto.mineable_properties end)
+    if ok_mp and mp then
+        minable = mp.minable == true
+    end
+
     return safe_json({
         name             = proto.name,
         type             = proto.type,
@@ -1161,6 +1232,7 @@ function fa.get_entity_prototype(entity_name)
         ingredient_slots = ingredient_slots,
         output_slots     = output_slots,
         inventory_size   = inventory_size,
+        minable          = minable,
     })
 end
 

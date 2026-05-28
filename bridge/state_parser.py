@@ -49,6 +49,7 @@ from world.observable.state import (
     ChunkCoord,
     CraftingQueueEntry,
     ExplorationState,
+    NaturalObject,
     GroundItem,
     Inventory,
     InventorySlot,
@@ -196,6 +197,9 @@ class StateParser:
         if "entities" in data:
             state.entities = self._parse_entities(data["entities"])
             state.observed_at["entities"] = tick
+        if "natural_objects" in data:
+            state.natural_objects = self._parse_natural_objects(data["natural_objects"])
+            state.observed_at["natural_objects"] = tick
 
         if "resource_map" in data:
             state.resource_map = self._parse_resource_map(data["resource_map"], tick)
@@ -307,6 +311,8 @@ class StateParser:
                     else None
                 )
                 energy = float(item.get("energy", 0.0))
+                force = str(item.get("force", "player"))
+                prototype_type = str(item.get("prototype_type", "unknown"))
                 result.append(EntityState(
                     entity_id=entity_id,
                     name=name,
@@ -316,9 +322,32 @@ class StateParser:
                     recipe=recipe,
                     inventory=inventory,
                     energy=energy,
+                    force=force,
+                    prototype_type=prototype_type,
                 ))
             except (KeyError, ValueError, TypeError) as exc:
                 logger.debug("Skipping malformed entity: %s — %s", item, exc)
+        return result
+
+    def _parse_natural_objects(self, lst: Any) -> "list[NaturalObject]":
+        """Parse the natural_objects section from the bridge payload."""
+        if not isinstance(lst, list):
+            return []
+        result = []
+        for item in lst:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pos = self._parse_position(item.get("position", {}))
+                result.append(NaturalObject(
+                    entity_id=int(item.get("entity_id", 0)),
+                    name=str(item.get("name", "")),
+                    position=pos,
+                    force=str(item.get("force", "neutral")),
+                    prototype_type=str(item.get("prototype_type", "tree")),
+                ))
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.debug("Skipping malformed natural_object: %s — %s", item, exc)
         return result
 
     def _parse_resource_map(self, lst: Any, tick: int) -> list[ResourcePatch]:

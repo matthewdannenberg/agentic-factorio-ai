@@ -71,8 +71,6 @@ from world.observable.state import (
     # Inventory
     InventorySlot,
     Inventory,
-    # Crafting
-    CraftingQueueEntry,
     # Research
     ResearchState,
     # Logistics
@@ -91,6 +89,10 @@ from world.observable.state import (
     # Threat
     BiterBase,
     ThreatState,
+    # Natural objects
+    NaturalObject,
+    # Crafting queue
+    CraftingQueueEntry,
     # Player
     PlayerState,
 )
@@ -146,6 +148,7 @@ __all__ = [
     "Direction",
     "ChunkCoord",
     "CraftingQueueEntry",
+    "NaturalObject",
     "EntityState",
     "EntityStatus",
     "ResourcePatch",
