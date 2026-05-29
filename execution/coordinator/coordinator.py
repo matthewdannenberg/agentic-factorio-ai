@@ -232,6 +232,25 @@ class RuleBasedCoordinator:
     # Public interface
     # ------------------------------------------------------------------
 
+    def cancel_active_task(self) -> list:
+        """
+        Teardown and clear any active task without resolving it normally.
+
+        Called by the loop when the goal-level evaluator fires success or
+        failure before the coordinator's own task success condition does —
+        the active task is abandoned mid-flight and needs explicit cleanup
+        (e.g. StopMining, StopMovement) before the loop resets the coordinator.
+
+        Returns the teardown actions so the loop can dispatch them.
+        """
+        teardown_actions: list = []
+        if self._active_agent is not None:
+            teardown_actions = self._active_agent.teardown() or []
+        self._active_task = None
+        self._active_agent = None
+        self._bb.clear_scope(EntryScope.TASK)
+        return teardown_actions
+
     def reset(
         self,
         goal_type: str,
@@ -274,6 +293,7 @@ class RuleBasedCoordinator:
             return CoordinatorStatus.COMPLETE, []
 
         # --- Tick active task ---
+        teardown_actions: list = []
         if self._active_task is not None:
             outcome, actions = self._tick_task(wq, ww, tick)
 
@@ -286,11 +306,18 @@ class RuleBasedCoordinator:
             if outcome == TaskOutcome.RUNNING:
                 return CoordinatorStatus.PROGRESSING, actions
 
-            # Task resolved — clear it and let the handler decide what's next.
-            self._active_task = None
+            # Task resolved — give the agent a chance to issue cleanup actions
+            # (e.g. StopMining, StopMovement), then clear the active task slot.
             if self._active_agent is not None:
-                self._active_agent = None
+                teardown_actions = self._active_agent.teardown() or []
+            self._active_task = None
+            self._active_agent = None
             self._bb.clear_scope(EntryScope.TASK)
+
+            # Return teardown actions immediately if the task just resolved,
+            # so they are dispatched this tick before the goal handler runs.
+            if teardown_actions:
+                actions = teardown_actions
 
             if outcome == TaskOutcome.SUCCEEDED:
                 top = self._goal_stack[-1]

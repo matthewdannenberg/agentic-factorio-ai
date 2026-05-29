@@ -278,6 +278,20 @@ class MiningAgent(AgentProtocol):
     def pending_patches(self) -> list[SelfModelPatch]:
         return []
 
+    def teardown(self) -> list[Action]:
+        """
+        Called by the coordinator immediately after a task resolves.
+
+        Issues StopMining to halt any persistent Lua miner that was running
+        during this task. Without this, the player continues mining the last
+        target indefinitely after the task ends, blocking subsequent goals.
+        """
+        if self._pending_stop:
+            self._pending_stop = False
+            log.debug("MiningAgent: teardown — issuing StopMining")
+            return [StopMining()]
+        return []
+
     # ------------------------------------------------------------------
     # Gather
     # ------------------------------------------------------------------

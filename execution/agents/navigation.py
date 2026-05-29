@@ -53,7 +53,7 @@ from execution.agents.base import AgentProtocol
 from execution.blackboard import EntryCategory, EntryScope
 from execution.skills.navigate import NavigateSkill
 from execution.skills.base import SkillStatus
-from bridge import Action
+from bridge import Action, StopMovement
 from world import Position
 from world.model.patch import SelfModelPatch
 
@@ -201,6 +201,18 @@ class NavigationAgent(AgentProtocol):
         if status == SkillStatus.RUNNING:
             return 0.5 if self._skill._last_issued_target is not None else 0.0
         return 0.0
+
+    def teardown(self) -> list[Action]:
+        """
+        Halt any in-progress Lua movement when the task ends.
+
+        NavigateSkill issues MoveTo actions that drive a persistent
+        on_tick walker in the Lua mod. Without an explicit stop, the
+        player continues walking to the previous target after the task
+        resolves, which can interfere with subsequent goals.
+        """
+        self._skill.reset()
+        return [StopMovement()]
 
     def pending_patches(self) -> list[SelfModelPatch]:
         return []

@@ -156,6 +156,7 @@ class FactorioLoop:
         self._active_goal: Optional[Goal] = None
         self._goal_start_tick: int = 0
         self._goal_start_snapshot: Optional["WorldQuery"] = None
+        self._snapshot_pending: bool = False  # take snapshot after first poll
         self._stuck_count: int = 0
 
         self._stats = LoopStats()
@@ -244,16 +245,41 @@ class FactorioLoop:
 
         goal = self._active_goal
 
+        # 2b. Take start snapshot on the first tick after goal activation,
+        # *after* poll_world so that any chunks or inventory already in the
+        # game before this goal started are captured in the baseline.
+        # This prevents newly_charted_chunks noise from triggering new.charted_chunks
+        # before the agent has moved.
+        if self._snapshot_pending:
+            self._goal_start_snapshot = self._snapshot_world_query()
+            self._goal_start_tick = self._state.tick
+            self._snapshot_pending = False
+
         # 3. Evaluate goal conditions.
         eval_result = self._evaluator.evaluate(
             goal, self._wq, tick, self._goal_start_tick, self._goal_start_snapshot
         )
 
         if eval_result.success:
+            # Cancel the active task (if any) so agents can issue teardown
+            # actions (StopMining, StopMovement) before the coordinator resets.
+            # Without this, a goal-level success condition can fire while a
+            # mining or navigation task is still running, leaving the Lua mod
+            # in a persistent action state.
+            for action in self._coordinator.cancel_active_task():
+                try:
+                    self._executor.execute(action)
+                except Exception:
+                    log.exception("FactorioLoop: teardown action failed on goal complete")
             self._on_goal_complete(goal, eval_result.reward, tick)
             return
 
         if eval_result.failure:
+            for action in self._coordinator.cancel_active_task():
+                try:
+                    self._executor.execute(action)
+                except Exception:
+                    log.exception("FactorioLoop: teardown action failed on goal failure")
             self._on_goal_failed(goal, eval_result.reward, tick)
             return
 
@@ -340,7 +366,8 @@ class FactorioLoop:
         goal.activate(tick=self._state.tick)
         self._active_goal = goal
         self._goal_start_tick = self._state.tick
-        self._goal_start_snapshot = self._snapshot_world_query()
+        self._goal_start_snapshot = None   # set after first poll — see _tick()
+        self._snapshot_pending = True
         self._stuck_count = 0
         self._stats.goals_attempted += 1
 

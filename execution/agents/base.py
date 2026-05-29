@@ -124,3 +124,16 @@ class AgentProtocol:
         patches override this; agents that do not need not override.
         """
         return []
+
+    def teardown(self) -> list[Action]:
+        """
+        Called by the coordinator immediately after the agent's task resolves
+        (succeeded, failed, or stuck), before the active agent slot is cleared.
+
+        Return any cleanup actions that must be dispatched on this tick — for
+        example, StopMining to halt a persistent Lua miner. The coordinator
+        collects these and returns them to the loop alongside the task resolution.
+
+        Agents that require no cleanup need not override — the default returns [].
+        """
+        return []
