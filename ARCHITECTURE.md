@@ -29,392 +29,335 @@ Target game version: **Factorio 2.x (Space Age)**.
 ### Clean segmentation
 
 Every major component exposes a narrow, versioned interface. Implementations can be
-replaced without touching consumers. This principle governs the world state layer
+replaced without touching consumers. This governs the world state layer
 (WorldQuery/WorldWriter), the agent protocol (AgentProtocol), and every other
-component boundary.
+component boundary. Concrete implementations are injected at startup; swapping them
+requires substituting the injected object, not restructuring surrounding code.
 
-When a component's interface is defined, it should be defined as a Protocol or
-abstract base. The concrete implementation is injected at startup. Swapping
-implementations — including wholesale replacement of the RL system — requires
-substituting the injected object, not restructuring surrounding code.
+### Agents own tasks, not goals
 
-### Agents own subtasks, not goals
+Goals are the coordinator's concern. The coordinator translates a Goal into a
+sequence of Tasks and routes each Task to the appropriate agent via `agent_hint`.
+Agents interact with Tasks only — they never receive or inspect the Goal object.
+This keeps agents focused on concrete executable work and lets the coordinator
+change its decomposition strategy without touching agent implementations.
 
-Goals are the coordinator's concern. The coordinator translates a Goal into Subtasks
-and routes each Subtask to the appropriate agent via `agent_hint`. Agents interact
-with Subtasks only — they never receive or inspect the Goal object. This boundary
-keeps agents focused on concrete executable work and lets the coordinator change
-its decomposition strategy without touching agent implementations.
+### Single active agent per task
 
-### Single active agent per subtask
-
-At any given time exactly one agent owns the active subtask. The coordinator selects
-the owning agent when a subtask is pushed (by matching `agent_hint` against each
-agent's `AGENT_ID` class attribute). Only that agent is ticked until the subtask
-resolves. This replaces the earlier poll-all approach and correctly reflects that
-subtasks have clear single owners.
+At any given time exactly one agent owns the active task. The coordinator selects
+the owning agent by matching `agent_hint` against each agent's `AGENT_ID`. Only
+that agent is ticked until the task resolves.
 
 ### Four timescales
 
-The system operates at four distinct timescales, each with its own data flow and
-component responsibilities:
-
 - **Per-tick** — action selection, observation, blackboard reads/writes
-- **Per-subtask** — locally-derived prerequisite tasks, blackboard lifecycle
+- **Per-task** — locally-derived prerequisite tasks, blackboard lifecycle
 - **Per-goal** — goal lifecycle, examination, behavioral memory recording
 - **Per-run / cross-run** — policy checkpointing, KB and behavioral memory persistence
 
 ### Three knowledge layers
 
-- **Game knowledge** (`world/knowledge.py`) — what the game contains. Recipes,
+- **Game knowledge** (`world/knowledge/`) — what the game contains. Recipes,
   entities, tech tree. Learned from Factorio at runtime, persists across runs.
-- **Factory self-model** (`agent/self_model.py`) — what the agent has built in the
-  current run. A graph of logical factory units and their relationships. Built
-  incrementally during execution, starts empty each run.
-- **Behavioral memory** (`agent/memory/behavioral.py`) — what the agent has learned
-  to do across runs. Strategy records, performance history, and spatial pattern
-  foundations. Persists and grows across runs.
+- **Factory self-model** (`world/model/`) — what the agent has built in the
+  current run. A layered graph structure built incrementally during execution,
+  starts empty each run.
+- **Behavioral memory** (`memory/`) — what the agent has learned to do across
+  runs. Strategy records, performance history, and spatial pattern foundations.
+  Persists and grows across runs.
 
 ---
 
-## Component Inventory
+## Directory Layout
 
-### Stable — Phases 1-4 complete
+```
+factorio-agent/
+├── bridge/          # RCON boundary — nothing outside speaks RCON or knows Lua
+├── world/
+│   ├── observable/  # WorldState (data), WorldQuery (read), WorldWriter (write)
+│   ├── knowledge/   # KnowledgeBase, TechTree, ProductionTracker
+│   └── model/       # SelfModel, FactoryGraph, ChunkGrid, types
+├── planning/        
+│   ├── goals/       # Goal, GoalTree, GoalSource
+│   ├── tasks/       # Task, TaskLedger
+│   └── evaluation/  # Reward_evaluator, condition_namespace
+├── execution/
+│   ├── agents/      # NavigationAgent, MiningAgent, ExplorationAgent, CraftingAgent
+│   ├── skills/      # NavigateSkill, MineSkill, DestroySkill, CraftSkill, ...
+│   ├── coordinator/ # RuleBasedCoordinator, GoalFrame, StubCoordinator
+│   ├── memory/      # SQLiteBehavioralMemory
+├── examination/     # AuditReport, auditor stubs (grows in Phase 10)
+├── memory/          # Cross-run behavioral memory (may gain more in future phases)
+├── llm/             # GoalSource, GoalQueue (LLM client in Phase 11)
+├── data/            # Runtime databases (gitignored)
+├── config.py
+├── run.py
+├── tests/           # Unit and integration tests
+└── tests_in_game/   # In-game integration tests
+```
 
-**Bridge layer** (`bridge/`)
-Hard interface boundary. Nothing outside speaks RCON or knows Lua. Produces
-WorldState snapshots via StateParser, dispatches Action objects via ActionExecutor.
+---
 
-Action types (24 total across 10 categories): movement, mining, crafting, building
-(including `RotateEntity`, `SetSplitterPriority`, `FlipEntity`), inventory,
+## Component Reference
+
+### Bridge (`bridge/`)
+
+Hard interface boundary. Produces `WorldState` snapshots via `StateParser`,
+dispatches `Action` objects via `ActionExecutor`. Nothing outside `bridge/`
+speaks RCON or inspects Lua tables directly.
+
+Action types (24 total across 10 categories): movement, mining, crafting,
+building (`RotateEntity`, `SetSplitterPriority`, `FlipEntity`), inventory,
 research, player, vehicle, combat, and meta. Circuit networks and railroad
-scheduling operations are explicitly deferred — see `bridge/actions.py`.
+scheduling are explicitly deferred — see `bridge/actions.py`.
 
-**World state layer** (`world/`)
-`WorldState` is a pure data container. `WorldQuery` is the sole read interface.
-`WorldWriter` is the sole write interface. `KnowledgeBase` stores game knowledge
-learned at runtime via injected `query_fn`. `TechTree`, `ProductionTracker` unchanged.
+The Factorio mod (`bridge/mod/control.lua`) exposes persistent-state movement
+and mining driven by `on_tick` handlers. Key Factorio 2.x adaptations:
 
-**Planning layer** (`planning/`)
-`GoalTree`, `RewardEvaluator`, `ResourceAllocator`. Goal lifecycle management and
-reward evaluation against WorldQuery. `RewardEvaluator` evaluates condition strings
-against a namespace built by `planning/condition_namespace.py` — see below.
-
----
-
-### Phase 5 — Execution layer foundation ✅
-
-**ExecutionLayerProtocol** (`agent/execution_protocol.py`)
-
-The sole interface between the planning layer and the agent execution network.
-
-```python
-class ExecutionStatus(Enum):
-    PROGRESSING = auto()
-    WAITING     = auto()
-    STUCK       = auto()
-    COMPLETE    = auto()
-
-@dataclass
-class ExecutionResult:
-    actions: list[Action]
-    status: ExecutionStatus
-    stuck_context: Optional[StuckContext] = None
-
-class ExecutionLayerProtocol:
-    def reset(self, goal: Goal, wq: WorldQuery,
-              seed_subtasks: Optional[list[Subtask]] = None) -> None: ...
-    def tick(self, goal: Goal, wq: WorldQuery, ww: WorldWriter,
-             tick: int) -> ExecutionResult: ...
-    def progress(self, goal: Goal, wq: WorldQuery) -> float: ...
-    def observe(self, wq: WorldQuery) -> dict: ...
-```
-
-**StuckContext**, **Blackboard**, **SubtaskLedger**, **SelfModel**, **BehavioralMemory**
-— all implemented and stable. See Phase 5 documentation for full detail.
+- `game.entity_prototypes` → `prototypes.entity`
+- `LuaForce.get_chart_size()` removed → `surface.get_chunks()` + `force.is_chunk_charted()`
+- `request_path` collision mask: `{layers={object=true, water_tile=true}}` —
+  `object` covers trees/walls/buildings; `water_tile` covers water
+- `movement_status` in `_player_table()`: `"idle"`, `"pathing"`, `"walking"`, `"unreachable"`
 
 ---
 
-### Phase 6 — Navigation, mining, rule-based coordinator, run loop ✅
+### World (`world/`)
 
-#### AgentProtocol (revised)
+#### Observable layer (`world/observable/`)
 
-Agents receive **Subtasks**, not Goals. All four methods take `subtask` as their
-first parameter:
+`WorldState` is a pure data container — a `@dataclass` with no methods beyond
+index maintenance. `WorldQuery` is the sole read interface; `WorldWriter` is
+the sole write interface. External code never touches `WorldState` fields
+directly.
 
-```python
-class AgentProtocol:
-    def activate(self, subtask: Subtask, blackboard: Blackboard,
-                 wq: WorldQuery) -> None: ...
-    def tick(self, subtask: Subtask, blackboard: Blackboard,
-             wq: WorldQuery, ww: WorldWriter, tick: int) -> list[Action]: ...
-    def observe(self, subtask: Subtask, blackboard: Blackboard,
-                wq: WorldQuery) -> dict: ...
-    def progress(self, subtask: Subtask, blackboard: Blackboard,
-                 wq: WorldQuery) -> float: ...
-```
+Notable additions over the original design:
 
-`activate()` is called by the coordinator each time a new subtask is assigned —
-not once per goal at reset time. Each new subtask triggers a fresh `activate()`
-call, giving the agent a clean slate and precise knowledge of what it's working on.
+- `WorldState.natural_objects: list[NaturalObject]` — scanned from neutral-force,
+  non-resource entities in the scan radius. Used by `MiningAgent` for obstacle
+  clearing. Identified by `force="neutral"` and `prototype_type != "resource"`,
+  not by name — no hardcoded entity names.
+- `NaturalObject.is_minable` — True when `entity_id != 0` (i.e. the object has
+  a unit number and can be targeted by `MineEntity`).
+- `EntityState.force` and `EntityState.prototype_type` — populated from
+  the Lua prototype table, used for factory-intersection detection in the
+  coordinator.
+- `ExplorationState.nearby_uncharted_chunks: list[ChunkCoord]` — the bridge
+  returns adjacent uncharted chunks from the current scan, giving the exploration
+  agent a concrete frontier target without requiring full map iteration.
+- `CraftingQueueEntry` and `PlayerState.crafting_queue` — used by `CraftSkill`
+  to confirm that a crafting order was accepted.
 
-#### AgentRegistry (revised)
+#### Knowledge layer (`world/knowledge/`)
 
-Agents are registered directly without goal-type annotations:
+`KnowledgeBase` stores game content learned at runtime via an injected
+`query_fn`. Persists across runs in SQLite. No hard-coded Factorio names.
 
-```python
-registry.register(nav_agent)
-registry.register(mine_agent)
-```
+`EntityRecord` includes `minable: bool` — populated from
+`proto.mineable_properties.minable` at prototype query time. Used by
+`can_destroy()` in `execution/predicates.py` to determine whether a natural
+object can be cleared with `MineEntity`. See the cliff gap note in
+`execution/coordinator/coordinator.py` for the known limitation around
+technology-dependent minability changes.
 
-Selection is via `registry.agent_by_id(hint)` where `hint` matches the agent's
-`AGENT_ID` class attribute. The registry has no knowledge of goals or subtask types.
+#### Model layer (`world/model/`)
 
-#### NavigationAgent (`agent/network/agents/navigation.py`)
+The factory self-model is a layered container. `SelfModel` owns the layers and
+routes `SelfModelPatch` objects to the appropriate one.
 
-Rule-based movement agent. Sole responsibility: walk the player to a target
-position or entity. Issues `MoveTo` once per waypoint, relying on the Factorio
-mod's `on_tick` handler to drive `walking_state` continuously between RCON polls.
+**`FactoryGraph`** (`world/model/layers/factory_graph.py`) — the primary
+coordination data structure. A directed graph of `FactoryNode` objects
+representing logical factory components (production lines, resource sites,
+power grids, etc.) connected by `FactoryEdge` objects representing material
+flow. Nodes carry `node_type`, `process_type`, `status`, `bounding_box`,
+`design_capacity`, and `throughput`. Edges carry `item`, `rate`, and
+`transport` type.
 
-Suppresses redundant `MoveTo` commands within `_REDUNDANT_THRESHOLD` tiles.
-Stall detection fires after `_STALL_GRACE_TICKS` (full grace) or
-`_UNREACHABLE_GRACE_TICKS` (30 poll ticks, used when the player has not moved
-at all since activation — fast detection of pathfinder "unreachable" results).
-On stall, writes a `navigation_stalled` OBSERVATION to the blackboard; the
-coordinator reads this and escalates immediately rather than waiting for the
-subtask failure timeout.
+**`ChunkGrid`** (`world/model/layers/chunk_grid.py`) — spatial index of
+explored terrain. Stub implementation pending fuller integration with the
+bridge's chunk scanning. Future note: geographically adjacent chunks should
+be connected by an edge in `ChunkGrid` only if it is possible to walk directly
+between them (ruling out ocean tiles). This adjacency model is not yet
+implemented; the current stub treats all charted chunks as reachable.
 
-Arrival is detected by evaluating the subtask's `success_condition` directly
-(via the coordinator's condition namespace). No side-channel blackboard signal.
+**`SelfModelPatch`** — the mutation protocol. Agents never write to `SelfModel`
+directly; they emit `SelfModelPatch` objects via `pending_patches()`. The
+coordinator collects and applies them each tick via `SelfModel.apply(patch)`.
+This keeps agents fully decoupled from the self-model's internal structure.
 
-#### MiningAgent (`agent/network/agents/mining.py`)
+---
 
-Handles resource gathering and obstacle clearing. Two subtask types:
+### Planning (`planning/`)
 
-- `gather_resource` — mine N of a named resource from a known patch. Issues
-  `MineResource` once and re-issues only on inventory stall after a grace period.
-- `clear_region` — remove all (or all natural) entities from a bounding box.
-  Handles its own local positioning within the box. Natural objects identified
-  by entity name heuristics (tree/rock/cliff/fish) — KB-free.
+#### Goals and Tasks
 
-#### RuleBasedCoordinator (`agent/network/coordinator.py`)
+**`Goal`** — a coarse, long-horizon objective. Has `success_condition`,
+`failure_condition`, and optional `milestone_rewards` — all Python expression
+strings evaluated by `RewardEvaluator` against a `WorldQuery` namespace.
 
-Manages SubtaskLedger, Blackboard, AgentRegistry, and SelfModel. Key behaviours:
+**`Task`** — a concrete work item derived by the coordinator and assigned to
+a single agent. Also carries condition strings, evaluated by the coordinator
+each tick. Tasks are coordinator-internal; the LLM and `GoalTree` never see them.
 
-**Goal type routing** — derivable: `collection`, `exploration`, `clear_region`.
-Returns STUCK immediately for all other types.
-
-**Subtask boundary** — the coordinator is the sole consumer of Goals. It
-constructs Subtasks and hands them to agents. The `agent_hint` dynamic attribute
-on each Subtask drives `registry.agent_by_id()` selection.
-
-**Subtask activation** — `activate(subtask, ...)` is called on the selected agent
-at each subtask transition, not at goal reset time.
-
-**Success evaluation** — arrival and completion detected by evaluating
-`subtask.success_condition` against `_build_condition_namespace()`, which calls
-`build_core_namespace()` from `planning/condition_namespace.py` and adds
-positional predicates (`is_at`, `is_reachable`, `Position`). Navigation stall
-detected via `navigation_stalled` blackboard observation — escalates immediately
-without waiting for timeout.
-
-**Exploration resilience** — exploration subtask stalls return `WAITING` (not
-`STUCK`) so the goal stays alive. The coordinator re-derives a new waypoint in
-a rotated cardinal direction, tracked by `_exploration_attempt`. Waypoints are
-absolute positions from world origin sized to push past the charted frontier.
-
-**Collection derivation** — two subtasks: approach (navigation) then gather
-(mining). The gather subtask's success condition is an absolute inventory
-threshold (`inventory('type') >= current + target`) rather than the goal's raw
-condition string, so it works correctly with both `inventory()` and
-`new.inventory()` goal conditions.
-
-**Goal start snapshot** — the loop calls `coordinator.set_start_snapshot(start_wq)`
-immediately after `reset()`, providing a `WorldQuery` snapshot of world state at
-goal activation. This populates the `new` delta object in subtask condition
-namespaces.
-
-**Timeout** — `_SUBTASK_TIMEOUT_TICKS` (5 minutes) for general subtasks;
-`_NAV_SUBTASK_TIMEOUT_TICKS` (30 seconds) for navigation subtasks.
+The distinction matters: goals express what we want, tasks express what we're
+doing right now to get there.
 
 #### Condition namespace (`planning/condition_namespace.py`)
 
-Shared condition evaluation infrastructure used by both `RewardEvaluator` and
-the coordinator's subtask evaluator.
-
-`build_core_namespace(wq, tick, start_tick, start_wq)` returns the dict used by
-`eval()` for condition strings. Contains: `inventory`, `charted_chunks`,
+`build_core_namespace(wq, tick, start_tick, start_wq)` returns the `eval()`
+namespace for condition strings. Includes `inventory`, `charted_chunks`,
 `charted_tiles`, `charted_area_km2`, `tick`, `elapsed_ticks`, `new`, `wq`,
 `state`, `research`, `tech_unlocked`, `resources_of_type`, `entities`,
 `entity_by_id`, and safe builtins.
 
-`_DeltaView` is the object exposed as `new` in condition strings. It wraps the
-current `WorldQuery` and a `start_wq` snapshot taken at goal activation:
+`_DeltaView` (exposed as `new`) wraps the current `WorldQuery` and a `start_wq`
+snapshot taken at goal activation:
 
 ```python
 new.tick                    # ticks since goal activation (== elapsed_ticks)
 new.charted_chunks          # chunks charted this goal
-new.charted_tiles           # auto via __getattr__ — any scalar wq property
 new.inventory('iron-ore')   # ore collected this goal
-new.resource_patches('coal') # patches discovered this goal
 ```
 
-`__getattr__` automatically delegates any scalar `WorldQuery` property — adding
-a new `wq` property requires no changes to `_DeltaView`. Parameterised lookups
-(`inventory`, `resource_patches`) have explicit methods.
-
-`elapsed_ticks` is kept as a top-level alias for `new.tick` for readability in
-timeout conditions (`elapsed_ticks > 1200`).
+**Use `elapsed_ticks > N` (not `tick > N`) in conditions** — absolute tick
+values cause conditions to fire immediately if the game ran before the test.
 
 #### RewardEvaluator (`planning/reward_evaluator.py`)
 
-Evaluates goal `success_condition` and `failure_condition` strings against a
-`WorldQuery`. Calls `build_core_namespace()` for the shared core and adds
-evaluator-specific entries: `production_rate`, `staleness`, `logistics`, `power`,
-`threat`, `inserters_from/to`.
+Evaluates goal `success_condition` and `failure_condition` strings. Adds to the
+core namespace: `production_rate`, `staleness`, `logistics`, `power`, `threat`,
+`inserters_from/to`.
 
-`evaluate(goal, wq, tick, start_tick, start_wq)` — `start_wq` is a `WorldQuery`
-snapshot taken at goal activation, used to populate `new`. When `None`, `new`
-has zero deltas.
+---
 
-**Avoid absolute `tick` values in conditions.** Use `elapsed_ticks > N` or
-`new.tick > N` instead — absolute tick values cause conditions to fire
-immediately if the game has been running before the test.
+### Execution (`execution/`)
 
-#### FactorioLoop (`agent/loop.py`)
+#### Skills (`execution/skills/`)
 
-Master tick loop implementing the four-timescale data flow. At goal activation,
-calls `_snapshot_world_query()` which takes a `copy.copy(WorldState)` wrapped in
-a `WorldQuery`. Shallow copy is safe because `WorldWriter.integrate_snapshot()`
-replaces whole sub-objects rather than mutating them in place. The snapshot is
-passed to `RewardEvaluator.evaluate()` and `coordinator.set_start_snapshot()`.
+Skills encode multi-step but well-determined sequences of primitive actions
+with built-in success/failure detection. They contain **no decision logic** —
+that belongs to agents and the coordinator.
 
-#### Factorio mod (`bridge/mod/control.lua`) — Factorio 2.x
+Each skill has a `status()` → `SkillStatus` (`IDLE`, `RUNNING`, `SUCCEEDED`,
+`STUCK`) and produces a list of `Action` objects from `tick(wq, ww, tick)`.
+Current skills: `NavigateSkill`, `MineSkill`, `DestroySkill`, `CraftSkill`.
 
-Updated for Factorio 2.x throughout this phase:
+#### Agents (`execution/agents/`)
 
-- `game.entity_prototypes` → `prototypes.entity` (same for fluid/recipe)
-- `LuaForce.get_chart_size()` removed → `surface.get_chunks()` +
-  `force.is_chunk_charted(surface, chunk)` (pass chunk directly, not
-  `chunk.position`)
-- `tech.effects`/`tech.prerequisites` → `tech.prototype.effects/prerequisites`
-- `proto.infinite_resource` replaces `mineable_properties.infinite`
-- `request_path` collision mask: `{layers={object=true, water_tile=true},
-  consider_tile_transitions=true}` — `object` layer covers trees/walls/buildings;
-  `water_tile` covers water. Passing the prototype's `CollisionMask` userdata
-  directly causes "unreachable" because the character prototype includes layers
-  that mark ground positions as blocked.
-- `movement_status` included in `_player_table()` output
-  (`"idle"`, `"pathing"`, `"walking"`, `"unreachable"`)
-- `StateParser` exposes `movement_status` property
+Each agent holds references to the skills relevant to its task types. Agents
+read `WorldQuery` (observable world state) but do **not** have access to the
+`SelfModel`. Changes to the self-model are communicated upward via
+`SelfModelPatch` objects accumulated in `pending_patches()`.
 
-**Lua-side test suite** — four test files loadable from the in-game console:
-
-```
-/c __agent__ T.run_all()     # test_bridge_live.lua — state queries, actions
-/c __agent__ TM.run_all()    # test_movement_live.lua — movement, pathfinding
-/c __agent__ TS.run_all()    # test_state_live.lua — exploration, mining status
-/c __agent__ TP.run_all()    # test_prototypes_live.lua — KB query functions
-```
-
-Async movement tests use start/finish pairs:
-```
-/c __agent__ TM.async_start("player_actually_moves")
-# wait 5 seconds
-/c __agent__ TM.async_finish("player_actually_moves")
-```
-
-#### GoalSource and GoalQueue (`llm/goal_source.py`)
-
-`GoalSource` is the abstract interface the loop uses to obtain goals. `GoalQueue`
-is the Phase 6 implementation: an ordered list of `GoalQueueEntry` objects
-dispensed one at a time.
-
-`handle_stuck()` returns `[]` (no seed subtasks) — the real LLM client in Phase 11
-will return decomposition subtasks here.
-
-#### In-game test framework (`tests_in_game/`)
-
-`tests_in_game/conftest.py` provides `run_goal`/`run_goals` fixtures that build a
-complete component stack, run goals through `FactorioLoop`, and return
-`(LoopStats, WorldQuery)`.
-
-In-game tests use `new.` delta conditions and `elapsed_ticks`/`new.tick` for
-timeouts so they are independent of absolute game clock:
+The agent protocol:
 
 ```python
-success_condition="new.inventory('iron-ore') >= 5"  # collected this goal
-failure_condition="new.tick > 10800"                 # 3 minutes since activation
-success_condition="new.charted_chunks >= 5"          # charted this goal
+class AgentProtocol:
+    def activate(self, task: Task, blackboard: Blackboard,
+                 wq: WorldQuery, kb: KnowledgeBase) -> None: ...
+    def tick(self, task: Task, blackboard: Blackboard,
+             wq: WorldQuery, ww: WorldWriter, tick: int,
+             kb: KnowledgeBase) -> list[Action]: ...
+    def observe(self, task: Task, blackboard: Blackboard,
+                wq: WorldQuery, kb: KnowledgeBase) -> dict: ...
+    def progress(self, task: Task, blackboard: Blackboard,
+                 wq: WorldQuery, kb: KnowledgeBase) -> float: ...
+    def pending_patches(self) -> list[SelfModelPatch]: ...
 ```
 
-#### Phase 6 status (all resolved)
+Current agents:
 
-All Phase 6 in-game tests pass. Issues resolved during extended Phase 6 work:
+- **`NavigationAgent`** — walks the player to a target position or entity.
+  Uses `NavigateSkill`. Writes `navigation_stalled` observation on stall.
+- **`MiningAgent`** — gathers resources and clears regions. Uses `MineSkill`,
+  `DestroySkill`, `NavigateSkill`. Determines clearable objects via
+  `can_destroy()` (KB-driven, no name hardcoding). See the harvest gap comment
+  in `coordinator.py` for the wood/natural-object limitation.
+- **`ExplorationAgent`** — navigates to frontier positions and scans. Uses
+  `NavigateSkill`. Writes `exploration_needs_frontier` (GOAL-scoped) when the
+  local area is exhausted.
+- **`CraftingAgent`** — hand-crafts items. Uses `CraftSkill`.
 
-- Collection/exploration test timing: replaced absolute `tick` thresholds with
-  `elapsed_ticks`/`new.tick` relative conditions
-- Exploration chunk counting: `get_chart_size` removed in 2.x; replaced with
-  `get_chunks()`/`is_chunk_charted()` iterator
-- Navigation pathfinding: Factorio 2.x `request_path` collision mask format
-  corrected; player now routes around trees, walls, and water
-- Exploration completeness: waypoints are now absolute coordinates from world
-  origin sized to push past the charted frontier; exploration stalls rotate
-  direction and continue rather than failing the goal
-- `new.inventory()` delta conditions: collection goals using `new.inventory()`
-  now parse correctly and the gather subtask uses an absolute threshold built
-  from current inventory + target count
+#### Coordinator (`execution/coordinator/`)
+
+The coordinator has access to the `SelfModel` and the player inventory from
+`WorldQuery`. It does **not** make use of the rest of `WorldState` — entity
+scans, logistics, and power state are the concern of agents and skills.
+
+The coordinator's primary responsibility is translating Goals into Tasks via
+a hierarchical, depth-first, quasi-recursive state machine.
+
+**Goal stack** — a `list[GoalFrame]`, top = active. Each `GoalFrame` carries
+the goal type, params, a `step` counter, completed/failed flags, and a `context`
+dict for state that must persist across ticks within a handler.
+
+**Goal handlers** — one method per goal type. Each handler is called repeatedly
+across ticks; `frame.step` tracks which decision point the handler has reached.
+Handlers push sub-goals (onto the goal stack) or tasks (to the active task slot).
+
+**Task activation** — `_push_task(...)` creates a `Task`, selects the owning
+agent via `registry.agent_by_id(hint)`, calls `agent.activate(...)`, and writes
+a blackboard INTENTION entry. Only one task is active at a time.
+
+**Sub-goal recursion** — handlers call `_push_goal(GOAL_TYPE, params)` to push
+a `GoalFrame`. When the sub-goal completes, it pops from the stack and the
+parent's step advances. This gives the appearance of recursive decomposition
+while keeping the tick loop flat.
+
+**Goal type vocabulary:**
+
+| Type | Description |
+|---|---|
+| `collection` | Gather N of a resource from known patches |
+| `acquire` | Get N of an item by any means (mine → produce) |
+| `crafting` | Hand-craft N of an item |
+| `exploration` | Chart N new chunks |
+| `clear_region` | Remove natural obstacles from a bounding box |
+| `prep_region` | Factory-aware region clearing (checks for infrastructure, belts) |
+| `construction` | Build infrastructure in a region |
+| `production` | Establish item production at a rate (Phase 8 stub) |
+| `logistics` | Connect factory nodes with belts/inserters (Phase 9 stub) |
+| `byproduct` | Route/consume all output from a node (Phase 8 stub) |
+| `research` | Unlock a technology |
+| `noop` | Idle — ask LLM for the next goal (Phase 11 stub) |
+
+**Known capability gaps** (documented in `coordinator.py`):
+
+- *Wood/harvest gap* — items obtained by clearing natural objects (e.g. wood
+  from trees) cannot be acquired directly. Fix requires `EntityRecord.mining_products`,
+  `kb.entities_that_produce(item)`, and a `harvest_natural` task type (Phase 7).
+- *Cliff gap* — undestroyable objects (cliffs) cause `clear_region` to fail.
+  Fix requires technology-change detection for `minable`, `UseItemOnEntity`
+  bridge action, and coordinator retry after unlock (Phase 7/10).
+
+#### Blackboard (`execution/blackboard.py`)
+
+Shared working memory for the coordinator and agents. Entries have a category
+(`INTENTION`, `OBSERVATION`, `RESERVATION`) and a scope (`GOAL` or `TASK`).
+`TASK`-scoped entries are cleared when the active task resolves.
+`GOAL`-scoped entries persist until the goal completes. The coordinator calls
+`clear_scope(EntryScope.TASK)` on each task resolution and `clear_all()` on
+goal reset.
 
 ---
 
-### Phase 7 — Construction agent (next)
+### Examination (`examination/`)
 
-The construction agent handles placing entities, connecting inserters and belts,
-and verifying that placed infrastructure is functional. It is the first agent
-that directly modifies the factory rather than gathering raw materials.
+`AuditReport` — a data container for mechanical and rich examination results.
+Carries anomalies, production rates, power state, damage records, and (in rich
+mode) blueprint candidates and LLM observations. The merge protocol lets
+reports accumulated across ticks be collapsed into a single summary.
 
-See `PRE_PHASE_7_DECISIONS.md` for the decisions that must be made, and
-`PHASE_7_BRIEF.md` for the component brief once those decisions are recorded.
-
----
-
-### Phase 8 — Production agent (RL)
-
-First learned agent. Handles recipe selection, machine configuration, and
-production chain management. Chosen first because production goals are the most
-common and the KB production chain queries provide strong structural guidance.
+Richer examination (self-model reconciliation, blackboard promotion) is Phase 10.
 
 ---
 
-### Phase 9 — Spatial-logistics agent (RL)
+### Memory (`memory/`)
 
-Spatial reasoning and logistics. Whether this becomes one agent or two coordinating
-agents is an implementation decision for Phase 9 — see OD-5.
-
----
-
-### Phase 10 — Examination layer revision
-
-Examination gains self-model reconciliation, blackboard promotion, and structured
-factory summaries. RewardEvaluator namespace extended with STRUCTURAL conditions
-backed by the self-model — see OD-6.
-
----
-
-### Phase 11 — LLM layer revision
-
-Real LLM client replaces GoalQueue. Receives self-model summary and behavioral
-memory statistics. Handles escalation via StuckContext.
-
----
-
-### Deferred — no phase assigned
-
-- Biter defense — combat agents, threat module activation
-- Blueprint system — curation of spatial patterns from behavioral memory
-- Coordinator learning — transition from rule-based to learned coordination
-- Railroad networks — train state, scheduling, train-station agent
-- Circuit networks — wire connections, combinator conditions
+`SQLiteBehavioralMemory` — stores strategy records (what worked for a goal type),
+performance history (per-goal-type statistics), and spatial pattern metadata
+(factory subgraph summaries). Persists across runs. Full strategy matching and
+pattern deduplication are Phase 8 concerns.
 
 ---
 
@@ -422,62 +365,104 @@ memory statistics. Handles escalation via StuckContext.
 
 ### Per-tick
 
-1. Bridge produces a fresh WorldState snapshot. `WorldWriter.integrate_snapshot()`
+1. Bridge produces a `WorldState` snapshot. `WorldWriter.integrate_snapshot()`
    merges it into live global state.
 
 2. `RewardEvaluator` checks active goal success/failure conditions against
-   `WorldQuery` and `start_wq` snapshot. If triggered, main loop transitions state.
+   `WorldQuery` and `start_wq` snapshot. If triggered, main loop transitions.
 
-3. `coordinator.tick()` is called. Inside:
-   - Coordinator evaluates active subtask success/failure conditions using
-     `_build_condition_namespace()` (which includes `new`, `elapsed_ticks`)
-   - Checks for `navigation_stalled` observation → immediate escalation
-   - On success: calls `complete(tick)`, pops subtask, selects and activates
-     agent for next subtask, writes blackboard intention entry
-   - `_tick_active_agent()` calls `agent.tick(subtask, ...)` on the single
-     owning agent
-   - Actions returned, ExecutionResult assembled
+3. `coordinator.tick(wq, ww, tick)` is called:
+   - If a task is active: evaluate task success/failure conditions, tick the
+     owning agent, collect its `SelfModelPatch` objects.
+   - If no task is active: run the top `GoalFrame`'s handler, which either
+     pushes a new task or a new sub-goal.
+   - Completed/failed sub-goals propagate upward in the goal stack.
 
-4. Main loop dispatches `ExecutionResult.actions` to `bridge/action_executor.py`.
+4. Main loop dispatches returned actions to `bridge/action_executor.py`.
 
-5. `ExecutionResult.status` is inspected:
-   - `PROGRESSING` / `WAITING` — continue
-   - `STUCK` — pass `StuckContext` to GoalSource for decomposition
-   - `COMPLETE` — trigger examination (Phase 10)
+5. `coordinator.drain_patches()` returns accumulated self-model patches; the
+   loop applies them to `SelfModel`.
 
-### Per-subtask
+### Per-task
 
-**Push:** coordinator derives a subtask, sets `agent_hint`, stores metadata as
-dynamic attributes (e.g. `target_position`, `resource_type`), pushes to ledger,
-calls `agent.activate(subtask, ...)` on the selected agent, writes blackboard
-INTENTION entry.
+**Push:** coordinator calls `_push_task(...)`, creates `Task`, calls
+`agent.activate(task, ...)`, writes blackboard INTENTION entry.
 
-**Tick:** `agent.tick(subtask, ...)` called each poll cycle. Agent reads INTENTION
-entries (waypoints, mining tasks) and returns actions.
+**Tick:** `agent.tick(task, ...)` called each poll cycle. Agent runs skills
+and returns actions.
 
-**Completion:** coordinator evaluates `subtask.success_condition` against its
-namespace. On True: calls `complete(tick)`, pops ledger, clears subtask-scoped
-blackboard entries, selects and activates agent for next subtask.
+**Completion:** coordinator evaluates `task.success_condition`. On True:
+clears the active task, calls `_bb.clear_scope(EntryScope.TASK)`, runs the
+goal handler again (advancing `frame.step`) on the same tick.
 
-**Failure/Escalation:** `failure_condition` fires → `fail(tick)` → escalation
-sequence → STUCK returned to main loop. For exploration goals, escalation returns
-WAITING instead — the coordinator re-derives a new waypoint in a rotated direction.
+**Failure/Escalation:** `failure_condition` fires → goal marked failed →
+STUCK propagates to the main loop.
 
 ### Per-goal
 
-**Initiation:** `coordinator.reset(goal, wq)` called. Blackboard and ledger
-cleared. Loop calls `_snapshot_world_query()` and passes result to both
-`coordinator.set_start_snapshot()` and the evaluator. Derivation starts from
-scratch (or from `seed_subtasks` if post-escalation).
+**Initiation:** `coordinator.reset(goal_type, params, wq)` called. Blackboard
+and goal stack cleared. Loop snapshots `WorldQuery` and stores it as `start_wq`
+for `new` delta conditions.
 
 **Resolution:** `RewardEvaluator` detects success or failure. Behavioral memory
-records outcome. Blackboard cleared. GoalSource requests next goal.
+records outcome. Blackboard cleared. `GoalSource` requests next goal.
+
+---
+
+## Phase Plan
+
+### Phases 1–6 ✅
+
+Full end-to-end pipeline implemented: bridge, world model, planning, execution
+layer (coordinator, agents, skills), examination stub, behavioral memory.
+Rule-based coordinator handles collection, exploration, clearing, crafting,
+and research goals. All unit tests pass.
+
+### Phase 7 — Construction agent (RL)
+
+The construction agent places entities, connects inserters and belts, and
+verifies that placed infrastructure is functional. Also planned for Phase 7:
+`UseItemOnEntity` bridge action and `harvest_natural` task type (wood gap fix).
+
+### Phase 8 — Production agent
+
+First learned agent. Handles recipe selection, machine configuration, and
+production chain management. The `production` and `byproduct` coordinator stubs
+become real.
+
+### Phase 9 — Spatial-logistics agent
+
+Spatial reasoning and logistics: belt routing, inserter placement, layout.
+The `logistics` coordinator stub becomes real. Internal structure (one agent
+or two) decided at phase start — see OD-5.
+
+### Phase 10 — Examination layer revision
+
+Examination gains self-model reconciliation, blackboard promotion, and structured
+factory summaries. `RewardEvaluator` namespace extended with STRUCTURAL conditions
+backed by the self-model — see OD-6. Technology-change detection (cliff gap fix)
+planned here.
+
+### Phase 11 — LLM layer revision
+
+Real LLM client capable of replacing `GoalQueue`. Receives self-model summary and behavioral
+memory statistics. Handles escalation via `StuckContext`. The `noop` coordinator
+stub becomes real.
+
+### Deferred
+
+- Biter defense — combat agents, threat module activation
+- Blueprint system — curation of spatial patterns from behavioral memory
+- Coordinator learning — transition from rule-based to learned coordination
+- Railroad networks — train state, scheduling, train-station agent
+- Circuit networks — wire connections, combinator conditions
+- Ocean-aware `ChunkGrid` — adjacency edges only where walking is possible
 
 ---
 
 ## Open Implementation Decisions
 
-See `OPEN_DECISIONS.md` for full discussion of each.
+See `OPEN_DECISIONS.md` for full discussion.
 
 - **OD-1** — Observation space construction
 - **OD-2** — Coordinator learning
@@ -485,155 +470,8 @@ See `OPEN_DECISIONS.md` for full discussion of each.
 - **OD-4** — RL algorithm family
 - **OD-5** — Spatial-logistics internal structure
 - **OD-6** — RewardEvaluator namespace extension for self-model (STRUCTURAL conditions)
-- **OD-7** — NodeType-specific SelfModelNode subclasses
-- **OD-8** — Construction agent design (new — see PRE_PHASE_7_DECISIONS.md)
-
----
-
-## Project Structure
-
-```
-factorio-agent/
-│
-├── bridge/                          # Hard boundary — nothing outside speaks RCON
-│   ├── actions.py                   ✅ 24 action types across 10 categories
-│   ├── rcon_client.py               ✅
-│   ├── state_parser.py              ✅ movement_status exposed on StateParser
-│   ├── action_executor.py           ✅
-│   └── mod/
-│       ├── info.json                ✅
-│       ├── control.lua              ✅ persistent movement + mining; 2.x fixes
-│       ├── test_bridge_live.lua     ✅ global T — state/action/edge-case suites
-│       ├── test_movement_live.lua   ✅ global TM — pathfinding, obstacle routing
-│       ├── test_state_live.lua      ✅ global TS — exploration, mining status
-│       └── test_prototypes_live.lua ✅ global TP — all KB query functions
-│
-├── world/                           # Pure data and computation
-│   ├── state.py                     ✅ WorldState pure data container
-│   ├── query.py                     ✅ WorldQuery — sole read interface
-│   ├── writer.py                    ✅ WorldWriter — sole write interface
-│   ├── knowledge.py                 ✅ KnowledgeBase — SQLite-backed, query_fn injected
-│   ├── entities.py                  ✅
-│   ├── tech_tree.py                 ✅
-│   └── production_tracker.py        ✅
-│
-├── planning/                        # Goal lifecycle and reward evaluation
-│   ├── goal.py                      ✅
-│   ├── goal_tree.py                 ✅
-│   ├── condition_namespace.py       ✅ _DeltaView, build_core_namespace, safe_builtins
-│   ├── reward_evaluator.py          ✅ uses build_core_namespace; start_wq snapshot
-│   └── resource_allocator.py        ✅
-│
-├── agent/
-│   ├── execution_protocol.py        ✅ ExecutionLayerProtocol, ExecutionResult,
-│   │                                   ExecutionStatus, StuckContext
-│   ├── blackboard.py                ✅ Blackboard, BlackboardEntry,
-│   │                                   EntryCategory, EntryScope
-│   ├── subtask.py                   ✅ Subtask, SubtaskStatus, SubtaskRecord,
-│   │                                   SubtaskLedger
-│   ├── self_model.py                ✅ SelfModel, SelfModelProtocol,
-│   │                                   node/edge types, BoundingBox
-│   ├── preconditions.py             ✅ is_at, is_reachable, can_reach_count,
-│   │                                   can_place, can_mine, valid_actions
-│   ├── loop.py                      ✅ FactorioLoop, LoopConfig, LoopStats;
-│   │                                   _snapshot_world_query() at goal activation
-│   ├── observation.py               [ Phase 7 ] Goal-conditioned observation
-│   │                                            constructors
-│   ├── reward.py                    [ Phase 7 ] Dense intermediate reward signals
-│   ├── state_machine.py             ✅
-│   │
-│   ├── network/
-│   │   ├── agent_protocol.py        ✅ AgentProtocol — subtask-first signatures
-│   │   ├── coordinator.py           ✅ RuleBasedCoordinator + StubCoordinator;
-│   │   │                               navigation_stalled escalation;
-│   │   │                               exploration direction rotation;
-│   │   │                               set_start_snapshot(start_wq)
-│   │   ├── registry.py              ✅ AgentRegistry — no goal-type coupling
-│   │   └── agents/
-│   │       ├── navigation.py        ✅ NavigationAgent — movement only;
-│   │       │                           navigation_stalled observation;
-│   │       │                           _UNREACHABLE_GRACE_TICKS fast detection
-│   │       ├── mining.py            ✅ MiningAgent — gathering + clearing
-│   │       ├── construction.py      [ Phase 7 ] Construction agent
-│   │       ├── production.py        [ Phase 8 ] RL production agent
-│   │       └── spatial_logistics.py [ Phase 9 ] RL spatial-logistics agent
-│   │
-│   ├── memory/
-│   │   └── behavioral.py            ✅ BehavioralMemoryProtocol +
-│   │                                   SQLiteBehavioralMemory stub
-│   │
-│   └── examiner/
-│       ├── audit_report.py          ✅
-│       ├── rich_examiner.py         [ Phase 10 ] Revised with self-model
-│       └── mechanical_auditor.py    [ Phase 10 ]
-│
-├── llm/
-│   ├── goal_source.py               ✅ GoalSource protocol, GoalQueue,
-│   │                                   GoalQueueEntry (with bbox + clear_mode)
-│   ├── client.py                    [ Phase 11 ]
-│   ├── budget.py                    [ Phase 11 ]
-│   └── prompts/
-│       ├── strategic.md             [ Phase 11 ]
-│       ├── escalation.md            [ Phase 11 ]
-│       ├── examination.md           [ Phase 10 ]
-│       └── reflection.md            [ Phase 11 ]
-│
-├── data/
-│   ├── knowledge/
-│   │   └── knowledge.db             (runtime, gitignored)
-│   └── behavioral.db                (runtime, gitignored)
-│
-├── config.py                        ✅
-├── run.py                           ✅ CLI entry point
-├── ARCHITECTURE.md                  (this file)
-├── CONDITION_SCOPE.md               ✅
-├── REWARD_NAMESPACE.md              ✅
-├── OPEN_DECISIONS.md                ✅
-├── PHASE_7_BRIEF.md                 (to be written after PRE_PHASE_7_DECISIONS)
-├── PRE_PHASE_7_DECISIONS.md         ✅
-│
-├── tests/
-│   ├── fixtures.py                  ✅
-│   ├── unit/
-│   │   ├── bridge/                  ✅
-│   │   ├── world/                   ✅
-│   │   ├── planning/                ✅ test_condition_namespace.py (new)
-│   │   ├── agent/                   ✅ Phase 6 complete
-│   │   └── llm/                     ✅ test_goal_source.py
-│   └── integration/                 ✅ test_evaluator_capabilities.py
-│
-└── tests_in_game/
-    ├── conftest.py                  ✅ rcon_client, knowledge_base, run_goal fixtures
-    ├── README.md                    ✅
-    ├── 01_knowledge/                ✅ recipe and tech discovery
-    ├── 02_collection/               ✅ new.inventory() delta conditions
-    └── 03_exploration/              ✅ new.charted_chunks() delta conditions
-```
-
----
-
-## Build Order and Testing Strategy
-
-Each phase produces interfaces before implementations, and tests before or alongside
-code. No phase begins until the previous phase's tests pass. In-game tests for the
-current phase are the final gate before moving to the next.
-
-**Phase 6** — first runnable system. In-game tests verify collection, exploration,
-and clearing against a live Factorio instance. Subtask-first agent protocol
-established. Rule-based coordinator handles three goal types. All in-game tests
-fully passing including delta conditions and Factorio 2.x compatibility.
-
-**Phase 7** — construction agent. The first agent that modifies the factory
-structure. Design is being specified before implementation begins. See
-`PRE_PHASE_7_DECISIONS.md` and `PHASE_7_BRIEF.md`.
-
-**Phase 8** — production agent (RL). First learned agent. KB production chain
-queries provide strong structural guidance for subtask derivation.
-
-**Phase 9** — spatial-logistics agent (RL). Layout, routing, inserter placement.
-Internal structure (one agent or two) decided at phase start — see OD-5.
-
-**Phases 10-11** — examination and LLM layers. Full loop closure.
+- **OD-7** — NodeType-specific FactoryNode subclasses
+- **OD-8** — Agent architecture: thin protocol vs behavioral composition
 
 ---
 
@@ -645,7 +483,5 @@ When opening a new conversation to implement a component, include:
 2. `CONDITION_SCOPE.md` — if the component generates or evaluates goal conditions
 3. `REWARD_NAMESPACE.md` — if the component writes or interprets condition strings
 4. `OPEN_DECISIONS.md` — if the component touches any open decision
-5. `PRE_PHASE_7_DECISIONS.md` — decisions recorded before Phase 7
-6. `PHASE_7_BRIEF.md` — the component brief for the phase
-7. The actual source files for all interfaces the component must satisfy or consume
-8. The relevant test files
+5. The actual source files for all interfaces the component must satisfy or consume
+6. The relevant test files

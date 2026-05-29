@@ -253,8 +253,8 @@ Always returns a non-negative integer if observed.
 ## Files to update when this changes
 
 - `planning/reward_evaluator.py` — `_build_namespace()` comments and namespace dict
-- `world/query.py` — `WorldQuery` method docstrings
-- `world/state.py` — `ExplorationState` and `WorldState.charted_chunks`
+- `world/observable/query.py` — `WorldQuery` method docstrings
+- `world/observable/state.py` — `ExplorationState` and `WorldState.charted_chunks`
 - `bridge/mod/control.lua` — `fa._player_table()` and `fa.get_exploration()`
 - `bridge/state_parser.py` — `_parse_player()`
 - `llm/prompts/strategic.md` — condition-writing guidelines
@@ -262,6 +262,6 @@ Always returns a non-negative integer if observed.
 - `tests/integration/test_evaluator_capabilities.py` — EX and XC categories
 
 **Additional files to update when STRUCTURAL conditions are implemented (Phase 10):**
-- `agent/self_model.py` — self-model query interface
+- `world/model/self_model.py` — self-model query interface exposed to evaluator
 - `REWARD_NAMESPACE.md` — new STRUCTURAL namespace entries
 - `OPEN_DECISIONS.md` — close out OD-6

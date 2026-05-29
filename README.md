@@ -23,79 +23,112 @@ network's responsibility. LLM calls are expensive, infrequent, and narrowly scop
 Implementations can be replaced — including wholesale replacement of the RL system —
 without restructuring surrounding code.
 
-**Agents own subtasks, not goals.** Goals are the coordinator's concern. The
-coordinator translates a Goal into Subtasks and hands each Subtask to the
-appropriate agent. Agents never receive or inspect the Goal object.
+**Agents own tasks, not goals.** Goals are the coordinator's concern. The coordinator
+translates a Goal into a sequence of Tasks and hands each Task to the appropriate
+agent. Agents never receive or inspect the Goal object.
 
 ## Status
 
-**Phases 1-6 complete.**
+**Phases 1–6 complete. Major refactor complete.**
+
 The full end-to-end pipeline is implemented and running against a live Factorio
 instance. The agent can navigate, gather resources, explore, and clear terrain.
-All in-game tests pass, including Factorio 2.x compatibility fixes and delta-based
-condition evaluation (`new.inventory()`, `new.charted_chunks()`).
-Phase 7 (construction agent and observation/reward infrastructure) is next.
+All unit tests pass. In-game tests are being updated to the new structure.
 
 ```
-[✅] Core dataclasses       128 tests passing
-[✅] Bridge / Lua mod        80+ tests passing (4 Lua test suites: T/TM/TS/TP)
-[✅] World model            200+ tests passing
-[✅] Planning layer         ~200 tests passing (condition_namespace, DeltaView)
-[✅] WorldQuery/Writer refactor — all tests passing
-[✅] Phase 5  — Execution layer foundation   179 tests passing
-[✅] Phase 6  — Navigation, mining, rule-based coordinator, run loop
-[✅] Phase 6+ — Factorio 2.x compatibility; delta conditions; all in-game tests pass
-[ ] Phase 7  — Construction agent, observation and reward infrastructure
-[ ] Phase 8  — Production agent (RL)
-[ ] Phase 9  — Spatial-logistics agent (RL)
+[✅] Core dataclasses / bridge / Lua mod
+[✅] World model (observable, knowledge, self-model layers)
+[✅] Planning layer (Goals, Tasks, RewardEvaluator, condition namespace)
+[✅] Execution layer (coordinator, agents, skills, blackboard, memory)
+[✅] Examination layer (AuditReport stub)
+[✅] Phase 6 — Navigation, mining, rule-based coordinator, run loop
+[✅] Refactor — world/, planning/, execution/, examination/, memory/ layout
+[ ] Phase 7 — Construction agent
+[ ] Phase 8 — Production agent (RL)
+[ ] Phase 9 — Spatial-logistics agent (RL)
 [ ] Phase 10 — Examination layer revision
 [ ] Phase 11 — LLM layer revision
 ```
 
 ## Architecture Overview
 
-The system has four major layers:
+The system has five top-level layers plus the bridge:
 
-**LLM planning layer** — sets coarse goals (e.g. "establish iron plate production
-at 30 plates/second", "explore and find a nearby oil patch"). Fires infrequently.
-Receives structured factory summaries, not raw game state. Also handles escalation
-when the execution network gets stuck. Currently stubbed by `GoalQueue` in
-`llm/goal_source.py`, which accepts manually-authored or pre-recorded goal sequences.
+**Bridge** (`bridge/`) — the sole RCON boundary. Produces `WorldState` snapshots,
+dispatches `Action` objects. Nothing outside `bridge/` speaks RCON or knows Lua.
 
-**Agent execution network** — a coordinated set of agents operating behind
-a clean protocol interface. Communicates internally via a shared blackboard and
-subtask ledger. The coordinator translates Goals into Subtasks and routes each
-Subtask to the appropriate agent by `agent_hint`. Agents interact with Subtasks
-only — never Goals.
+**World** (`world/`) — three sub-layers:
+- *Observable* — `WorldState` (data), `WorldQuery` (read), `WorldWriter` (write)
+- *Knowledge* — `KnowledgeBase`: game content learned at runtime (recipes, entities, tech)
+- *Model* — `SelfModel`: layered self-model of what the agent has built. Currently
+  two layers: `FactoryGraph` (logical factory components) and `ChunkGrid` (explored terrain)
 
-**Knowledge and memory system** — three distinct layers:
-- *Game knowledge* (KnowledgeBase) — what the game contains, learned at runtime
-- *Factory self-model* — a graph of logical factory units and their relationships,
-  built incrementally during execution
-- *Behavioral memory* — strategies and patterns accumulated across runs
+**Planning** (`planning/`) — `Goal`, `Task`, `GoalTree`, `RewardEvaluator`,
+`condition_namespace`. Goals are long-horizon objectives; Tasks are concrete
+work items the coordinator assigns to agents. `RewardEvaluator` evaluates
+condition strings against a `WorldQuery` namespace.
 
-**Game interaction** — the Factorio mod (`bridge/mod/control.lua`) exposes a
-persistent-state movement and mining system driven by `on_tick` handlers. The
-`fa.move_to()` function uses Factorio's built-in pathfinder (`surface.request_path`)
-with a collision mask covering `object` and `water_tile` layers so the character
-routes around trees, walls, and water. `fa.mine_resource()` and `fa.mine_entity()`
-similarly maintain `mining_state` every tick. The Python bridge speaks to this mod
-exclusively via RCON.
+**Execution** (`execution/`) — the agent network. Contains the coordinator,
+agents, skills, blackboard, preconditions, and the main loop. The coordinator
+translates Goals into Tasks via a hierarchical, depth-first state machine and
+dispatches them to agents. Agents use skills to produce actions.
+
+**Examination** (`examination/`) — `AuditReport` and auditor stubs.
+Grows significantly in Phase 10.
+
+**Memory** (`memory/`) — `BehavioralMemory`: strategy records and performance
+history persisted across runs via SQLite.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for full design documentation.
 
-## Writing Goal Conditions
+## Key Concepts
 
-Goal conditions should use **relative conditions** rather than absolute game state
-where possible. The `new` object and `elapsed_ticks` alias give access to deltas
-since goal activation:
+### Goals and Tasks
+
+**Goals** are coarse, long-horizon objectives set by the LLM or the coordinator's
+hierarchical planner (e.g. "collect 200 iron ore", "clear this region", "produce
+iron plates at 30/min"). Goals have `success_condition` and `failure_condition`
+strings evaluated against `WorldQuery`.
+
+**Tasks** are concrete work items derived by the coordinator and assigned to a
+single agent (e.g. "navigate to position X", "gather 10 iron ore", "clear natural
+objects in bbox"). Tasks also carry condition strings, evaluated by the coordinator
+each tick.
+
+The coordinator never exposes Goals to agents. Agents receive Tasks only.
+
+### Skills
+
+Skills encode multi-step but well-determined sequences of primitive actions, along
+with success/failure detection. They contain no decision logic — that belongs to
+agents. Examples: `NavigateSkill`, `MineSkill`, `DestroySkill`, `CraftSkill`.
+Each agent holds references to the skills relevant to its task types.
+
+### Self-Model Patches
+
+Agents do not read or write the self-model directly. Instead, they emit
+`SelfModelPatch` objects describing changes resulting from their actions
+(e.g. "I placed an assembler at this location"). The coordinator collects
+patches from agents each tick and applies them to the `SelfModel`.
+
+### Coordinator Architecture
+
+The coordinator maintains a **goal stack** (pending goals in depth-first order)
+and an **active task**. Each tick it either ticks the active task or runs the
+top goal's handler. Goal handlers advance a `step` counter and may push sub-goals
+or tasks. Completed sub-goals pop from the stack and advance their parent's step.
+This gives the appearance of recursive decomposition while keeping the tick loop flat.
+
+### Writing Goal Conditions
+
+Use **relative conditions** rather than absolute game state where possible:
 
 ```python
 # Collect 5 new iron ore (works regardless of prior inventory)
 success_condition="new.inventory('iron-ore') >= 5"
 
 # 3 minutes since this goal activated (not absolute game clock)
-failure_condition="elapsed_ticks > 10800"   # or: new.tick > 10800
+failure_condition="elapsed_ticks > 10800"
 
 # Explore 5 new chunks (works regardless of prior charted count)
 success_condition="new.charted_chunks >= 5"
@@ -108,7 +141,7 @@ non-proximal guidance.
 ## Running the Agent
 
 ```bash
-# Default smoke-test sequence (collect iron, then explore)
+# Default smoke-test sequence
 python run.py
 
 # Single inline goal
@@ -126,88 +159,60 @@ python run.py --save-goals runs/session_2026.json
 
 ## Running the Tests
 
-### Unit and integration tests — no Factorio required
+### Unit tests — no Factorio required
 
 ```bash
-# All unit tests
 pytest tests/
-
-# Specific layer
-pytest tests/unit/agent/ -v
-pytest tests/unit/planning/ -v   # includes condition_namespace tests
+pytest tests/unit/execution/ -v
+pytest tests/unit/world/ -v
+pytest tests/unit/planning/ -v
 ```
 
 ### In-game tests — Factorio required
 
-Start Factorio with RCON enabled (see Installation below), then:
+Start Factorio with RCON enabled, then:
 
 ```bash
-# All in-game tests
 pytest tests_in_game/ -v
-
-# One category at a time (recommended — tests run in numbered order)
 pytest tests_in_game/01_knowledge/ -v
 pytest tests_in_game/02_collection/ -v
 pytest tests_in_game/03_exploration/ -v
 ```
 
-In-game tests skip automatically if RCON is unreachable. Live log streaming is
-configured in `pytest.ini` — add `--log-cli-level DEBUG` for full coordinator
-and agent output.
+In-game tests skip automatically if RCON is unreachable.
 
 ### Lua-side tests — Factorio console required
 
-Four test suites can be run directly from the Factorio in-game console. These test
-the bridge interface without any Python involvement and are the fastest way to
-diagnose Factorio API issues:
-
 ```
-/c __agent__ T.run_all()           # state queries, action commands, edge cases
-/c __agent__ TM.run_suite("status_api")    # movement status API
-/c __agent__ TM.async_start("player_actually_moves")
-# wait 5 seconds
-/c __agent__ TM.async_finish("player_actually_moves")
-/c __agent__ TS.run_all()          # exploration (charted_chunks), mining status
-/c __agent__ TP.run_all()          # prototype queries (entities, recipes, tech)
+/c __agent__ T.run_all()     # bridge state queries and actions
+/c __agent__ TM.run_all()    # movement and pathfinding
+/c __agent__ TS.run_all()    # exploration and mining status
+/c __agent__ TP.run_all()    # prototype queries (KB)
 ```
-
-Results are written to `script-output/` in the Factorio data directory.
 
 ## Project Structure
 
 ```
 factorio-agent/
-├── bridge/          # RCON interface, Lua mod, state parser, action executor
-├── world/           # WorldState, WorldQuery, WorldWriter, KnowledgeBase
-├── planning/        # GoalTree, RewardEvaluator, condition_namespace, ResourceAllocator
-├── agent/
-│   ├── execution_protocol.py  # ExecutionLayerProtocol, ExecutionResult, StuckContext
-│   ├── blackboard.py          # Shared working memory for agents
-│   ├── subtask.py             # Subtask, SubtaskLedger (live stack + history log)
-│   ├── self_model.py          # Factory self-model graph
-│   ├── preconditions.py       # is_at, is_reachable, can_reach_count, valid_actions
-│   ├── loop.py                # FactorioLoop — master tick loop
-│   ├── network/
-│   │   ├── agent_protocol.py  # AgentProtocol — subtask-first interface
-│   │   ├── coordinator.py     # RuleBasedCoordinator + StubCoordinator
-│   │   ├── registry.py        # AgentRegistry — no goal-type coupling
-│   │   └── agents/
-│   │       ├── navigation.py  # NavigationAgent — movement only
-│   │       └── mining.py      # MiningAgent — gathering and clearing
-│   ├── memory/
-│   │   └── behavioral.py      # BehavioralMemoryProtocol + SQLiteBehavioralMemory
-│   └── examiner/              # Rich and mechanical examination (Phase 10)
-├── llm/
-│   └── goal_source.py         # GoalSource protocol, GoalQueue implementation
+├── bridge/          # RCON boundary — nothing outside speaks RCON
+├── world/
+│   ├── observable/  # WorldState, WorldQuery, WorldWriter
+│   ├── knowledge/   # KnowledgeBase, TechTree, ProductionTracker
+│   └── model/       # SelfModel, FactoryGraph, ChunkGrid
+├── planning/        # Goal, Task, GoalTree, RewardEvaluator, condition_namespace
+├── execution/
+│   ├── agents/      # NavigationAgent, MiningAgent, ExplorationAgent, CraftingAgent
+│   ├── skills/      # NavigateSkill, MineSkill, DestroySkill, CraftSkill, ...
+│   ├── coordinator/ # RuleBasedCoordinator, GoalFrame, goal handlers
+│   └── memory/      # BehavioralMemory (SQLite-backed)
+├── examination/     # AuditReport, auditor stubs (grows in Phase 10)
+├── memory/          # Cross-run behavioral memory (may gain more in future phases)
+├── llm/             # GoalSource, GoalQueue (LLM client in Phase 11)
 ├── data/            # Runtime databases (gitignored)
-├── config.py        # All tunable parameters
-├── run.py           # CLI entry point
-├── tests/           # Unit and integration tests (no Factorio required)
-└── tests_in_game/   # In-game tests (Factorio required)
-    ├── conftest.py  # Shared fixtures: rcon_client, knowledge_base, run_goal
-    ├── 01_knowledge/
-    ├── 02_collection/
-    └── 03_exploration/
+├── config.py
+├── run.py
+├── tests/           # Unit and integration tests
+└── tests_in_game/   # In-game integration tests
 ```
 
 ## Installation
@@ -222,29 +227,19 @@ cp -r bridge/mod ~/.factorio/mods/agent_0.1.0
 xcopy bridge\mod "%APPDATA%\Factorio\mods\agent_0.1.0" /E /I
 ```
 
-Enable the mod in Factorio's mod manager before starting a game, or add it
-to `%APPDATA%\Factorio\mods\mod-list.json`.
+Enable the mod in Factorio's mod manager before starting a game.
 
 ### 2. Start Factorio with RCON enabled
 
-In our tests, this has been done through Steam, where one edits the game launch
-via Properties -> Launch Options, entering `--rcon-port 25575 --rcon-password factorio`.
-Alternatively, these commands can be added to the executable launching the game.
-
-#### Visualized GUI Option
-
-Upon launching the game, on the main menu hold down "Ctrl-Alt" and click "Settings".
+Via Steam launch options: `--rcon-port 25575 --rcon-password factorio` then 
+upon launching the game, on the main menu hold down "Ctrl-Alt" and click "Settings".
 Select "The Rest" and find the "local-rcon-socket" and "local-rcon-password" options.
 Enter `127.0.0.1:25575` and `factorio`, respectively.
 
-#### Headless Option (No GUI)
-
-On Windows, the most reliable approach is the `--start-server` flag (the
-standalone `factorio.exe`, not the Steam-launched version):
+Or headless on Windows:
 
 ```powershell
-& "C:\Program Files (x86)\Steam\steamapps\common\Factorio\bin\x64\factorio.exe" `
-  --start-server "$env:APPDATA\Factorio\saves\agent-test.zip" `
+& "C:\...\factorio.exe" --start-server "$env:APPDATA\Factorio\saves\agent-test.zip" `
   --rcon-port 25575 --rcon-password factorio `
   --mod-directory "$env:APPDATA\Factorio\mods"
 ```
@@ -260,9 +255,7 @@ c.close()
 "
 ```
 
-Should print `'table\n'`. If it prints `'nil\n'`, the mod is not loaded —
-check that the mod folder is correctly installed and the save was created
-with the mod enabled.
+Should print `'table\n'`.
 
 ### 4. Configure
 
@@ -273,8 +266,6 @@ RCON_HOST     = "localhost"
 RCON_PORT     = 25575
 RCON_PASSWORD = "factorio"
 ```
-
-### Configuration reference
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -296,5 +287,3 @@ RCON_PASSWORD = "factorio"
 - [`CONDITION_SCOPE.md`](CONDITION_SCOPE.md) — proximal vs non-proximal condition reference
 - [`REWARD_NAMESPACE.md`](REWARD_NAMESPACE.md) — complete reward evaluator namespace reference
 - [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md) — deferred architectural questions
-- [`PHASE_7_BRIEF.md`](PHASE_7_BRIEF.md) — component brief for the next phase
-- [`PRE_PHASE_7_DECISIONS.md`](PRE_PHASE_7_DECISIONS.md) — decisions required before Phase 7 begins

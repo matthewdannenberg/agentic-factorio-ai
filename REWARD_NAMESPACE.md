@@ -608,6 +608,6 @@ success_condition = (
 
 1. Add the new function or value to `_build_namespace()` in `planning/reward_evaluator.py`
 2. Add a test to the appropriate category in `tests/integration/test_evaluator_capabilities.py`
-3. Classify it as PROXIMAL or NON-PROXIMAL and add it to the summary table in `CONDITION_SCOPE.md`
+3. Classify it as PROXIMAL, NON-PROXIMAL, or STRUCTURAL and add it to the summary table in `CONDITION_SCOPE.md`
 4. Update this document with the new entry
 5. Update `CONDITION_SCOPE.md`'s "Files to update" list if needed

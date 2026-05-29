@@ -29,7 +29,7 @@ then update the relevant section of `ARCHITECTURE.md`.
   dimensional and adaptive
 - How to handle goals that don't map cleanly to a single goal type
 
-**Where the decision lives:** `agent/observation.py` and individual agent
+**Where the decision lives:** `execution/observation.py` and individual agent
 implementations. Nothing outside these files assumes anything about observation
 shape.
 
@@ -58,7 +58,7 @@ so, how and when?
   decentralised execution, emergent communication, explicit communication channels)
 - When to transition — after individual agents are stable, or jointly from the start
 
-**Where the decision lives:** `agent/network/coordinator.py`. The protocol boundary
+**Where the decision lives:** `execution/coordinator/coordinator.py`. The protocol boundary
 means this can be swapped without touching agents or the execution protocol.
 
 **Research needed:** MARL coordination literature; whether the coordination problem
@@ -83,7 +83,7 @@ with learned agents is sufficient.
 - Whether pattern similarity matching is needed to avoid duplicates across runs
 - How this feeds the eventual blueprint system
 
-**Where the decision lives:** `agent/self_model.py` and `agent/memory/behavioral.py`.
+**Where the decision lives:** `world/model/self_model.py` and `memory/behavioral.py`.
 The interface between them (what gets passed at end-of-run) is the key boundary.
 
 **Research needed:** graph summarisation approaches; whether learned spatial patterns
@@ -136,7 +136,7 @@ coordinating agents?
 - Whether the MARL literature suggests a natural factoring for spatially-entangled
   concerns of this kind
 
-**Where the decision lives:** `agent/network/agents/spatial_logistics.py` (or
+**Where the decision lives:** `execution/agents/spatial_logistics.py` (or
 split into two files if two agents). The coordinator routes to this subsystem;
 the internal structure is invisible above that boundary.
 
@@ -176,7 +176,7 @@ the self-model in addition to `WorldQuery`, and what does that namespace look li
 
 **Proposed namespace entries (tentative):**
 ```python
-production_line(item)       # -> SelfModelNode | None — active producer of item
+production_line(item)       # -> FactoryNode | None — active producer of item
 production_capacity(item)   # -> float — total throughput in units per minute
 has_infrastructure(type)    # -> bool — any active node of given type exists
 connected(node_a, node_b)   # -> bool — path exists between nodes in self-model
@@ -197,17 +197,18 @@ Until then, structural conditions are not useful even if the namespace exists.
 - `CONDITION_SCOPE.md` — new STRUCTURAL scope category and summary table
 - `REWARD_NAMESPACE.md` — new namespace entries
 - `ARCHITECTURE.md` — RewardEvaluator description
+- `world/model/self_model.py` — self-model query interface exposed to evaluator
 - `tests/integration/test_evaluator_capabilities.py` — new SM category
 
 ---
 
-## OD-7 — NodeType-Specific SelfModelNode Attributes
+## OD-7 — NodeType-Specific FactoryNode Attributes
 
 **Question:** Should different NodeType values have different attributes, and if
-so, should that be modelled through subclasses of SelfModelNode?
+so, should that be modelled through subclasses of FactoryNode?
 
 **What we know:**
-- The current `SelfModelNode` carries a `throughput: dict[str, float]` field
+- The current `FactoryNode` carries a `throughput: dict[str, float]` field
   that is the primary structured attribute beyond geometry and status. This is
   sufficient for production-related queries (`find_producers`, `find_capacity`)
   and for the examination layer through Phase 9.
@@ -215,8 +216,8 @@ so, should that be modelled through subclasses of SelfModelNode?
   would benefit from `produced_kw` / `consumed_kw` fields. A `TRAIN_STATION`
   might carry `scheduled_resources`. A `DEFENDED_REGION` might carry
   `turret_coverage_fraction`. None of these fit cleanly into `throughput`.
-- Subclassing `SelfModelNode` per NodeType is the natural Python pattern for
-  this, and is localized to `agent/self_model.py` and the examination layer.
+- Subclassing `FactoryNode` per NodeType is the natural Python pattern for
+  this, and is localized to `world/model/self_model.py` and the examination layer.
 
 **What is undecided:**
 - Whether `throughput` plus ad-hoc extra fields in the examination layer is
@@ -226,7 +227,7 @@ so, should that be modelled through subclasses of SelfModelNode?
   etc.) need to be updated to return typed subclasses, or whether a generic
   `extra: dict` field is a simpler interim.
 
-**Where the decision lives:** `agent/self_model.py`. The graph interface
+**Where the decision lives:** `world/model/self_model.py`. The graph interface
 (`SelfModelProtocol`) does not need to change — only the node dataclass and
 the examination layer code that writes to it.
 
@@ -237,9 +238,9 @@ production lines, wattage for power grids, etc.).
 **Proposed approach when implemented:**
 - Introduce typed subclasses (`ProductionLineNode`, `PowerGridNode`, etc.)
   each adding their own fields
-- `SelfModel.add_node()` accepts any `SelfModelNode` subclass
-- `query_nodes(type=NodeType.POWER_GRID)` returns `list[PowerGridNode]`
-  (caller casts); or add a typed variant `query_nodes_typed(type, cls)`
+- `SelfModel.add_node()` accepts any `FactoryNode` subclass
+- `FactoryGraph.get_nodes_by_type(NodeType.POWER_GRID)` returns `list[FactoryNode]`
+  (caller casts to the subtype); or add a typed variant `get_nodes_typed(type, cls)`
 - Keep `throughput` on the base class; it remains the common currency for
   cross-type capacity queries
 
@@ -289,8 +290,8 @@ construction derivation becomes complex because construction has multi-step stru
 that doesn't decompose cleanly into atomic subtasks, that is the signal to introduce
 the behavioral composition layer before proceeding to Phase 8.
 
-**Where the decision lives:** `agent/network/agent_protocol.py` and the agent
-implementations. A `behaviors/` module would live at `agent/network/behaviors/`.
+**Where the decision lives:** `execution/agents/base.py` and the agent
+implementations. A `behaviors/` module would live at `execution/behaviors/`.
 
 ---
 
