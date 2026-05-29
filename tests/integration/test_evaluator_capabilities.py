@@ -29,17 +29,16 @@ from __future__ import annotations
 
 import unittest
 
-from planning import RewardSpec, make_goal, Priority
-from planning import RewardEvaluator
-from world import ProductionTracker
-from world import WorldQuery
+from planning import RewardSpec, make_goal, Priority, RewardEvaluator
 from world import (
+    ProductionTracker, WorldQuery,
     BeltLane, BeltSegment, DamagedEntity, DestroyedEntity,
     EntityState, EntityStatus, ExplorationState,
     GroundItem, Inventory, InventorySlot, InserterState,
     LogisticsState, PlayerState, Position, PowerGrid,
-    ResourcePatch, ResearchState, WorldState,
+    ResourcePatch, ResearchState, 
 )
+from world.observable.state import WorldState
 
 
 # ---------------------------------------------------------------------------
