@@ -4,9 +4,21 @@ tests_in_game/02_collection/test_collect_iron.py
 Verifies the full collection pipeline: coordinator derives approach + gather
 subtasks, NavigationAgent walks to the patch, MiningAgent mines the ore.
 
-Uses new.inventory() for tests that require active collection regardless of
-prior inventory state, and inventory() for tests that only care about
-having a total amount.
+Each GoalQueueEntry carries two parallel completion signals:
+
+  params            — coordinator-level goal parameters read by
+                      _handle_collection (item, count). These drive the
+                      internal task derivation: find patch, navigate, mine.
+
+  success_condition — RewardEvaluator expression checked every tick by the
+                      loop. Uses new.inventory() (delta from goal start) so
+                      the condition requires genuine work regardless of prior
+                      inventory state.
+
+Both the coordinator marking the goal complete AND the evaluator firing the
+success_condition can advance the loop to the next goal. In practice the
+evaluator fires first once inventory is satisfied, which is the desired
+behaviour.
 
 Notes on inventory persistence
 --------------------------------
@@ -15,7 +27,7 @@ new.inventory() delta conditions are preferred because they require genuine
 collection work regardless of what was already in the player's inventory.
 """
 
-from llm.goal_source import GoalQueueEntry
+from planning import GoalQueueEntry
 
 
 def test_collect_5_new_iron_ore(run_goal):
@@ -26,9 +38,9 @@ def test_collect_5_new_iron_ore(run_goal):
     """
     entry = GoalQueueEntry(
         description="Collect 5 new iron ore",
-        success_condition="new.inventory('iron-ore') >= 5",
-        failure_condition="new.tick > 10800",   # 3 minutes
         goal_type="collection",
+        success_condition="new.inventory('iron-ore') >= 5",
+        failure_condition="elapsed_ticks > 10800",   # 3 minutes
     )
     stats, wq = run_goal(entry)
 
@@ -46,9 +58,9 @@ def test_collect_5_iron_ore_total(run_goal):
     """
     entry = GoalQueueEntry(
         description="Have 5 iron ore total",
-        success_condition="inventory('iron-ore') >= 5",
-        failure_condition="new.tick > 10800",
         goal_type="collection",
+        success_condition="inventory('iron-ore') >= 5",
+        failure_condition="elapsed_ticks > 10800",
     )
     stats, wq = run_goal(entry)
 
@@ -66,15 +78,15 @@ def test_collect_new_iron_then_new_copper(run_goals):
     """
     iron_entry = GoalQueueEntry(
         description="Collect 5 new iron ore",
-        success_condition="new.inventory('iron-ore') >= 5",
-        failure_condition="new.tick > 10800",
         goal_type="collection",
+        success_condition="new.inventory('iron-ore') >= 5",
+        failure_condition="elapsed_ticks > 10800",
     )
     copper_entry = GoalQueueEntry(
         description="Collect 5 new copper ore",
-        success_condition="new.inventory('copper-ore') >= 5",
-        failure_condition="new.tick > 18000",   # 5 minutes — patch may be far
         goal_type="collection",
+        success_condition="new.inventory('copper-ore') >= 5",
+        failure_condition="elapsed_ticks > 18000",   # 5 minutes — patch may be far
     )
     stats, wq = run_goals([iron_entry, copper_entry])
 

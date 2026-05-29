@@ -7,14 +7,14 @@ Task types handled
 ------------------
   gather_resource
       Mine N units of a named resource from a known patch.
-      The coordinator navigates the player to the patch first
-      (NavigationAgent), then activates this agent.
+      The agent navigates to the patch internally (NAVIGATE phase) before
+      mining (MINE phase), so no prior NavigationAgent task is required.
 
   clear_region
       Remove entities from a bounding box. Two modes:
         clear_natural — trees, rocks, cliffs, fish (name heuristics).
         clear_all     — every entity in the bbox.
-      The coordinator navigates the player to the region first.
+      The agent navigates to each target internally.
 
 Task attributes (set by coordinator)
 -------------------------------------
@@ -91,6 +91,11 @@ class _ClearTarget:
     position: Position
 
 
+class _GatherPhase(Enum):
+    NAVIGATE = auto()   # walking to the resource patch
+    MINE     = auto()   # mining once in range
+
+
 class _ClearPhase(Enum):
     NAVIGATE = auto()   # moving toward target entity
     DESTROY  = auto()   # actively mining target entity
@@ -118,6 +123,7 @@ class MiningAgent(AgentProtocol):
 
         # Gather state
         self._gather_outcome_written: bool = False
+        self._gather_phase: _GatherPhase = _GatherPhase.NAVIGATE
 
         # Clear state
         self._clear_targets: list[_ClearTarget] = []
@@ -142,6 +148,7 @@ class MiningAgent(AgentProtocol):
         self._destroy_skill.reset()
         self._task_kind = _TaskKind.UNKNOWN
         self._gather_outcome_written = False
+        self._gather_phase = _GatherPhase.NAVIGATE
         self._clear_targets = []
         self._current_target = None
         self._clear_phase = _ClearPhase.NAVIGATE
@@ -179,7 +186,7 @@ class MiningAgent(AgentProtocol):
             category=EntryCategory.OBSERVATION,
             scope=EntryScope.TASK,
             owner_agent=self.AGENT_ID,
-            created_at=wq.tick,
+            created_at=task.created_at if wq is None else wq.tick,
             data={
                 "type":      "mining_started",
                 "task_id":   task.id,
@@ -223,7 +230,11 @@ class MiningAgent(AgentProtocol):
             "task_kind":  self._task_kind.name,
         }
         if self._task_kind == _TaskKind.GATHER:
-            obs.update(self._mine_skill.observe())
+            obs["gather_phase"] = self._gather_phase.name
+            if self._gather_phase == _GatherPhase.NAVIGATE:
+                obs.update(self._nav_skill.observe())
+            else:
+                obs.update(self._mine_skill.observe())
         elif self._task_kind == _TaskKind.CLEAR:
             obs.update({
                 "clear_targets_remaining": len(self._clear_targets),
@@ -244,12 +255,17 @@ class MiningAgent(AgentProtocol):
         kb: "KnowledgeBase",
     ) -> float:
         if self._task_kind == _TaskKind.GATHER:
+            if self._gather_phase == _GatherPhase.NAVIGATE:
+                nav_status = self._nav_skill.status()
+                if nav_status == SkillStatus.RUNNING:
+                    return 0.2
+                return 0.0
             status = self._mine_skill.status()
             if status == SkillStatus.SUCCEEDED:
                 return 1.0
             if status == SkillStatus.RUNNING:
-                return 0.5
-            return 0.0
+                return 0.6
+            return 0.3
         if self._task_kind == _TaskKind.CLEAR:
             if self._targets_total == 0:
                 return 0.0
@@ -274,10 +290,85 @@ class MiningAgent(AgentProtocol):
         ww: "WorldWriter",
         tick: int,
     ) -> list[Action]:
+        """
+        Two-phase gather loop: navigate to the patch, then mine.
+
+        NAVIGATE phase: walk to target_position using NavigateSkill.
+          - If already in range (MineSkill would succeed immediately),
+            skip straight to MINE.
+          - On nav SUCCEEDED or STUCK: transition to MINE regardless
+            (STUCK means we got as close as pathfinding allows; MineSkill
+            will determine whether we're actually in range).
+
+        MINE phase: run MineSkill until SUCCEEDED or STUCK.
+        """
+        if self._gather_phase == _GatherPhase.NAVIGATE:
+            return self._gather_navigate(task, blackboard, wq, ww, tick)
+        return self._gather_mine(task, blackboard, wq, ww, tick)
+
+    def _gather_navigate(
+        self,
+        task: "Task",
+        blackboard: "Blackboard",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+    ) -> list[Action]:
+        """Walk to the resource patch, then hand off to _gather_mine."""
+        mine_status = self._mine_skill.status()
+        if mine_status == SkillStatus.IDLE:
+            # activate() couldn't start MineSkill (missing params).
+            return []
+
+        # Check if MineSkill can start immediately (player already in range).
+        # We do this by attempting a tick — if it issues actions the player
+        # is close enough; if it returns STUCK straight away we need to
+        # navigate first. Instead, use the nav approach unconditionally for
+        # simplicity: always navigate to target_position first, then mine.
+        # NavigateSkill will return SUCCEEDED immediately if already nearby.
+        nav_status = self._nav_skill.status()
+
+        if nav_status == SkillStatus.IDLE:
+            target_pos = getattr(task, "target_position", None)
+            if target_pos is not None:
+                self._nav_skill.start(target_position=target_pos)
+            else:
+                # No position to navigate to — go straight to mining.
+                log.debug(
+                    "MiningAgent: no target_position on task %s, "
+                    "skipping navigation",
+                    task.id[:8],
+                )
+                self._gather_phase = _GatherPhase.MINE
+                return self._gather_mine(task, blackboard, wq, ww, tick)
+
+        nav_status = self._nav_skill.status()
+
+        if nav_status in (SkillStatus.SUCCEEDED, SkillStatus.STUCK,
+                          SkillStatus.FAILED):
+            if nav_status == SkillStatus.STUCK:
+                log.debug(
+                    "MiningAgent: nav STUCK reaching patch — "
+                    "attempting mine from current position",
+                )
+            self._nav_skill.reset()
+            self._gather_phase = _GatherPhase.MINE
+            return self._gather_mine(task, blackboard, wq, ww, tick)
+
+        return self._nav_skill.tick(wq, ww, tick)
+
+    def _gather_mine(
+        self,
+        task: "Task",
+        blackboard: "Blackboard",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+    ) -> list[Action]:
+        """Run MineSkill to completion."""
         status = self._mine_skill.status()
 
         if status == SkillStatus.IDLE:
-            # activate() couldn't start the skill (missing params).
             return []
 
         if status.is_terminal and not self._gather_outcome_written:

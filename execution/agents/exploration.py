@@ -136,7 +136,7 @@ class ExplorationAgent(AgentProtocol):
         self._outcome_written = False
         self._current_uncharted_target = None
 
-        player_pos = wq.player_position()
+        player_pos = wq.player_position() if wq is not None else None
         self._home_position = getattr(task, "home_position", None) or player_pos
         self._frontier_position = getattr(task, "frontier_position", None)
 
@@ -158,7 +158,7 @@ class ExplorationAgent(AgentProtocol):
             category=EntryCategory.OBSERVATION,
             scope=EntryScope.TASK,
             owner_agent=self.AGENT_ID,
-            created_at=wq.tick,
+            created_at=task.created_at if wq is None else wq.tick,
             data={
                 "type":              "exploration_started",
                 "task_id":           task.id,
@@ -166,7 +166,7 @@ class ExplorationAgent(AgentProtocol):
                     {"x": self._frontier_position.x, "y": self._frontier_position.y}
                     if self._frontier_position else None
                 ),
-                "charted_chunks_at_start": wq.charted_chunks,
+                "charted_chunks_at_start": wq.charted_chunks if wq is not None else 0,
             },
         )
 
