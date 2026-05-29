@@ -282,12 +282,29 @@ class MiningAgent(AgentProtocol):
         """
         Called by the coordinator immediately after a task resolves.
 
-        Issues StopMining to halt any persistent Lua miner that was running
-        during this task. Without this, the player continues mining the last
-        target indefinitely after the task ends, blocking subsequent goals.
+        Issues StopMining whenever MineSkill is or was running — i.e. whenever
+        the Lua persistent miner may be active. This covers two cases:
+
+          1. _pending_stop is True: activate() set it to stop a *previous*
+             task's miner before this one started (pre-existing behaviour).
+
+          2. MineSkill is RUNNING or was recently running (task completed via
+             the goal-level evaluator before the skill reached a terminal state).
+             In this case _pending_stop is already False (cleared on first tick),
+             but the Lua miner is still active and must be halted.
+
+        Always safe to send StopMining redundantly — it is a no-op if nothing
+        is mining.
         """
-        if self._pending_stop:
-            self._pending_stop = False
+        self._pending_stop = False
+        if self._task_kind == _TaskKind.GATHER:
+            # Always issue StopMining for gather tasks. Two cases:
+            #   - MineSkill is still RUNNING: the goal-level evaluator fired
+            #     before the skill completed (e.g. inventory threshold met
+            #     mid-mine). _pending_stop was cleared on the first tick so
+            #     this is the only remaining signal to halt the Lua miner.
+            #   - MineSkill already SUCCEEDED: the miner stopped naturally,
+            #     but StopMining is a no-op and costs nothing to send.
             log.debug("MiningAgent: teardown — issuing StopMining")
             return [StopMining()]
         return []
