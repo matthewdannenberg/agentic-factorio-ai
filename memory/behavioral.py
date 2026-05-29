@@ -328,8 +328,8 @@ class SQLiteBehavioralMemory(BehavioralMemoryProtocol):
             """,
             (
                 label,
-                len(subgraph.all_nodes()),
-                len(subgraph.all_edges()),
+                len(subgraph.factory.all_nodes()),
+                len(subgraph.factory.all_edges()),
                 int(time.time()),
             ),
         )

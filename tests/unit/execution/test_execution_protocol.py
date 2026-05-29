@@ -18,8 +18,8 @@ from execution import (
     ExecutionStatus,
     StuckContext,
 )
-from planning import Task as Subtask, TaskStatus as SubtaskStatus
-from planning.tasks.task import TaskRecord as SubtaskRecord
+from planning import Task, TaskStatus
+from planning.tasks.task import TaskRecord
 
 
 # ---------------------------------------------------------------------------
@@ -34,30 +34,30 @@ def _make_goal(desc: str = "test goal"):
     )
 
 
-def _make_subtask(
+def _make_task(
     description: str = "do something",
     parent_goal_id: str = "goal-1",
-    parent_subtask_id: str | None = None,
-) -> Subtask:
-    return Subtask(
+    parent_task_id: str | None = None,
+) -> Task:
+    return Task(
         description=description,
         success_condition="True",
         failure_condition="False",
         parent_goal_id=parent_goal_id,
         created_at=0,
         derived_locally=True,
-        parent_subtask_id=parent_subtask_id,
+        parent_task_id=parent_task_id,
     )
 
 
-def _active_subtask(**kwargs) -> Subtask:
-    t = _make_subtask(**kwargs)
+def _active_task(**kwargs) -> Task:
+    t = _make_task(**kwargs)
     t.activate()
     return t
 
 
-def _make_record(subtask: Subtask, outcome="complete") -> SubtaskRecord:
-    return SubtaskRecord(subtask=subtask, outcome=outcome)
+def _make_record(task: Task, outcome="complete") -> TaskRecord:
+    return TaskRecord(task=task, outcome=outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ class TestExecutionResult(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestStuckContextGoalLevel(unittest.TestCase):
-    """Stuck at goal level — no subtasks derived yet."""
+    """Stuck at goal level — no tasks derived yet."""
 
     def setUp(self):
         self.goal = _make_goal("establish iron production")
@@ -160,18 +160,18 @@ class TestStuckContextWithChain(unittest.TestCase):
         self.goal = _make_goal("Goal1")
         gid = self.goal.id
 
-        task1 = _make_subtask("mine iron", parent_goal_id=gid)
+        task1 = _make_task("mine iron", parent_goal_id=gid)
         task1.activate(); task1.complete(tick=50)
 
-        self.task2 = _active_subtask(description="build smelter", parent_goal_id=gid)
+        self.task2 = _active_task(description="build smelter", parent_goal_id=gid)
 
-        taskA = _make_subtask("craft furnaces", parent_goal_id=gid,
-                               parent_subtask_id=self.task2.id)
+        taskA = _make_task("craft furnaces", parent_goal_id=gid,
+                               parent_task_id=self.task2.id)
         taskA.activate(); taskA.complete(tick=150)
 
-        self.task3 = _active_subtask(description="place furnaces",
+        self.task3 = _active_task(description="place furnaces",
                                      parent_goal_id=gid,
-                                     parent_subtask_id=self.task2.id)
+                                     parent_task_id=self.task2.id)
 
         self.ctx = StuckContext(
             goal=self.goal,
@@ -239,11 +239,11 @@ class TestExecutionLayerProtocol(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             proto.observe(wq=None)
 
-    def test_reset_accepts_seed_subtasks(self):
-        """reset() should accept the optional seed_subtasks parameter."""
+    def test_reset_accepts_seed_tasks(self):
+        """reset() should accept the optional seed_tasks parameter."""
         class ConcreteExecution(ExecutionLayerProtocol):
-            def reset(self, goal, wq, seed_subtasks=None):
-                self.last_seeds = seed_subtasks
+            def reset(self, goal, wq, seed_tasks=None):
+                self.last_seeds = seed_tasks
             def tick(self, goal, wq, ww, tick):
                 return ExecutionResult(actions=[], status=ExecutionStatus.WAITING)
             def progress(self, goal, wq): return 0.0
@@ -251,13 +251,13 @@ class TestExecutionLayerProtocol(unittest.TestCase):
 
         impl = ConcreteExecution()
         goal = _make_goal()
-        seed = [_make_subtask("injected task")]
-        impl.reset(goal=goal, wq=None, seed_subtasks=seed)
+        seed = [_make_task("injected task")]
+        impl.reset(goal=goal, wq=None, seed_tasks=seed)
         self.assertEqual(impl.last_seeds, seed)
 
     def test_concrete_subclass_satisfies_protocol(self):
         class ConcreteExecution(ExecutionLayerProtocol):
-            def reset(self, goal, wq, seed_subtasks=None): pass
+            def reset(self, goal, wq, seed_tasks=None): pass
             def tick(self, goal, wq, ww, tick):
                 return ExecutionResult(actions=[], status=ExecutionStatus.WAITING)
             def progress(self, goal, wq): return 0.5

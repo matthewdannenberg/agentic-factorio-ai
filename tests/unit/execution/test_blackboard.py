@@ -37,7 +37,7 @@ class TestBlackboardWrite(unittest.TestCase):
     def test_write_with_expiry(self):
         entry = self.bb.write(
             category=EntryCategory.RESERVATION,
-            scope=EntryScope.SUBTASK,
+            scope=EntryScope.TASK,
             owner_agent="spatial",
             created_at=50,
             data={},
@@ -74,9 +74,9 @@ class TestBlackboardRead(unittest.TestCase):
     def setUp(self):
         self.bb = Blackboard()
         self.bb.write(EntryCategory.OBSERVATION, EntryScope.GOAL,    "nav",  10, {"x": 1})
-        self.bb.write(EntryCategory.INTENTION,   EntryScope.SUBTASK, "prod", 20, {"x": 2})
+        self.bb.write(EntryCategory.INTENTION,   EntryScope.TASK, "prod", 20, {"x": 2})
         self.bb.write(EntryCategory.RESERVATION, EntryScope.GOAL,    "spatial", 30, {"x": 3})
-        self.bb.write(EntryCategory.OBSERVATION, EntryScope.SUBTASK, "nav",  40, {"x": 4})
+        self.bb.write(EntryCategory.OBSERVATION, EntryScope.TASK, "nav",  40, {"x": 4})
 
     def test_read_all(self):
         results = self.bb.read()
@@ -92,8 +92,8 @@ class TestBlackboardRead(unittest.TestCase):
         self.assertEqual(len(goal_entries), 2)
         self.assertTrue(all(e.scope == EntryScope.GOAL for e in goal_entries))
 
-    def test_filter_by_scope_subtask(self):
-        sub_entries = self.bb.read(scope=EntryScope.SUBTASK)
+    def test_filter_by_scope_TASK(self):
+        sub_entries = self.bb.read(scope=EntryScope.TASK)
         self.assertEqual(len(sub_entries), 2)
 
     def test_filter_by_owner(self):
@@ -126,18 +126,18 @@ class TestBlackboardClear(unittest.TestCase):
         self.bb = Blackboard()
         self.bb.write(EntryCategory.OBSERVATION, EntryScope.GOAL,    "a", 0, {})
         self.bb.write(EntryCategory.OBSERVATION, EntryScope.GOAL,    "b", 0, {})
-        self.bb.write(EntryCategory.INTENTION,   EntryScope.SUBTASK, "c", 0, {})
-        self.bb.write(EntryCategory.RESERVATION, EntryScope.SUBTASK, "d", 0, {})
+        self.bb.write(EntryCategory.INTENTION,   EntryScope.TASK, "c", 0, {})
+        self.bb.write(EntryCategory.RESERVATION, EntryScope.TASK, "d", 0, {})
 
-    def test_clear_subtask_scope_removes_only_subtask(self):
-        removed = self.bb.clear_scope(EntryScope.SUBTASK)
+    def test_clear_task_scope_removes_only_task(self):
+        removed = self.bb.clear_scope(EntryScope.TASK)
         self.assertEqual(removed, 2)
         remaining = self.bb.read()
         self.assertEqual(len(remaining), 2)
         self.assertTrue(all(e.scope == EntryScope.GOAL for e in remaining))
 
-    def test_goal_scoped_entries_survive_subtask_clear(self):
-        self.bb.clear_scope(EntryScope.SUBTASK)
+    def test_goal_scoped_entries_survive_task_clear(self):
+        self.bb.clear_scope(EntryScope.TASK)
         goal_entries = self.bb.read(scope=EntryScope.GOAL)
         self.assertEqual(len(goal_entries), 2)
 
@@ -207,7 +207,7 @@ class TestBlackboardSnapshot(unittest.TestCase):
 
     def test_snapshot_contains_all_live_entries(self):
         e1 = self.bb.write(EntryCategory.OBSERVATION, EntryScope.GOAL, "a", 10, {"k": "v"})
-        e2 = self.bb.write(EntryCategory.INTENTION,   EntryScope.SUBTASK, "b", 20, {"k": 2})
+        e2 = self.bb.write(EntryCategory.INTENTION,   EntryScope.TASK, "b", 20, {"k": 2})
         snap = self.bb.snapshot()
         self.assertIn(e1.id, snap)
         self.assertIn(e2.id, snap)

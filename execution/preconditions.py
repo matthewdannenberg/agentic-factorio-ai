@@ -358,8 +358,12 @@ def post_crafting_inventory(
         )
         if yield_per_run > 0:
             have = post.get(item, 0)
-            still_needed = max(0, count - have)
-            runs_needed = math.ceil(still_needed / yield_per_run)
+            # Consume existing output items first (they satisfy part of the
+            # target count and are no longer free in inventory).
+            consumed_from_stock = min(have, count)
+            post[item] = have - consumed_from_stock
+            still_needed = count - consumed_from_stock
+            runs_needed = math.ceil(still_needed / yield_per_run) if still_needed > 0 else 0
             for ingredient in recipe.ingredients:
                 if not ingredient.is_fluid:
                     cost = math.ceil(ingredient.amount * runs_needed)

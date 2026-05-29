@@ -1,9 +1,9 @@
 """
-tests/unit/agent/test_behavioral_memory.py
+tests/unit/execution/test_behavioral_memory.py
 
 Tests for agent/memory/behavioral.py
 
-Run with:  python -m pytest tests/unit/agent/test_behavioral_memory.py -v
+Run with:  python -m pytest tests/unit/execution/test_behavioral_memory.py -v
        or:  python -m unittest tests.unit.agent.test_behavioral_memory
 
 Uses :memory: SQLite databases so no files are written during testing.
@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import unittest
 
-from agent.memory.behavioral import (
+from memory.behavioral import (
     GoalOutcome,
     PerformanceStats,
     SQLiteBehavioralMemory,
     StrategyRecord,
 )
-from agent.self_model import SelfModel, SelfModelNode, NodeType, NodeStatus, BoundingBox
-from world.state import Position
+from world.model.self_model import SelfModel
+from world.model.layers.factory_graph import FactoryNode, NodeType, NodeStatus, EdgeType, ProcessType
+from world.model.types import BoundingBox
+from world import Position
 
 
 def _make_mem() -> SQLiteBehavioralMemory:
@@ -31,12 +33,14 @@ def _outcome(success: bool = True, reward: float = 1.0, ticks: int = 600) -> Goa
     return GoalOutcome(success=success, reward=reward, ticks_elapsed=ticks)
 
 
-def _node(label="test") -> SelfModelNode:
-    return SelfModelNode(
-        type=NodeType.PRODUCTION_LINE,
+def _node(label="test") -> FactoryNode:
+    return FactoryNode(
+        node_type=NodeType.PRODUCTION_LINE,
+        process_type=ProcessType.UNKNOWN,
         status=NodeStatus.ACTIVE,
-        bounding_box=BoundingBox(Position(0, 0), Position(10, 10)),
+        bounding_box=BoundingBox(top_left=Position(0, 0), bottom_right=Position(10, 10)),
         label=label,
+        design_capacity={},
         throughput={"iron-plate": 30.0},
         created_at=0,
     )
@@ -182,10 +186,9 @@ class TestSpatialPatternRecording(unittest.TestCase):
         sm = SelfModel()
         n1 = _node("iron prod")
         n2 = _node("belt run")
-        sm.add_node(n1)
-        sm.add_node(n2)
-        from agent.self_model import EdgeType
-        sm.add_edge(n1.id, n2.id, EdgeType.FEEDS_INTO)
+        sm.factory.add_node(n1)
+        sm.factory.add_node(n2)
+        sm.factory.add_edge(n1.id, n2.id, EdgeType.ITEM_FLOW)
         # Should not raise
         self.mem.record_spatial_pattern(sm, label="iron-belt-pattern")
 

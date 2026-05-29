@@ -1,5 +1,5 @@
 """
-tests/unit/agent/test_preconditions.py  (updated for Phase 6 corrections)
+tests/unit/execution/test_preconditions.py  (updated for Phase 6 corrections)
 
 Changes from original:
   - can_craft renamed to can_reach_count throughout
@@ -46,9 +46,9 @@ from world import (
     Inventory,
     InventorySlot,
     Position,
-    WorldState,
+    WorldQuery,
 )
-from world import WorldQuery
+from world.observable.state import WorldState
 
 
 # ---------------------------------------------------------------------------
@@ -1574,9 +1574,8 @@ class TestPostCraftingInventoryPreconditions(unittest.TestCase):
             {"iron-gear-wheel": [gear]},
             stack_sizes={"iron-gear-wheel": 100, "iron-plate": 100},
         )
+        from world import Inventory, InventorySlot, WorldQuery
         from world.observable.state import WorldState
-from world import Inventory, InventorySlot
-        from world import WorldQuery
         state = WorldState(tick=0)
         state.player.inventory = Inventory(slots=[
             InventorySlot(item="iron-plate", count=2)

@@ -1,16 +1,16 @@
 """
-tests/unit/agent/test_examiner.py
+tests/unit/examination/test_examiner.py
 
 Tests for agent/examiner/*.py
 
-Run with:  python tests/unit/agent/test_examiner.py
+Run with:  python tests/unit/examination/test_examiner.py
 """
 
 from __future__ import annotations
 
 import unittest
 
-from agent.examiner.audit_report import (
+from examination.audit_report import (
     AuditMode, AnomalySeverity,
     StarvedEntity, Anomaly, BoundingBox, BlueprintCandidate,
     DamagedEntityRecord, DestroyedEntityRecord, AuditReport,
