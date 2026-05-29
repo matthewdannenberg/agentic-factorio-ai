@@ -123,36 +123,43 @@ def test_byproduct_goal_stubs_to_stuck(run_goal):
 # Goals that STUCK due to missing params
 # ---------------------------------------------------------------------------
 
-def test_research_goal_stubs_to_stuck_without_params(run_goal):
+def test_research_goal_runs_stub_handler(run_goal):
     """
-    The research handler reads frame.params.get('tech', ''). With no params
-    (GoalQueueEntry has no params field), tech='' triggers the safe-fail path
-    and returns STUCK. The goal fails after max_stuck_retries.
+    The research handler is partially implemented: it skips the stub steps
+    (science production, lab count, logistics checks) and pushes a
+    set_research_queue task at step 4.
 
-    This also documents the Phase 10 gap: even if tech were provided, the
-    science production and lab checks are stubs.
+    The loop extracts {'tech': 'automation'} from the success_condition, so
+    the handler receives the tech name correctly. The set_research_queue task
+    routes to the crafting agent (placeholder — no research agent yet), which
+    logs an error about missing targets but does not crash.
+
+    The goal resolves in one of two ways:
+      - Immediately: automation is already unlocked → evaluator fires success
+      - Via failure_condition: the task silently no-ops, nothing researches,
+        the elapsed_ticks cap fires and the goal fails
+
+    Either resolution is acceptable. The test asserts only that the loop
+    does not crash and that the goal resolves within the time limit.
     """
     entry = GoalQueueEntry(
-        description="Research automation (STUCK: no tech param)",
+        description="Research automation (stub handler test)",
         goal_type="research",
         success_condition="tech_unlocked('automation')",
-        failure_condition="elapsed_ticks > 7200",
+        failure_condition="elapsed_ticks > 60",
     )
     stats, wq = run_goal(entry)
 
     resolved = stats.goals_completed + stats.goals_failed
     assert resolved == 1, (
-        f"Research goal did not resolve. Loop may be hanging. stats={stats}"
+        f"Research goal did not resolve within time limit. "
+        f"Loop may be hanging on the set_research_queue task. stats={stats}"
     )
-    # Accept completion if automation was already unlocked when evaluator ran.
     if stats.goals_completed == 1:
         assert wq.tech_unlocked("automation"), (
-            "Research goal completed but automation not unlocked — evaluator issue."
+            "Research goal completed but automation not unlocked — "
+            "success_condition evaluator inconsistency."
         )
-        return
-    assert stats.goals_failed >= 1, (
-        f"Expected goals_failed >= 1. stats={stats}"
-    )
 
 
 def test_prep_region_stubs_to_stuck_without_params(run_goal):

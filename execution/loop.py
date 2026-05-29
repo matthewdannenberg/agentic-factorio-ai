@@ -345,11 +345,17 @@ class FactorioLoop:
         self._stats.goals_attempted += 1
 
         # RuleBasedCoordinator.reset(goal_type, params, wq)
-        # Extract goal_type and params from the Goal object. GoalQueueEntry
-        # fields are surfaced on Goal via GoalQueue.next_goal() — goal.type
-        # is the coordinator handler key, goal.params carries the handler args.
+        # GoalQueueEntry has no params field, so goal.params is always absent.
+        # Coordinator handler params (item, count, target_chunks, tech) are
+        # extracted from the success_condition expression by
+        # _extract_coordinator_params(). If the Goal object ever gains a params
+        # attribute (Phase 11 LLM layer), getattr picks it up automatically.
         goal_type = getattr(goal, "type", getattr(goal, "goal_type", "noop"))
-        goal_params = getattr(goal, "params", {}) or {}
+        goal_params = (getattr(goal, "params", None) or
+                       self._extract_coordinator_params(
+                           goal_type,
+                           getattr(goal, "success_condition", "") or "",
+                       ))
         self._coordinator.reset(goal_type, goal_params, self._wq)
         log.info(
             "FactorioLoop: goal activated — %s [%s]",
@@ -431,6 +437,48 @@ class FactorioLoop:
             )
         except Exception:
             log.exception("FactorioLoop: failed to record outcome to behavioral memory")
+
+    def _extract_coordinator_params(
+        self, goal_type: str, success_condition: str
+    ) -> dict:
+        """
+        Derive coordinator handler params from goal_type and success_condition.
+
+        GoalQueueEntry has no params field. The coordinator handlers need
+        structured data (item name, count, target_chunks, tech name) that is
+        already implicit in the success_condition expression. This method
+        extracts it with lightweight regex rather than a full expression parser.
+
+        Extraction rules by goal type:
+          collection / acquire / crafting
+              inventory('ITEM') >= COUNT or new.inventory('ITEM') >= COUNT
+              -> {"item": ITEM, "count": COUNT}
+          exploration
+              (new.)charted_chunks >= N  -> {"target_chunks": N}
+          research
+              tech_unlocked('TECH')      -> {"tech": TECH}
+          All others
+              Returns {} so the coordinator's safe-fail path fires.
+        """
+        import re as _re
+        sc = success_condition or ""
+
+        if goal_type in ("collection", "acquire", "crafting"):
+            m = _re.search(r"inventory\(['\"]([^'\"]+)['\"]\)\s*>=\s*(\d+)", sc)
+            if m:
+                return {"item": m.group(1), "count": int(m.group(2))}
+
+        elif goal_type == "exploration":
+            m = _re.search(r"(?:new\.)?charted_chunks\s*>=\s*(\d+)", sc)
+            if m:
+                return {"target_chunks": int(m.group(1))}
+
+        elif goal_type == "research":
+            m = _re.search(r"tech_unlocked\(['\"]([^'\"]+)['\"]\)", sc)
+            if m:
+                return {"tech": m.group(1)}
+
+        return {}
 
     def _build_context(self) -> dict:
         """

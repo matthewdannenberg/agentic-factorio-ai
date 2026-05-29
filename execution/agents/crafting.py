@@ -110,7 +110,7 @@ class CraftingAgent(AgentProtocol):
             category=EntryCategory.OBSERVATION,
             scope=EntryScope.TASK,
             owner_agent=self.AGENT_ID,
-            created_at=wq.tick,
+            created_at=task.created_at if wq is None else wq.tick,
             data={
                 "type":    "crafting_started",
                 "task_id": task.id,

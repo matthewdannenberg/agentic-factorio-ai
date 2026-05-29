@@ -8,13 +8,17 @@ Verifies that the STUCK path through the system behaves correctly:
 
 STUCK behaviour by goal type (Phase 6)
 ----------------------------------------
-  production  — _handle_production immediately marks frame.failed and returns
-                STUCK. After max_stuck_retries the loop fails the goal.
+  production  — _handle_production marks frame.failed immediately (Phase 8
+                stub). After max_stuck_retries the loop fails the goal.
 
-  collection  — _handle_collection safe-fails with STUCK when the 'item' param
-                is absent (GoalQueueEntry has no params field, so frame.params
-                is always empty). The loop retries up to max_stuck_retries, then
-                marks the goal failed.
+  collection  — _handle_collection returns STUCK when no resource patches
+                are known for the requested item (wq.resources_of_type is
+                empty). The loop retries up to max_stuck_retries, then fails.
+
+Note: the loop now extracts coordinator params (item, count) from the
+success_condition expression, so collection goals work end-to-end when the
+resource is known — these tests deliberately use items unlikely to be in the
+resource map to exercise the STUCK path.
 
 Failure condition note
 -----------------------
@@ -67,20 +71,21 @@ def test_production_goal_fails_and_loop_continues(run_goals):
     )
 
 
-def test_collection_goal_without_params_goes_stuck(run_goal):
+def test_collection_with_no_known_patches_goes_stuck(run_goal):
     """
-    A collection goal with no coordinator params causes STUCK then failure.
+    A collection goal for an item with no known resource patches causes STUCK.
 
-    GoalQueueEntry has no params field, so frame.params is always an empty
-    dict. _handle_collection reads frame.params.get('item', '') which returns
-    '' and immediately marks frame.failed = True, returning STUCK. The loop
-    retries up to max_stuck_retries (3) then calls _on_goal_failed.
+    The loop extracts {"item": "uranium-ore", "count": 1} from the
+    success_condition and passes it to the coordinator. _handle_collection
+    then checks wq.resources_of_type('uranium-ore') — empty on a fresh spawn
+    — and returns STUCK. After max_stuck_retries the loop fails the goal.
 
-    The success_condition can only fire if uranium-ore happens to be in
-    inventory already (e.g. from a prior test run). That path is accepted.
+    Note: if uranium patches happen to be in the resource map from prior
+    exploration, the coordinator will attempt mining and the goal may complete
+    via the success_condition. That is a valid outcome and the test accepts it.
     """
     entry = GoalQueueEntry(
-        description="Collect uranium ore (STUCK: no item param)",
+        description="Collect uranium ore (unlikely to have known patches)",
         goal_type="collection",
         success_condition="inventory('uranium-ore') >= 1",
         failure_condition=_FAIL_30S,
