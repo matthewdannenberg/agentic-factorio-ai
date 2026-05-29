@@ -19,7 +19,7 @@ The tech tree was restructured in 2.x. In particular:
 """
 
 import pytest
-from llm.goal_source import GoalQueueEntry
+from planning import GoalQueueEntry
 
 
 _WARM_KB_GOAL = GoalQueueEntry(

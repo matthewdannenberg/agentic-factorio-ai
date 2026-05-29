@@ -10,18 +10,18 @@ here signals a KB/bridge problem rather than an agent problem.
 """
 
 import pytest
-from llm.goal_source import GoalQueueEntry
+from planning import GoalQueueEntry
 
 
-# A goal that succeeds on the very first tick — all we need is for the loop
-# to run once so that kb._query_fn is confirmed live. The KB queries in each
-# test (ensure_recipe, ensure_tech) go directly to Factorio via query_fn and
-# don't need any in-game action to have occurred first.
+# A single-tick exploration goal — used only to warm the RCON connection
+# and confirm that the loop runs at least once. The KB queries in each
+# test (ensure_recipe, ensure_tech) go directly to Factorio via query_fn
+# and don't need any in-game action to have occurred first.
 _WARM_KB_GOAL = GoalQueueEntry(
     description="Warm KB connection",
-    success_condition="tick >= 0",
-    failure_condition="tick > 600",
     goal_type="exploration",
+    success_condition="charted_chunks >= 1",
+    failure_condition="elapsed_ticks > 600",
 )
 
 

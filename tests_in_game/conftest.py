@@ -169,6 +169,7 @@ def rcon(rcon_client):
 class RunResult:
     stats: LoopStats
     wq: WorldQuery
+    sm: SelfModel               # self-model state at end of run
     goals_attempted: list[str]  # entry.description for each goal in the run
     final_tick: int             # wq.tick at end of run
     kb_summary: dict            # kb.summary() at end of run
@@ -355,6 +356,7 @@ def _execute_goals(
     return RunResult(
         stats=stats,
         wq=final_wq,
+        sm=sm,
         goals_attempted=[e.description for e in entries],
         final_tick=final_wq.tick,
         kb_summary=kb.summary(),
