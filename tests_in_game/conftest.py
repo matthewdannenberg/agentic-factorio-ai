@@ -11,8 +11,8 @@ Session structure
 One RCON connection is opened for the whole test session and closed at the
 end. The KnowledgeBase is shared across all tests (it accumulates entity and
 recipe knowledge as tests run, matching production behaviour). Everything else
-— Blackboard, SubtaskLedger, SelfModel, BehavioralMemory — is freshly
-constructed for each goal run so tests are isolated from each other.
+— Blackboard, SelfModel, BehavioralMemory — is freshly constructed for each
+goal run so tests are isolated from each other.
 
 Skipping without a game
 -----------------------
@@ -24,9 +24,10 @@ Usage in a test file
     def test_something(run_goal):
         entry = GoalQueueEntry(
             description="Collect 10 iron ore",
-            success_condition="inventory('iron-ore') >= 10",
-            failure_condition="tick > 3600",
             goal_type="collection",
+            params={"item": "iron-ore", "count": 10},
+            success_condition="inventory('iron-ore') >= 10",
+            failure_condition="elapsed_ticks > 18000",
         )
         # Tuple unpacking (backwards-compatible with all existing tests):
         stats, wq = run_goal(entry)
@@ -42,6 +43,20 @@ Usage in a test file
         # between them except for the KnowledgeBase.
         stats, wq = run_goals([entry_a, entry_b])
         assert stats.goals_completed == 2
+
+GoalQueueEntry fields
+---------------------
+    description       : str  — human-readable label for logs
+    goal_type         : str  — maps to coordinator handler (e.g. "collection",
+                               "exploration", "clear_region", "crafting")
+    params            : dict — coordinator-level goal parameters (e.g.
+                               {"item": "iron-ore", "count": 5} for collection,
+                               {"bbox": ..., "clear_mode": ...} for clear_region)
+    success_condition : str  — Python expression evaluated by RewardEvaluator
+    failure_condition : str  — Python expression evaluated by RewardEvaluator
+
+The loop calls coordinator.reset(entry.goal_type, entry.params, wq), so
+params must contain whatever the coordinator handler reads from frame.params.
 """
 
 from __future__ import annotations
@@ -55,24 +70,27 @@ from typing import Iterator
 import pytest
 
 import config
-from agent.blackboard import Blackboard
-from agent.loop import FactorioLoop, LoopConfig, LoopStats
-from agent.memory.behavioral import SQLiteBehavioralMemory
-from agent.network.agents.mining import MiningAgent
-from agent.network.agents.navigation import NavigationAgent
-from agent.network.coordinator import RuleBasedCoordinator
-from agent.network.registry import AgentRegistry
-from agent.self_model import SelfModel
-from agent.subtask import SubtaskLedger
-from bridge.action_executor import ActionExecutor
-from bridge.prototype_query import make_prototype_query_fn
-from bridge.rcon_client import RconClient
-from bridge.world_poller import WorldPoller
-from bridge.state_parser import StateParser
-from llm.goal_source import GoalQueue, GoalQueueEntry
-from planning.reward_evaluator import RewardEvaluator
-from world.knowledge import KnowledgeBase
-from world.query import WorldQuery
+from memory.behavioral import SQLiteBehavioralMemory
+
+from execution.blackboard import Blackboard
+from execution.loop import FactorioLoop, LoopConfig, LoopStats
+from execution.agents.mining import MiningAgent
+from execution.agents.navigation import NavigationAgent
+from execution.agents.crafting import CraftingAgent
+from execution.agents.exploration import ExplorationAgent
+from execution.coordinator.coordinator import RuleBasedCoordinator
+from execution.coordinator.registry import AgentRegistry
+
+from planning import (
+    GoalQueue, GoalQueueEntry, RewardEvaluator
+)
+from bridge import (
+    ActionExecutor, make_prototype_query_fn, RconClient,
+    StateParser, WorldPoller
+)
+from world import (
+    KnowledgeBase, SelfModel, WorldQuery
+)
 
 log = logging.getLogger(__name__)
 
@@ -201,8 +219,8 @@ def run_goal(rcon_client, knowledge_base):
         result = run_goal(entry)
         print(result.final_tick, result.kb_summary)
 
-    Each call gets a fresh Blackboard, SubtaskLedger, SelfModel, and
-    BehavioralMemory — only the KnowledgeBase persists across calls.
+    Each call gets a fresh Blackboard, SelfModel, and BehavioralMemory —
+    only the KnowledgeBase persists across calls.
 
     The LoopConfig sets shutdown_on_empty_queue=True so the loop exits as
     soon as the single goal resolves (success or failure).
@@ -245,27 +263,28 @@ def _execute_goals(
     backwards compatibility with existing tests.
     """
     # Fresh per-run components.
-    from agent.network.agents.crafting import CraftingAgent
-    nav_agent   = NavigationAgent()
-    mine_agent  = MiningAgent()
-    craft_agent = CraftingAgent()
+    nav_agent    = NavigationAgent()
+    mine_agent   = MiningAgent()
+    craft_agent  = CraftingAgent()
+    explore_agent = ExplorationAgent()
 
     registry = AgentRegistry()
     registry.register(nav_agent)
     registry.register(mine_agent)
     registry.register(craft_agent)
+    registry.register(explore_agent)
 
     blackboard = Blackboard()
-    ledger     = SubtaskLedger()
     sm         = SelfModel()
     mem        = SQLiteBehavioralMemory(db_path=":memory:")
 
+    # RuleBasedCoordinator(registry, kb, blackboard=None)
+    # The coordinator owns its own Blackboard if none is supplied, but we
+    # pass one explicitly so tests can inspect it if needed.
     coordinator = RuleBasedCoordinator(
         registry=registry,
-        blackboard=blackboard,
-        ledger=ledger,
-        self_model=sm,
         kb=kb,
+        blackboard=blackboard,
     )
 
     queue     = GoalQueue(entries)

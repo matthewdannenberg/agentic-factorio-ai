@@ -12,14 +12,15 @@ Four timescales
 Per-tick (every TICK_INTERVAL game ticks):
   1. Poll Factorio → parse WorldState snapshot → integrate into live state
   2. Evaluate active goal conditions via RewardEvaluator
-  3. coordinator.tick() → ExecutionResult
-  4. Dispatch actions via ActionExecutor
-  5. Handle ExecutionStatus (PROGRESSING, WAITING, STUCK, COMPLETE)
+  3. coordinator.tick(wq, ww, tick) → (CoordinatorStatus, list[Action])
+  4. Drain and apply self-model patches from coordinator.drain_patches()
+  5. Dispatch actions via ActionExecutor
+  6. Handle CoordinatorStatus (PROGRESSING, WAITING, STUCK, COMPLETE)
 
 Per-goal:
-  - On goal start: coordinator.reset(), activate agents
+  - On goal start: coordinator.reset(goal_type, params, wq)
   - On goal complete/fail: record outcome to behavioral memory, request next goal
-  - On STUCK: pass StuckContext to GoalSource.handle_stuck(), re-inject seeds
+  - On STUCK: notify GoalSource; fail goal after max_stuck_retries
 
 Per-run:
   - On startup: load KB, behavioral memory, construct all components
@@ -42,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 import config
-from execution.protocol import ExecutionStatus
+from execution.coordinator.coordinator import CoordinatorStatus
 from planning import Goal, GoalStatus
 from planning import RewardEvaluator
 from world.observable.state import WorldState
@@ -51,7 +52,7 @@ from world import WorldWriter
 
 if TYPE_CHECKING:
     from memory.behavioral import BehavioralMemoryProtocol
-    from execution.coordinator.coordinator import CoordinatorProtocol
+    from execution.coordinator.coordinator import RuleBasedCoordinator
     from world import SelfModel
     from bridge import ActionExecutor
     from bridge import RconClient
@@ -114,7 +115,7 @@ class FactorioLoop:
     parser          : StateParser for converting raw RCON output to WorldState.
     poller          : WorldPoller for sending fa.get_state and returning JSON.
     executor        : ActionExecutor for dispatching Action objects to Factorio.
-    coordinator     : CoordinatorProtocol implementation.
+    coordinator     : RuleBasedCoordinator implementation.
     goal_source     : GoalSource implementation (GoalQueue or real LLM).
     behavioral_mem  : BehavioralMemoryProtocol for recording outcomes.
     self_model      : SelfModel — passed to coordinator; starts empty each run.
@@ -128,7 +129,7 @@ class FactorioLoop:
         parser: "StateParser",
         poller: "WorldPoller",
         executor: "ActionExecutor",
-        coordinator: "CoordinatorProtocol",
+        coordinator: "RuleBasedCoordinator",
         goal_source: "GoalSource",
         behavioral_mem: "BehavioralMemoryProtocol",
         self_model: "SelfModel",
@@ -257,10 +258,15 @@ class FactorioLoop:
             return
 
         # 4. Tick coordinator.
-        exec_result = self._coordinator.tick(goal, self._wq, self._ww, tick)
+        # RuleBasedCoordinator.tick(wq, ww, tick) -> (CoordinatorStatus, list[Action])
+        coord_status, actions = self._coordinator.tick(self._wq, self._ww, tick)
 
-        # 5. Dispatch actions.
-        for action in exec_result.actions:
+        # 5. Drain and apply self-model patches produced by agents this tick.
+        for patch in self._coordinator.drain_patches():
+            self._sm.apply(patch)
+
+        # 6. Dispatch actions.
+        for action in actions:
             try:
                 self._executor.execute(action)
             except Exception:
@@ -268,11 +274,15 @@ class FactorioLoop:
                     "FactorioLoop: action executor raised on %s", action.kind
                 )
 
-        # 6. Handle execution status.
-        if exec_result.status == ExecutionStatus.STUCK:
-            self._on_stuck(goal, exec_result.stuck_context, tick)
+        # 7. Handle coordinator status.
+        if coord_status == CoordinatorStatus.COMPLETE:
+            # The coordinator finished the goal internally (e.g. clear_region
+            # with empty success_condition). Treat as goal complete.
+            self._on_goal_complete(goal, 0.0, tick)
+        elif coord_status == CoordinatorStatus.STUCK:
+            self._on_stuck(goal, None, tick)
 
-        # 7. Sleep until next poll.
+        # 8. Sleep until next poll.
         time.sleep(self._cfg.tick_interval / 60.0)
 
     def _snapshot_world_query(self) -> "WorldQuery":
@@ -334,11 +344,16 @@ class FactorioLoop:
         self._stuck_count = 0
         self._stats.goals_attempted += 1
 
-        self._coordinator.reset(goal, self._wq)
-        self._coordinator.set_start_snapshot(self._goal_start_snapshot)
+        # RuleBasedCoordinator.reset(goal_type, params, wq)
+        # Extract goal_type and params from the Goal object. GoalQueueEntry
+        # fields are surfaced on Goal via GoalQueue.next_goal() — goal.type
+        # is the coordinator handler key, goal.params carries the handler args.
+        goal_type = getattr(goal, "type", getattr(goal, "goal_type", "noop"))
+        goal_params = getattr(goal, "params", {}) or {}
+        self._coordinator.reset(goal_type, goal_params, self._wq)
         log.info(
             "FactorioLoop: goal activated — %s [%s]",
-            goal.description, getattr(goal, "type", "?"),
+            goal.description, goal_type,
         )
 
     def _on_goal_complete(self, goal: Goal, reward: float, tick: int) -> None:
@@ -369,10 +384,10 @@ class FactorioLoop:
         """
         Handle STUCK from the execution network.
 
-        Passes the StuckContext to the GoalSource. If it returns seed
-        subtasks, reset the coordinator with them. If it returns [] (GoalQueue
-        stub), increment the stuck counter and let the failure condition
-        handle it naturally.
+        Notifies the GoalSource (no-op for GoalQueue; Phase 11 will add LLM
+        escalation here). Increments the stuck counter; when max_stuck_retries
+        is reached the goal is failed so the loop advances to the next one.
+        stuck_context is accepted for future use but currently unused.
         """
         self._stats.stuck_events += 1
         self._stuck_count += 1
@@ -389,16 +404,9 @@ class FactorioLoop:
             ),
         )
 
-        seed_subtasks = self._goal_source.handle_stuck(stuck_context)
+        self._goal_source.handle_stuck(stuck_context)
 
-        if seed_subtasks:
-            log.info(
-                "FactorioLoop: GoalSource provided %d seed subtasks — resetting coordinator",
-                len(seed_subtasks),
-            )
-            self._coordinator.reset(goal, self._wq, seed_subtasks=seed_subtasks)
-            self._coordinator.set_start_snapshot(self._goal_start_snapshot)
-        elif self._stuck_count >= self._cfg.max_stuck_retries:
+        if self._stuck_count >= self._cfg.max_stuck_retries:
             log.warning(
                 "FactorioLoop: max stuck retries reached — failing goal %s",
                 goal.id[:8],
