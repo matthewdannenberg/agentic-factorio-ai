@@ -387,7 +387,8 @@ class FactorioLoop:
         Notifies the GoalSource (no-op for GoalQueue; Phase 11 will add LLM
         escalation here). Increments the stuck counter; when max_stuck_retries
         is reached the goal is failed so the loop advances to the next one.
-        stuck_context is accepted for future use but currently unused.
+        stuck_context may be None (coordinator-level STUCK with no task
+        context); handle_stuck is only called when a real context is present.
         """
         self._stats.stuck_events += 1
         self._stuck_count += 1
@@ -404,7 +405,8 @@ class FactorioLoop:
             ),
         )
 
-        self._goal_source.handle_stuck(stuck_context)
+        if stuck_context is not None:
+            self._goal_source.handle_stuck(stuck_context)
 
         if self._stuck_count >= self._cfg.max_stuck_retries:
             log.warning(

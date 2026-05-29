@@ -223,6 +223,10 @@ class RuleBasedCoordinator:
         self._active_task: Optional["Task"] = None
         self._active_agent: Optional["AgentProtocol"] = None
         self._pending_patches: list[SelfModelPatch] = []
+        # Set when the top-level goal fails internally (frame.failed on the
+        # only remaining frame). Prevents subsequent ticks from returning COMPLETE
+        # (empty stack) before the loop's stuck-retry mechanism fails the goal.
+        self._top_level_failed: bool = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -244,6 +248,7 @@ class RuleBasedCoordinator:
         self._active_task = None
         self._active_agent = None
         self._pending_patches.clear()
+        self._top_level_failed = False
         self._bb.clear_all()
 
         self._goal_stack.append(GoalFrame(goal_type=goal_type, params=params))
@@ -264,6 +269,8 @@ class RuleBasedCoordinator:
         task success/failure. Otherwise, runs the top goal handler.
         """
         if not self._goal_stack:
+            if self._top_level_failed:
+                return CoordinatorStatus.STUCK, []
             return CoordinatorStatus.COMPLETE, []
 
         # --- Tick active task ---
@@ -326,11 +333,16 @@ class RuleBasedCoordinator:
                         self._goal_stack[-1].goal_type,
                     )
                 else:
+                    # Top-level goal failed — set flag so subsequent ticks
+                    # continue returning STUCK until the loop resets us.
+                    self._top_level_failed = True
                     return CoordinatorStatus.STUCK, []
                 continue
             break
 
         if not self._goal_stack:
+            if self._top_level_failed:
+                return CoordinatorStatus.STUCK, []
             return CoordinatorStatus.COMPLETE, []
 
         # --- Run top goal handler ---
@@ -408,8 +420,13 @@ class RuleBasedCoordinator:
           If inventory ≥ count → complete.
           Else → back to step 0 (re-derive, patch may have shifted).
         """
-        item  = frame.params["item"]
-        count = frame.params["count"]
+        item  = frame.params.get("item", "")
+        count = frame.params.get("count", 0)
+
+        if not item:
+            log.warning("Collection goal missing 'item' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         # Already have enough.
         if wq.inventory_count(item) >= count:
@@ -498,8 +515,13 @@ class RuleBasedCoordinator:
              → Production sub-goal.
           d) Else → STUCK.
         """
-        item  = frame.params["item"]
-        count = frame.params["count"]
+        item  = frame.params.get("item", "")
+        count = frame.params.get("count", 0)
+
+        if not item:
+            log.warning("Acquire goal missing 'item' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         if wq.inventory_count(item) >= count:
             frame.completed = True
@@ -601,9 +623,14 @@ class RuleBasedCoordinator:
           If inventory ≥ count → complete.
           Else → back to step 0.
         """
-        item   = frame.params["item"]
+        item   = frame.params.get("item", "")
         recipe = frame.params.get("recipe", item)
-        count  = frame.params["count"]
+        count  = frame.params.get("count", 0)
+
+        if not item:
+            log.warning("Crafting goal missing 'item' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         if wq.inventory_count(item) >= count:
             frame.completed = True
@@ -735,8 +762,13 @@ class RuleBasedCoordinator:
         Step 1 — Push clear Task.
         Step 2 — Verify region empty (no natural_objects in bbox) → complete.
         """
-        bbox       = frame.params["bbox"]
+        bbox       = frame.params.get("bbox")
         clear_mode = frame.params.get("clear_mode", "clear_natural")
+
+        if bbox is None:
+            log.warning("Clear region goal missing 'bbox' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
             # Check for undestroyable objects.
@@ -840,7 +872,12 @@ class RuleBasedCoordinator:
 
         Step 3 — Clear natural objects → GOAL_CLEAR_REGION sub-goal.
         """
-        bbox = frame.params["bbox"]
+        bbox = frame.params.get("bbox")
+
+        if bbox is None:
+            log.warning("Prep region goal missing 'bbox' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
             if _intersects_major_factory(bbox, wq):
@@ -991,7 +1028,7 @@ class RuleBasedCoordinator:
         STUB NOTE: All steps are stubs pending Phase 8 and the factory
         self-model (Phase 10 examination layer).
         """
-        item         = frame.params["item"]
+        item         = frame.params.get("item", "")
         rate_per_min = frame.params.get("rate_per_min", 1.0)
 
         log.warning(
@@ -1110,7 +1147,12 @@ class RuleBasedCoordinator:
         STUB NOTE: Steps 1–3 require Phase 9/10. Step 4 (queue the research)
         is implementable now.
         """
-        tech = frame.params["tech"]
+        tech = frame.params.get("tech", "")
+
+        if not tech:
+            log.warning("Research goal missing 'tech' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
             if wq.tech_unlocked(tech):
