@@ -1351,15 +1351,19 @@ class RuleBasedCoordinator:
             log.warning("Task failed: %s", task.description)
             return TaskOutcome.FAILED, []
 
-        # Check agent skill status via observe().
+        # Tick the agent first so it can handle STUCK internally (e.g.
+        # ExplorationAgent switches from APPROACH to SCAN when NavigateSkill
+        # stalls). Only then inspect skill status — otherwise the coordinator
+        # would declare TaskOutcome.STUCK before the agent's recovery logic runs.
+        actions = agent.tick(task, self._bb, wq, ww, tick, self._kb)
+
+        # Check agent skill status via observe() after ticking.
         obs = agent.observe(task, self._bb, wq, self._kb)
         skill_status = obs.get("skill_status") or obs.get("navigate_status")
         if skill_status == SkillStatus.STUCK.name:
             log.warning("Agent STUCK on task: %s", task.description)
-            return TaskOutcome.STUCK, []
+            return TaskOutcome.STUCK, actions
 
-        # Tick the agent.
-        actions = agent.tick(task, self._bb, wq, ww, tick, self._kb)
         return TaskOutcome.RUNNING, actions
 
     def _eval(self, condition: str, wq: "WorldQuery", tick: int) -> bool:
@@ -1440,24 +1444,35 @@ def _missing_ingredients(
     return missing
 
 
+_FRONTIER_CANDIDATE_POOL = 10   # draw randomly from this many nearest frontiers
+
 def _nearest_frontier(wq: "WorldQuery") -> Optional[Position]:
     """
-    Return the tile-space centre of the nearest uncharted chunk, or None.
+    Return the tile-space centre of a randomly selected nearby uncharted chunk.
 
-    Reads wq.nearby_uncharted_chunks if available, falling back to a
-    simple outward search pattern from the player's position.
+    Rather than always picking the single nearest frontier (which causes the
+    coordinator to retry the same unreachable point after a navigation STUCK),
+    we gather the _FRONTIER_CANDIDATE_POOL nearest candidates and pick one
+    uniformly at random. This means a second attempt will usually target a
+    different chunk, breaking the deterministic failure loop.
+
+    Reads wq.nearby_uncharted_chunks if available (PROXIMAL, scan-radius
+    limited), falling back to a distance-based outward push when empty.
     """
+    import random as _random
     nearby = getattr(wq, "nearby_uncharted_chunks", [])
     if nearby:
         player = wq.player_position()
-        best   = min(
+        # Sort by distance, take up to _FRONTIER_CANDIDATE_POOL nearest.
+        sorted_chunks = sorted(
             nearby,
             key=lambda c: math.hypot(
                 c.cx * 32 + 16 - player.x,
                 c.cy * 32 + 16 - player.y,
             ),
         )
-        return Position(x=best.cx * 32 + 16.0, y=best.cy * 32 + 16.0)
+        candidate = _random.choice(sorted_chunks[:_FRONTIER_CANDIDATE_POOL])
+        return Position(x=candidate.cx * 32 + 16.0, y=candidate.cy * 32 + 16.0)
 
     # Fallback: push outward from current position in a simple spiral.
     pos    = wq.player_position()
