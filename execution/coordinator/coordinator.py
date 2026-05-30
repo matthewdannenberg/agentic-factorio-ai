@@ -717,12 +717,9 @@ class RuleBasedCoordinator:
 
         params: {target_chunks}
 
-        Decision tree
-        -------------
-        Check if charted_chunks has reached the target each step.
-        Push an explore_region Task toward the nearest frontier.
-        When the task returns needs_frontier, push a new task toward the
-        next frontier. Repeat until target is reached.
+        The ExplorationAgent owns all frontier selection and navigation
+        internally. The coordinator pushes a single explore_region task and
+        waits — the task's success_condition drives completion.
         """
         target = frame.params.get("target_chunks", 0)
         start  = frame.context.setdefault("start_chunks", wq.charted_chunks)
@@ -731,40 +728,18 @@ class RuleBasedCoordinator:
             frame.completed = True
             return CoordinatorStatus.PROGRESSING, []
 
-        if frame.step == 0 or frame.context.get("needs_frontier"):
-            frame.context["needs_frontier"] = False
-
-            frontier = _nearest_frontier(wq)
-            if frontier is None:
-                # No frontier — surrounded on all sides. Goal complete by
-                # default if charted_chunks is non-zero, else stuck.
-                if wq.charted_chunks > start:
-                    frame.completed = True
-                else:
-                    log.warning("Explore: no frontier found — STUCK")
-                    frame.failed = True
-                return CoordinatorStatus.PROGRESSING, []
-
+        if frame.step == 0:
             self._push_task(
-                task_type   = "explore_region",
-                description = (
-                    f"Explore toward frontier at {frontier}"
-                ),
-                agent_hint  = "exploration",
-                tick        = tick,
-                frontier_position = frontier,
-                success_condition = (
-                    f"charted_chunks >= {start + target}"
-                ),
+                task_type         = "explore_region",
+                description       = f"Explore {target} new chunks",
+                agent_hint        = "exploration",
+                tick              = tick,
+                success_condition = f"charted_chunks >= {start + target}",
             )
+            frame.step = 1
             return CoordinatorStatus.PROGRESSING, []
 
-        # Check for needs_frontier signal from exploration agent.
-        obs = self._bb.read(category=EntryCategory.OBSERVATION)
-        if any(e.data.get("type") == "exploration_needs_frontier" for e in obs):
-            frame.context["needs_frontier"] = True
-            frame.step = 0
-
+        # Task is running — wait for it to complete via success_condition.
         return CoordinatorStatus.WAITING, []
 
     # ── Clear Region ──────────────────────────────────────────────────────
@@ -1442,51 +1417,6 @@ def _missing_ingredients(
         if have < needed:
             missing[ing.item] = needed - have
     return missing
-
-
-_FRONTIER_CANDIDATE_POOL = 10   # draw randomly from this many nearest frontiers
-
-def _nearest_frontier(wq: "WorldQuery") -> Optional[Position]:
-    """
-    Return the tile-space centre of a randomly selected frontier chunk.
-
-    Primary source: wq.nearby_uncharted_chunks (PROXIMAL, scan-radius
-    limited, refreshed every poll). From the nearest
-    _FRONTIER_CANDIDATE_POOL candidates, one is chosen at random so that a
-    navigation STUCK on one attempt targets a different chunk on the next.
-
-    Secondary source: wq.chunk_map.frontiers() — the accumulated charted-
-    chunk set in WorldState. Used when nearby_uncharted_chunks is empty but
-    the session has charted some chunks with known frontier edges.
-
-    Fallback: push outward from current position when neither source has data.
-    """
-    import random as _random
-    nearby = getattr(wq, "nearby_uncharted_chunks", [])
-    if nearby:
-        player = wq.player_position()
-        sorted_chunks = sorted(
-            nearby,
-            key=lambda c: math.hypot(
-                c.cx * 32 + 16 - player.x,
-                c.cy * 32 + 16 - player.y,
-            ),
-        )
-        candidate = _random.choice(sorted_chunks[:_FRONTIER_CANDIDATE_POOL])
-        return Position(x=candidate.cx * 32 + 16.0, y=candidate.cy * 32 + 16.0)
-
-    # Secondary: use the accumulated chunk_map from WorldState.
-    chunk_map = wq.chunk_map
-    if chunk_map:
-        player = wq.player_position()
-        frontier_pos = chunk_map.nearest_frontier_position(player)
-        if frontier_pos is not None:
-            return frontier_pos
-
-    # Fallback: push outward from current position.
-    pos    = wq.player_position()
-    radius = max(64.0, math.sqrt(wq.charted_chunks) * 32.0)
-    return Position(x=pos.x + radius, y=pos.y)
 
 
 def _undestroyable_in_bbox(bbox, wq: "WorldQuery", kb) -> list:
