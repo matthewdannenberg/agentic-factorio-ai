@@ -45,7 +45,7 @@ from typing import Optional, TYPE_CHECKING
 import config
 from execution.coordinator.coordinator import CoordinatorStatus
 from planning import Goal, GoalStatus
-from planning import RewardEvaluator
+from planning import RewardEvaluator, params_from_condition
 from world.observable.state import WorldState
 from world import WorldQuery
 from world import WorldWriter
@@ -468,42 +468,12 @@ class FactorioLoop:
         """
         Derive coordinator handler params from goal_type and success_condition.
 
-        GoalQueueEntry has no params field. The coordinator handlers need
-        structured data (item name, count, target_chunks, tech name) that is
-        already implicit in the success_condition expression. This method
-        extracts it with lightweight regex rather than a full expression parser.
-
-        Extraction rules by goal type:
-          collection / acquire / crafting
-              inventory('ITEM') >= COUNT or new.inventory('ITEM') >= COUNT
-              -> {"item": ITEM, "count": COUNT}
-          exploration
-              (new.)charted_chunks >= N  -> {"target_chunks": N}
-          research
-              tech_unlocked('TECH')      -> {"tech": TECH}
-          All others
-              Returns {} so the coordinator's safe-fail path fires.
+        Delegates to planning.evaluation.condition_parser.params_from_condition,
+        which is the single authoritative source for this extraction logic.
+        See that module for the full pattern table and extension guide.
         """
-        import re as _re
-        sc = success_condition or ""
-
-        if goal_type in ("collection", "acquire", "crafting"):
-            m = _re.search(r"inventory\(['\"]([^'\"]+)['\"]\)\s*>=\s*(\d+)", sc)
-            if m:
-                return {"item": m.group(1), "count": int(m.group(2))}
-
-        elif goal_type == "exploration":
-            m = _re.search(r"(?:new\.)?charted_chunks\s*>=\s*(\d+)", sc)
-            if m:
-                return {"target_chunks": int(m.group(1))}
-
-        elif goal_type == "research":
-            m = _re.search(r"tech_unlocked\(['\"]([^'\"]+)['\"]\)", sc)
-            if m:
-                return {"tech": m.group(1)}
-
-        return {}
-
+        return params_from_condition(goal_type, success_condition)
+    
     def _build_context(self) -> dict:
         """
         Build a lightweight world-state summary for the GoalSource.

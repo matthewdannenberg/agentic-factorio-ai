@@ -455,6 +455,11 @@ class RuleBasedCoordinator:
             frame.failed = True
             return CoordinatorStatus.STUCK, []
 
+        if not count:
+            log.warning("Collection goal missing or zero 'count' param — STUCK")
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
+
         # Already have enough.
         if wq.inventory_count(item) >= count:
             log.info("Collection goal already satisfied: %dx %s", count, item)

@@ -36,6 +36,7 @@ from planning.evaluation.condition_namespace import (
     safe_builtins,
     BLOCKED_NAMES,
 )
+from planning.evaluation.condition_parser import params_from_condition
 from planning.evaluation.resource_allocator import ResourceAllocator
 
 __all__ = [
@@ -49,5 +50,5 @@ __all__ = [
     # Evaluation
     "RewardEvaluator", "EvaluationResult",
     "build_core_namespace", "safe_builtins", "BLOCKED_NAMES",
-    "ResourceAllocator",
+    params_from_condition, "ResourceAllocator",
 ]
