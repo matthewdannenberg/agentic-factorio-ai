@@ -376,11 +376,13 @@ class FactorioLoop:
         # attribute (Phase 11 LLM layer), getattr picks it up automatically.
         goal_type = getattr(goal, "type", getattr(goal, "goal_type", "noop"))
         goal_params = (getattr(goal, "params", None) or
-                       self._extract_coordinator_params(
+                       params_from_condition(
                            goal_type,
                            getattr(goal, "success_condition", "") or "",
                        ))
-        self._coordinator.reset(goal_type, goal_params, self._wq)
+        goal_success_cond = getattr(goal, "success_condition", "") or ""
+        self._coordinator.reset(goal_type, goal_params, self._wq,
+                                success_condition=goal_success_cond)
         log.info(
             "FactorioLoop: goal activated — %s [%s]",
             goal.description, goal_type,
@@ -462,18 +464,6 @@ class FactorioLoop:
         except Exception:
             log.exception("FactorioLoop: failed to record outcome to behavioral memory")
 
-    def _extract_coordinator_params(
-        self, goal_type: str, success_condition: str
-    ) -> dict:
-        """
-        Derive coordinator handler params from goal_type and success_condition.
-
-        Delegates to planning.evaluation.condition_parser.params_from_condition,
-        which is the single authoritative source for this extraction logic.
-        See that module for the full pattern table and extension guide.
-        """
-        return params_from_condition(goal_type, success_condition)
-    
     def _build_context(self) -> dict:
         """
         Build a lightweight world-state summary for the GoalSource.

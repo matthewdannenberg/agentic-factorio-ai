@@ -145,6 +145,9 @@ class GoalFrame:
     completed: bool = False
     failed: bool = False
     context: dict = field(default_factory=dict)
+    evaluator_condition: str = ""   # goal success_condition; non-empty means
+                                    # the RewardEvaluator owns completion —
+                                    # coordinator must not set frame.completed
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +259,21 @@ class RuleBasedCoordinator:
         goal_type: str,
         params: dict,
         wq: "WorldQuery",
+        success_condition: str = "",
     ) -> None:
         """
         Begin a new top-level goal.
 
         Clears all internal state and pushes a single GoalFrame for the
         given goal type. The first tick will call the appropriate handler.
+
+        Parameters
+        ----------
+        success_condition : The goal's RewardEvaluator condition string.
+            When non-empty, the RewardEvaluator owns goal completion —
+            coordinator handlers must not set frame.completed, since doing
+            so would bypass the evaluator and could fire on stale absolute
+            inventory counts rather than the delta the condition requires.
         """
         self._goal_stack.clear()
         self._active_task = None
@@ -270,7 +282,11 @@ class RuleBasedCoordinator:
         self._top_level_failed = False
         self._bb.clear_all()
 
-        self._goal_stack.append(GoalFrame(goal_type=goal_type, params=params))
+        self._goal_stack.append(GoalFrame(
+            goal_type=goal_type,
+            params=params,
+            evaluator_condition=success_condition,
+        ))
         log.info(
             "Coordinator reset: goal_type=%s params=%s", goal_type, params
         )
@@ -421,6 +437,31 @@ class RuleBasedCoordinator:
     # which decision point the handler has reached.
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Frame completion helper
+    # ------------------------------------------------------------------
+
+    def _complete_frame(self, frame: "GoalFrame") -> None:
+        """
+        Mark a goal frame as internally complete.
+
+        When the frame carries an evaluator_condition the RewardEvaluator
+        is the authoritative completion signal — setting frame.completed
+        would bypass it. In that case this method is a no-op: the evaluator
+        will fire the success_condition and the loop will advance the goal.
+
+        When there is no evaluator condition (e.g. clear_region with an
+        empty success_condition), the coordinator drives completion directly.
+        """
+        if frame.evaluator_condition:
+            log.debug(
+                "Coordinator: goal %r has evaluator condition — "
+                "skipping internal completion (evaluator owns this)",
+                frame.goal_type,
+            )
+            return
+        frame.completed = True
+
     # ── Collection ──────────────────────────────────────────────────────
 
     def _handle_collection(
@@ -460,25 +501,23 @@ class RuleBasedCoordinator:
             frame.failed = True
             return CoordinatorStatus.STUCK, []
 
-        # Already have enough.
+        # Already have enough — complete internally only when no evaluator
+        # condition is present. When success_condition is set, the evaluator
+        # owns completion; _complete_frame() is a no-op in that case.
         if wq.inventory_count(item) >= count:
             log.info("Collection goal already satisfied: %dx %s", count, item)
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
         if frame.step == 0:
             # Check for item in chests.
             # STUB: chest extraction not yet implemented (Phase 7 InteractSkill).
-            # When implemented: find nearest chest containing item, push
-            # navigate_to_entity + extract_from_chest task sequence.
             if _item_in_nearby_chest(item, wq):
                 log.warning(
                     "Collection: %s found in chest but chest interaction "
                     "is not yet implemented (Phase 7) — falling through to mining",
                     item,
                 )
-                # Fall through to mining rather than returning STUCK so the
-                # goal can still complete via the resource patch.
 
             # Find nearest resource patch.
             patches = wq.resources_of_type(item)
@@ -498,11 +537,6 @@ class RuleBasedCoordinator:
             )
             frame.context["patch_pos"] = nearest.position
 
-            # Push a single gather_resource task. MiningAgent handles its
-            # own approach navigation internally via NavigateSkill — a
-            # separate navigate_to_position task would cause two navigation
-            # hops (coordinator nav to patch centre, then agent nav to
-            # mining position) where one is sufficient.
             gather_target = wq.inventory_count(item) + count
             self._push_task(
                 task_type   = "gather_resource",
@@ -516,9 +550,9 @@ class RuleBasedCoordinator:
             )
             return CoordinatorStatus.PROGRESSING, []
 
-        # Step ≥ 1: check if we have enough now.
+        # Step ≥ 1: check absolute count (task-level tracking uses absolute inv).
         if wq.inventory_count(item) >= count:
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
         # Not enough — reset to step 0 to re-derive (patch may have shifted).
@@ -556,7 +590,7 @@ class RuleBasedCoordinator:
             return CoordinatorStatus.STUCK, []
 
         if wq.inventory_count(item) >= count:
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
         if frame.step == 0:
@@ -627,7 +661,7 @@ class RuleBasedCoordinator:
 
         # Step ≥ 1: sub-goal (collection or production) completed.
         if wq.inventory_count(item) >= count:
-            frame.completed = True
+            self._complete_frame(frame)
         else:
             frame.step = 0   # retry
         return CoordinatorStatus.PROGRESSING, []
@@ -665,7 +699,7 @@ class RuleBasedCoordinator:
             return CoordinatorStatus.STUCK, []
 
         if wq.inventory_count(item) >= count:
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
         if frame.step == 0:
@@ -704,7 +738,7 @@ class RuleBasedCoordinator:
 
         # Step 2 — verify arrival.
         if wq.inventory_count(item) >= count:
-            frame.completed = True
+            self._complete_frame(frame)
         else:
             frame.step = 0   # retry from ingredient check
         return CoordinatorStatus.PROGRESSING, []
@@ -760,7 +794,7 @@ class RuleBasedCoordinator:
         # Short-circuit: if the default chunk condition is already met,
         # complete immediately (only meaningful when no custom condition).
         if not custom_cond and wq.charted_chunks - start >= target:
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
         if frame.step == 0:
@@ -871,7 +905,7 @@ class RuleBasedCoordinator:
 
         # Step 2 — verify.
         if _bbox_is_clear(bbox, wq):
-            frame.completed = True
+            self._complete_frame(frame)
         else:
             log.info("Clear region: obstacles remain — re-issuing clear task")
             frame.step = 1
@@ -962,7 +996,7 @@ class RuleBasedCoordinator:
             return CoordinatorStatus.PROGRESSING, []
 
         # Step 4: sub-goal completed → done.
-        frame.completed = True
+        self._complete_frame(frame)
         return CoordinatorStatus.PROGRESSING, []
 
     # ── Construction ──────────────────────────────────────────────────────
@@ -1020,10 +1054,10 @@ class RuleBasedCoordinator:
                 "Construction: build task not yet implemented (Phase 7 "
                 "RL construction agent) — marking complete as a no-op."
             )
-            frame.completed = True
+            self._complete_frame(frame)
             return CoordinatorStatus.WAITING, []
 
-        frame.completed = True
+        self._complete_frame(frame)
         return CoordinatorStatus.PROGRESSING, []
 
     # ── Production ────────────────────────────────────────────────────────
@@ -1194,7 +1228,7 @@ class RuleBasedCoordinator:
         if frame.step == 0:
             if wq.tech_unlocked(tech):
                 log.info("Research goal already satisfied: %s", tech)
-                frame.completed = True
+                self._complete_frame(frame)
                 return CoordinatorStatus.PROGRESSING, []
             frame.step = 1
 
@@ -1243,7 +1277,7 @@ class RuleBasedCoordinator:
 
         # Step 5: verify.
         if wq.tech_unlocked(tech):
-            frame.completed = True
+            self._complete_frame(frame)
         else:
             frame.step = 4   # re-queue
         return CoordinatorStatus.PROGRESSING, []
