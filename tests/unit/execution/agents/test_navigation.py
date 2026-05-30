@@ -427,5 +427,53 @@ class TestNavigationAgentPendingPatches(unittest.TestCase):
         self.assertEqual(agent.pending_patches(), [])
 
 
+# ===========================================================================
+# Section — teardown()
+# ===========================================================================
+
+class TestNavigationAgentTeardown(unittest.TestCase):
+    """
+    NavigationAgent.teardown() always returns [StopMovement].
+
+    The Lua mod's persistent on_tick walker keeps moving until explicitly
+    stopped. Teardown ensures a clean slate regardless of nav state.
+    """
+
+    def test_teardown_returns_stop_movement(self):
+        agent = _make_agent()
+        actions = agent.teardown()
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMovement)
+
+    def test_teardown_after_activate_returns_stop_movement(self):
+        agent = _make_agent()
+        task = _Task(target_position=Position(x=100, y=100))
+        agent.activate(task, _make_bb(), _WQ(), _KB)
+        actions = agent.teardown()
+        self.assertIsInstance(actions[0], StopMovement)
+
+    def test_teardown_while_running_returns_stop_movement(self):
+        """StopMovement is issued even mid-navigation."""
+        agent = _make_agent()
+        task = _Task(target_position=Position(x=100, y=100))
+        bb = _make_bb()
+        wq = _WQ(position=Position(0, 0))
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # skill now RUNNING
+        actions = agent.teardown()
+        self.assertIsInstance(actions[0], StopMovement)
+
+    def test_teardown_idempotent(self):
+        """Calling teardown twice is safe — both return [StopMovement]."""
+        agent = _make_agent()
+        task = _Task(target_position=Position(x=10, y=10))
+        agent.activate(task, _make_bb(), _WQ(), _KB)
+        first = agent.teardown()
+        second = agent.teardown()
+        self.assertIsInstance(first[0], StopMovement)
+        self.assertIsInstance(second[0], StopMovement)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

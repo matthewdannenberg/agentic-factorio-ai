@@ -78,7 +78,7 @@ from execution.agents.mining import MiningAgent
 from execution.agents.navigation import NavigationAgent
 from execution.agents.crafting import CraftingAgent
 from execution.agents.exploration import ExplorationAgent
-from execution.coordinator import RuleBasedCoordinator
+from execution.coordinator.coordinator import RuleBasedCoordinator
 from execution.coordinator.registry import AgentRegistry
 
 from planning import (

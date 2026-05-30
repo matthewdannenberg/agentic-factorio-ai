@@ -580,6 +580,70 @@ class WorldQuery:
         )
 
     # ------------------------------------------------------------------
+    # Tile map
+    # ------------------------------------------------------------------
+
+    def tile_at(self, tile_x: int, tile_y: int) -> str:
+        """
+        Return the tile type at (tile_x, tile_y), or "unknown" if not observed.
+
+        Only non-default tiles (water, landfill, out-of-map) are stored;
+        "unknown" means the tile was never in a scan radius, while a specific
+        name means it was observed and was non-default. Default tiles
+        (grass, dirt, sand, etc.) are not stored — assume buildable/walkable
+        when tile_at returns "unknown".
+
+        NON-PROXIMAL: tile_map accumulates across all scans this session.
+        """
+        return self._state.tile_map.get((tile_x, tile_y), "unknown")
+
+    def is_water(self, tile_x: int, tile_y: int) -> bool:
+        """
+        True if (tile_x, tile_y) is a water tile.
+
+        Returns False for "unknown" (unobserved tiles are assumed walkable).
+        Water tile names contain the substring "water" in Factorio 2.x:
+        e.g. "water", "deepwater", "water-green", "water-shallow".
+
+        NON-PROXIMAL.
+        """
+        name = self._state.tile_map.get((tile_x, tile_y), "")
+        return "water" in name
+
+    def is_buildable(self, tile_x: int, tile_y: int) -> bool:
+        """
+        True if (tile_x, tile_y) appears buildable based on observed tile data.
+
+        A tile is considered non-buildable if it is water or out-of-map.
+        Unobserved tiles ("unknown") are assumed buildable — the agent should
+        explore before placing structures in unknown territory.
+
+        NON-PROXIMAL. Conservative: may return True for unobserved water.
+        """
+        name = self._state.tile_map.get((tile_x, tile_y), "")
+        return "water" not in name and name != "out-of-map"
+
+    def water_tiles_in_radius(self, centre_x: float, centre_y: float, radius: float) -> list[tuple[int, int]]:
+        """
+        Return all observed water tile coordinates within radius tiles of centre.
+
+        Useful for locating shoreline positions for water pump placement.
+        Only tiles already in the tile_map (previously scanned) are returned.
+
+        NON-PROXIMAL.
+        """
+        cx, cy = int(centre_x), int(centre_y)
+        r = int(radius) + 1
+        result = []
+        for tx in range(cx - r, cx + r + 1):
+            for ty in range(cy - r, cy + r + 1):
+                if (tx - centre_x) ** 2 + (ty - centre_y) ** 2 <= radius ** 2:
+                    name = self._state.tile_map.get((tx, ty), "")
+                    if "water" in name:
+                        result.append((tx, ty))
+        return result
+
+    # ------------------------------------------------------------------
     # Research
     # ------------------------------------------------------------------
 

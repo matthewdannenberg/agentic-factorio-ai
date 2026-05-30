@@ -876,6 +876,21 @@ class TestExplorationState(unittest.TestCase):
         self.assertEqual(len(e.newly_charted_chunks), 1)
         self.assertEqual(len(e.nearby_uncharted_chunks), 2)
 
+    def test_charted_chunk_coords_defaults_empty_set(self):
+        self.assertEqual(ExplorationState().charted_chunk_coords, set())
+
+    def test_charted_chunk_coords_mutable(self):
+        e = ExplorationState()
+        e.charted_chunk_coords.add((1, 2))
+        self.assertIn((1, 2), e.charted_chunk_coords)
+
+    def test_charted_chunk_coords_independent_instances(self):
+        """Each ExplorationState gets its own set (mutable default_factory)."""
+        a = ExplorationState()
+        b = ExplorationState()
+        a.charted_chunk_coords.add((0, 0))
+        self.assertEqual(len(b.charted_chunk_coords), 0)
+
 
 class TestWorldStateExploration(unittest.TestCase):
 
@@ -900,6 +915,94 @@ class TestWorldStateExploration(unittest.TestCase):
             entities=[], observed_at={},
         )
         self.assertEqual(ws.charted_chunks, 100)
+
+
+class TestWorldStateTileMap(unittest.TestCase):
+    """WorldState.tile_map accumulates non-default tile observations."""
+
+    def test_tile_map_defaults_empty(self):
+        from world.observable.state import WorldState
+        ws = WorldState()
+        self.assertEqual(ws.tile_map, {})
+
+    def test_tile_map_is_dict(self):
+        from world.observable.state import WorldState
+        ws = WorldState()
+        self.assertIsInstance(ws.tile_map, dict)
+
+    def test_tile_map_mutable(self):
+        from world.observable.state import WorldState
+        ws = WorldState()
+        ws.tile_map[(0, 0)] = "water"
+        self.assertEqual(ws.tile_map[(0, 0)], "water")
+
+    def test_tile_map_keys_are_tuples(self):
+        from world.observable.state import WorldState
+        ws = WorldState(tile_map={(1, 2): "deepwater", (-1, 0): "water-green"})
+        self.assertIn((1, 2), ws.tile_map)
+        self.assertEqual(ws.tile_map[(1, 2)], "deepwater")
+
+
+class TestWorldQueryTileMap(unittest.TestCase):
+    """WorldQuery tile accessor methods."""
+
+    def _wq_with_tiles(self, tiles: dict) -> WorldQuery:
+        from world.observable.state import WorldState
+        ws = WorldState(tile_map=tiles)
+        return WorldQuery(ws)
+
+    def test_tile_at_unknown(self):
+        wq = self._wq_with_tiles({})
+        self.assertEqual(wq.tile_at(0, 0), "unknown")
+
+    def test_tile_at_known(self):
+        wq = self._wq_with_tiles({(3, 5): "water"})
+        self.assertEqual(wq.tile_at(3, 5), "water")
+
+    def test_is_water_true(self):
+        wq = self._wq_with_tiles({(0, 0): "water"})
+        self.assertTrue(wq.is_water(0, 0))
+
+    def test_is_water_deepwater(self):
+        wq = self._wq_with_tiles({(1, 1): "deepwater-green"})
+        self.assertTrue(wq.is_water(1, 1))
+
+    def test_is_water_false_for_land(self):
+        wq = self._wq_with_tiles({(0, 0): "landfill"})
+        self.assertFalse(wq.is_water(0, 0))
+
+    def test_is_water_false_for_unknown(self):
+        wq = self._wq_with_tiles({})
+        self.assertFalse(wq.is_water(0, 0))
+
+    def test_is_buildable_unknown_assumed_buildable(self):
+        """Unobserved tiles are assumed walkable/buildable."""
+        wq = self._wq_with_tiles({})
+        self.assertTrue(wq.is_buildable(0, 0))
+
+    def test_is_buildable_water_not_buildable(self):
+        wq = self._wq_with_tiles({(0, 0): "water"})
+        self.assertFalse(wq.is_buildable(0, 0))
+
+    def test_is_buildable_out_of_map_not_buildable(self):
+        wq = self._wq_with_tiles({(0, 0): "out-of-map"})
+        self.assertFalse(wq.is_buildable(0, 0))
+
+    def test_is_buildable_landfill_is_buildable(self):
+        wq = self._wq_with_tiles({(0, 0): "landfill"})
+        self.assertTrue(wq.is_buildable(0, 0))
+
+    def test_water_tiles_in_radius_finds_nearby(self):
+        wq = self._wq_with_tiles({(0, 0): "water", (3, 3): "water", (100, 100): "deepwater"})
+        nearby = wq.water_tiles_in_radius(0.5, 0.5, 5.0)
+        coords = set(nearby)
+        self.assertIn((0, 0), coords)
+        self.assertIn((3, 3), coords)
+        self.assertNotIn((100, 100), coords)
+
+    def test_water_tiles_in_radius_empty_when_no_water(self):
+        wq = self._wq_with_tiles({})
+        self.assertEqual(wq.water_tiles_in_radius(0, 0, 50), [])
 
 
 class TestInserterState(unittest.TestCase):

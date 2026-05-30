@@ -171,6 +171,13 @@ class WorldWriter:
             live.threat = snapshot.threat
             live.observed_at["threat"] = snapshot.observed_at["threat"]
 
+        # Tile map: union-merge (tiles accumulate, never removed).
+        # snapshot.tile_map contains only the current scan radius; live.tile_map
+        # accumulates all non-default tiles ever seen this session.
+        if _is_fresh("tile_map"):
+            live.tile_map.update(snapshot.tile_map)
+            live.observed_at["tile_map"] = snapshot.observed_at["tile_map"]
+
         # Rebuild indices once after all sections are merged.
         self._rebuild_all_indices()
 

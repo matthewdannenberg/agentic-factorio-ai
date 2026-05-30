@@ -467,4 +467,210 @@ TS.suite("chunk_delta", {
     end,
 })
 
+
+-- ============================================================
+-- Suite: tile_map
+-- Verifies fa._tile_types_table() and the tile_map field in
+-- fa.get_state(). This is the scanning foundation for water
+-- detection and buildability checks.
+--
+-- Tests do not assert specific tile names because those depend
+-- on map state. Instead they verify structure, types, and
+-- internal consistency.
+-- ============================================================
+
+TS.suite("tile_map", {
+
+    get_state_has_tile_map_field = function(t)
+        local raw = fa.get_state({radius=16, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "get_state must return valid JSON")
+        t.ok(parsed.tile_map ~= nil,
+            "state must have tile_map field; got nil. "
+            .. "Check that tile_map = fa._tile_types_table(player, radius) "
+            .. "is present in fa.get_state().")
+        t.is_table(parsed.tile_map, "tile_map must be a table (array)")
+    end,
+
+    tile_map_entries_have_required_fields = function(t)
+        -- Every entry must have integer x, y coordinates and a non-empty
+        -- tile name string. No specific names are required — the set of
+        -- non-default tiles is map-dependent.
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        for i, entry in ipairs(parsed.tile_map) do
+            t.ok(entry.x ~= nil,
+                "tile_map entry " .. i .. " must have x field")
+            t.ok(entry.y ~= nil,
+                "tile_map entry " .. i .. " must have y field")
+            t.ok(entry.tile ~= nil,
+                "tile_map entry " .. i .. " must have tile field")
+            t.is_number(entry.x,
+                "tile_map entry " .. i .. " x must be number; got " .. type(entry.x))
+            t.is_number(entry.y,
+                "tile_map entry " .. i .. " y must be number; got " .. type(entry.y))
+            t.is_string(entry.tile,
+                "tile_map entry " .. i .. " tile must be string; got " .. type(entry.tile))
+            t.ok(entry.tile ~= "",
+                "tile_map entry " .. i .. " tile name must not be empty")
+        end
+    end,
+
+    tile_map_only_includes_non_default_tiles = function(t)
+        -- The filter in _tile_types_table only emits tiles whose name
+        -- contains "water", equals "out-of-map", or equals "landfill".
+        -- No default walkable tiles (grass, dirt, sand, etc.) should appear.
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local default_tiles = {
+            ["grass-1"]=true, ["grass-2"]=true, ["grass-3"]=true, ["grass-4"]=true,
+            ["dirt-1"]=true, ["dirt-2"]=true, ["dirt-3"]=true, ["dirt-4"]=true,
+            ["dirt-5"]=true, ["dirt-6"]=true, ["dirt-7"]=true,
+            ["sand-1"]=true, ["sand-2"]=true, ["sand-3"]=true,
+            ["dry-dirt"]=true, ["red-desert-0"]=true, ["red-desert-1"]=true,
+            ["red-desert-2"]=true, ["red-desert-3"]=true,
+            ["lab-dark-1"]=true, ["lab-dark-2"]=true, ["lab-white"]=true,
+        }
+        for i, entry in ipairs(parsed.tile_map) do
+            t.ok(not default_tiles[entry.tile],
+                "tile_map entry " .. i .. " has default tile '" ..
+                tostring(entry.tile) .. "' — only non-default tiles should appear. "
+                .. "Check the filter in fa._tile_types_table().")
+        end
+    end,
+
+    tile_map_coordinates_are_within_scan_radius = function(t)
+        -- All tile coordinates must fall within the scan radius of the player.
+        -- Use radius=16 so the check is fast and the bound is tight.
+        local r = 16
+        local raw = fa.get_state({radius=r, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        local px = math.floor(player.position.x)
+        local py = math.floor(player.position.y)
+        for i, entry in ipairs(parsed.tile_map) do
+            local dx = math.abs(entry.x - px)
+            local dy = math.abs(entry.y - py)
+            t.ok(dx <= r and dy <= r,
+                "tile_map entry " .. i .. " at (" .. entry.x .. "," .. entry.y ..
+                ") is outside scan radius " .. r ..
+                " from player floor position (" .. px .. "," .. py .. ")")
+        end
+    end,
+
+    tile_map_water_entries_contain_water_in_name = function(t)
+        -- Any tile in tile_map whose name contains "water" must actually
+        -- be a water tile on the surface. This cross-checks the Lua filter
+        -- against the live tile data.
+        local raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        for i, entry in ipairs(parsed.tile_map) do
+            if string.find(entry.tile, "water", 1, true) then
+                -- Verify the tile at this position actually has this name.
+                local live_tile = player.surface.get_tile(entry.x, entry.y)
+                t.ok(live_tile and live_tile.valid,
+                    "tile at (" .. entry.x .. "," .. entry.y .. ") should be valid")
+                t.eq(live_tile.name, entry.tile,
+                    "water tile at (" .. entry.x .. "," .. entry.y ..
+                    ") reported as '" .. entry.tile ..
+                    "' but live tile is '" .. tostring(live_tile.name) .. "'")
+            end
+        end
+    end,
+
+    tile_map_stable_across_back_to_back_calls = function(t)
+        -- Two consecutive get_state calls with no movement should return
+        -- the same tile_map count. Tile types don't change spontaneously.
+        local opts = {radius=16, resource_radius=32, item_radius=4}
+        local r1 = parse_json(fa.get_state(opts))
+        local r2 = parse_json(fa.get_state(opts))
+        t.ok(r1 ~= nil and r2 ~= nil, "both calls must return valid JSON")
+        local c1, c2 = 0, 0
+        for _ in ipairs(r1.tile_map) do c1 = c1 + 1 end
+        for _ in ipairs(r2.tile_map) do c2 = c2 + 1 end
+        t.eq(c1, c2,
+            "tile_map count should be stable across back-to-back calls; "
+            .. "got " .. tostring(c1) .. " then " .. tostring(c2))
+    end,
+
+    tile_map_direct_function_returns_table = function(t)
+        -- Call _tile_types_table directly (internal function test).
+        -- This verifies the function is registered on the fa table.
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        t.ok(type(fa._tile_types_table) == "function",
+            "fa._tile_types_table must be a function; got " ..
+            type(fa._tile_types_table) ..
+            ". Ensure the updated control.lua is deployed to the mod directory.")
+        local result = fa._tile_types_table(player, 16)
+        t.is_table(result,
+            "fa._tile_types_table() must return a table; got " .. type(result))
+    end,
+
+    tile_map_direct_function_matches_get_state = function(t)
+        -- The tile_map in get_state is built by calling _tile_types_table
+        -- with the same radius. Both calls happen in the same tick so
+        -- tile data should be identical.
+        local r = 16
+        local player = get_player()
+        t.ok(player and player.valid, "need a valid player")
+        t.ok(type(fa._tile_types_table) == "function",
+            "fa._tile_types_table must be a function — deploy updated control.lua")
+
+        local direct = fa._tile_types_table(player, r)
+        local state_raw = fa.get_state({radius=r, resource_radius=32, item_radius=4})
+        local state = parse_json(state_raw)
+        t.ok(state ~= nil, "get_state must return valid JSON")
+        t.ok(state.tile_map ~= nil,
+            "get_state must have tile_map field — deploy updated control.lua")
+
+        -- Both should have the same count (same radius, same tick).
+        local direct_count = 0
+        for _ in ipairs(direct) do direct_count = direct_count + 1 end
+        local state_count = 0
+        for _ in ipairs(state.tile_map) do state_count = state_count + 1 end
+
+        t.eq(direct_count, state_count,
+            "direct _tile_types_table count (" .. direct_count ..
+            ") must match tile_map in get_state (" .. state_count .. ")")
+    end,
+
+    tile_map_radius_zero_returns_empty_or_single = function(t)
+        -- radius=0 scans only the tile the player is standing on.
+        -- The player spawns on a default tile, so tile_map should be
+        -- empty (default tiles are filtered out). If the player somehow
+        -- stands on water, 1 entry is acceptable.
+        local raw = fa.get_state({radius=0, resource_radius=32, item_radius=4})
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        local count = 0
+        for _ in ipairs(parsed.tile_map) do count = count + 1 end
+        t.ok(count <= 1,
+            "radius=0 should yield at most 1 tile entry; got " .. count)
+    end,
+
+    tile_map_larger_radius_yields_same_or_more_entries = function(t)
+        -- A larger scan radius cannot produce fewer non-default tiles than
+        -- a smaller one (it strictly covers a superset of tiles).
+        local small_raw = fa.get_state({radius=8,  resource_radius=32, item_radius=4})
+        local large_raw = fa.get_state({radius=32, resource_radius=32, item_radius=4})
+        local small = parse_json(small_raw)
+        local large = parse_json(large_raw)
+        t.ok(small ~= nil and large ~= nil, "both calls must return valid JSON")
+        local c_small, c_large = 0, 0
+        for _ in ipairs(small.tile_map) do c_small = c_small + 1 end
+        for _ in ipairs(large.tile_map) do c_large = c_large + 1 end
+        t.ok(c_large >= c_small,
+            "radius=32 tile_map (" .. c_large ..
+            ") should be >= radius=8 tile_map (" .. c_small .. ")")
+    end,
+})
+
 return TS

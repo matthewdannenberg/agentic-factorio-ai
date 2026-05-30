@@ -7,7 +7,7 @@ Organised in sections:
   1. BoundingBox geometry
   2. IOPoint
   3. FactoryGraph -- node lifecycle, queries, edges, paths, capacity
-  4. ChunkGrid    -- charting, frontiers (stub layer)
+  4. ChunkMapQuery -- charting, frontiers (now in WorldQuery/WorldState)
   5. SelfModel    -- container, apply() routing, convenience pass-throughs
 
 Run with:  python -m pytest tests/unit/world/test_self_model.py -v
@@ -20,7 +20,7 @@ import unittest
 from world import (
     BoundingBox,
     ChunkCoord,
-    ChunkGrid,
+    ChunkMapQuery,
     EdgeType,
     FactoryEdge,
     FactoryNode,
@@ -34,6 +34,7 @@ from world import (
     SelfModelPatch,
     Direction,
 )
+from world.observable.query import ChunkMapQuery
 
 
 # ---------------------------------------------------------------------------
@@ -501,70 +502,104 @@ class TestFactoryNodeIOPoints(unittest.TestCase):
 
 
 # ===========================================================================
-# Section 4 -- ChunkGrid
+# Section 4 -- ChunkMapQuery (moved from SelfModel to WorldQuery/WorldState)
 # ===========================================================================
 
-class TestChunkGrid(unittest.TestCase):
+def _chunk_map(*chunk_tuples) -> ChunkMapQuery:
+    """Build a ChunkMapQuery with the given (cx, cy) coords pre-loaded."""
+    coords = set(chunk_tuples)
+    return ChunkMapQuery(coords)
+
+
+class TestChunkMapQuery(unittest.TestCase):
+    """
+    ChunkMapQuery wraps ExplorationState.charted_chunk_coords and provides
+    frontier detection and coordinate helpers. It moved from world/model/
+    to world/observable/query.py when ChunkGrid was removed from SelfModel.
+    """
 
     def test_empty_by_default(self):
-        g = ChunkGrid()
-        self.assertEqual(len(g), 0)
-        self.assertFalse(bool(g))
+        cq = ChunkMapQuery(set())
+        self.assertEqual(len(cq), 0)
+        self.assertFalse(bool(cq))
 
-    def test_mark_charted(self):
-        g = ChunkGrid()
-        g.mark_charted(0, 0)
-        self.assertTrue(g.is_charted(0, 0))
-        self.assertFalse(g.is_charted(1, 0))
+    def test_non_empty(self):
+        cq = _chunk_map((0, 0), (1, 0))
+        self.assertEqual(len(cq), 2)
+        self.assertTrue(bool(cq))
 
-    def test_mark_charted_idempotent(self):
-        g = ChunkGrid()
-        g.mark_charted(5, 5)
-        g.mark_charted(5, 5)
-        self.assertEqual(len(g), 1)
+    def test_is_charted(self):
+        cq = _chunk_map((3, 5))
+        self.assertTrue(cq.is_charted(3, 5))
+        self.assertFalse(cq.is_charted(3, 6))
 
-    def test_mark_charted_bulk(self):
-        g = ChunkGrid()
-        g.mark_charted_bulk([ChunkCoord(0, 0), ChunkCoord(1, 0), ChunkCoord(0, 1)])
-        self.assertEqual(len(g), 3)
+    def test_charted_count(self):
+        cq = _chunk_map((0, 0), (1, 0), (0, 1))
+        self.assertEqual(cq.charted_count(), 3)
+
+    def test_all_charted(self):
+        cq = _chunk_map((1, 2), (3, 4))
+        result = cq.all_charted()
+        self.assertIn((1, 2), result)
+        self.assertIn((3, 4), result)
 
     def test_frontiers_single_chunk(self):
-        g = ChunkGrid()
-        g.mark_charted(0, 0)
-        # A single chunk has 4 uncharted neighbours
-        self.assertIn((0, 0), g.frontiers())
+        cq = _chunk_map((0, 0))
+        self.assertIn((0, 0), cq.frontiers())
 
     def test_frontiers_surrounded_chunk_not_frontier(self):
-        g = ChunkGrid()
-        for cx, cy in [(1, 1), (0, 1), (2, 1), (1, 0), (1, 2)]:
-            g.mark_charted(cx, cy)
-        # (1,1) is surrounded on all 4 sides
-        self.assertNotIn((1, 1), g.frontiers())
+        cq = _chunk_map((1, 1), (0, 1), (2, 1), (1, 0), (1, 2))
+        self.assertNotIn((1, 1), cq.frontiers())
 
-    def test_frontiers_empty_grid(self):
-        self.assertEqual(ChunkGrid().frontiers(), [])
+    def test_frontiers_empty(self):
+        self.assertEqual(ChunkMapQuery(set()).frontiers(), [])
 
-    def test_chunk_for_position(self):
-        g = ChunkGrid()
-        self.assertEqual(g.chunk_for_position(Position(0, 0)), (0, 0))
-        self.assertEqual(g.chunk_for_position(Position(32, 0)), (1, 0))
-        self.assertEqual(g.chunk_for_position(Position(31.9, 31.9)), (0, 0))
+    def test_all_frontiers_are_charted(self):
+        cq = _chunk_map((0, 0), (1, 0), (0, 1))
+        for f in cq.frontiers():
+            self.assertTrue(cq.is_charted(*f))
 
-    def test_centre_of_chunk(self):
-        g = ChunkGrid()
-        c = g.centre_of_chunk(0, 0)
+    def test_chunk_for_position_origin(self):
+        cq = ChunkMapQuery(set())
+        self.assertEqual(cq.chunk_for_position(Position(0, 0)), (0, 0))
+
+    def test_chunk_for_position_tile_32(self):
+        cq = ChunkMapQuery(set())
+        self.assertEqual(cq.chunk_for_position(Position(32, 0)), (1, 0))
+
+    def test_chunk_for_position_negative(self):
+        cq = ChunkMapQuery(set())
+        self.assertEqual(cq.chunk_for_position(Position(-1, -1)), (-1, -1))
+
+    def test_centre_of_chunk_zero(self):
+        cq = ChunkMapQuery(set())
+        c = cq.centre_of_chunk(0, 0)
         self.assertAlmostEqual(c.x, 16.0)
         self.assertAlmostEqual(c.y, 16.0)
 
-    def test_nearest_frontier_returns_closest(self):
-        g = ChunkGrid()
-        g.mark_charted_bulk([ChunkCoord(0, 0), ChunkCoord(5, 5), ChunkCoord(10, 10)])
-        pos = Position(32 * 5 + 16, 32 * 5 + 16)   # centre of chunk (5,5)
-        nearest = g.nearest_frontier(pos)
-        self.assertIsNotNone(nearest)
+    def test_centre_of_chunk_roundtrip(self):
+        cq = ChunkMapQuery(set())
+        for cx, cy in [(0, 0), (3, -2), (-1, 5)]:
+            centre = cq.centre_of_chunk(cx, cy)
+            back = cq.chunk_for_position(centre)
+            self.assertEqual(back, (cx, cy), f"roundtrip failed for ({cx},{cy})")
 
     def test_nearest_frontier_none_when_empty(self):
-        self.assertIsNone(ChunkGrid().nearest_frontier(Position(0, 0)))
+        self.assertIsNone(ChunkMapQuery(set()).nearest_frontier(Position(0, 0)))
+
+    def test_nearest_frontier_returns_frontier(self):
+        cq = _chunk_map((0, 0), (5, 5))
+        frontier = cq.nearest_frontier(Position(0, 0))
+        self.assertIsNotNone(frontier)
+        self.assertIn(frontier, cq.frontiers())
+
+    def test_nearest_frontier_position_matches_chunk(self):
+        cq = _chunk_map((2, 3))
+        pos = cq.nearest_frontier_position(Position(0, 0))
+        self.assertIsNotNone(pos)
+        expected = cq.centre_of_chunk(2, 3)
+        self.assertAlmostEqual(pos.x, expected.x)
+        self.assertAlmostEqual(pos.y, expected.y)
 
 
 # ===========================================================================
@@ -576,9 +611,11 @@ class TestSelfModelContainer(unittest.TestCase):
     def setUp(self):
         self.sm = SelfModel()
 
-    def test_has_factory_and_chunks(self):
+    def test_has_factory_layer(self):
+        """SelfModel now contains only the factory layer; chunks moved to WorldState."""
         self.assertIsNotNone(self.sm.factory)
-        self.assertIsNotNone(self.sm.chunks)
+        self.assertFalse(hasattr(self.sm, "chunks"),
+            "sm.chunks was removed — chunk data now lives in ExplorationState")
 
     def test_apply_add_node(self):
         n = _node("iron smelter", status=NodeStatus.CANDIDATE)
@@ -648,8 +685,9 @@ class TestSelfModelContainer(unittest.TestCase):
         self.assertEqual(len(self.sm.factory.get_node(n.id).io_points), 1)
 
     def test_apply_unknown_layer_does_not_raise(self):
-        patch = SelfModelPatch(layer="chunks", action="add_node")
-        # Chunk patches are not yet implemented; should log warning, not raise
+        """Unknown patch layers are logged and silently ignored."""
+        patch = SelfModelPatch(layer="factory", action="add_node", node=None)
+        # Malformed (no node) — should log warning but not raise
         try:
             self.sm.apply(patch)
         except Exception as exc:

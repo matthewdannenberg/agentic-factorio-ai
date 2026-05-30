@@ -16,8 +16,7 @@ Test organisation
     collection, producible but unimplemented, no source
 7.  _handle_crafting — already-satisfied, missing ingredients triggers
     acquire sub-goals, crafts when ingredients present, verifies after craft
-8.  _handle_explore — target already met, pushes explore task, needs-frontier
-    signal triggers re-derive, fallback frontier
+8.  _handle_explore — target already met, pushes explore task
 9.  _handle_clear_region — undestroyable blocker fails, pushes clear task,
     verifies empty after task
 10. _handle_prep_region — factory intersection fails, undestroyable fails,
@@ -31,7 +30,7 @@ Test organisation
 15. _tick_task — success condition fires, failure condition fires,
     STUCK from agent observe, agent ticked when running
 16. drain_patches — empty initially, drained from agent after tick
-17. Module-level helpers — _dist, _item_in_nearby_chest, _nearest_frontier,
+17. Module-level helpers — _dist, _item_in_nearby_chest,
     _undestroyable_in_bbox, _bbox_is_clear, _bbox_empty_condition,
     _intersects_major_factory, _intersects_logistics
 
@@ -54,7 +53,7 @@ from execution.coordinator.coordinator import (
     GOAL_CLEAR_REGION, GOAL_PREP_REGION, GOAL_CONSTRUCTION,
     GOAL_PRODUCTION, GOAL_LOGISTICS, GOAL_BYPRODUCT, GOAL_RESEARCH,
     GOAL_NOOP,
-    _dist, _item_in_nearby_chest, _nearest_frontier,
+    _dist, _item_in_nearby_chest,
     _undestroyable_in_bbox, _bbox_is_clear, _bbox_empty_condition,
     _intersects_major_factory, _intersects_logistics,
     _TASK_TIMEOUT_TICKS,
@@ -735,57 +734,30 @@ class TestHandleExplore(unittest.TestCase):
         self.assertIsNotNone(coord._active_task)
         self.assertEqual(coord._active_task.task_type, "explore_region")
 
-    def test_frontier_position_set_from_chunk(self):
+    def test_task_has_no_frontier_position(self):
+        """Coordinator no longer computes or passes frontier_position.
+        The ExplorationAgent picks its own frontier from wq.chunk_map /
+        nearby_uncharted_chunks autonomously on each tick."""
         explore_agent = _make_agent("RUNNING")
         coord = _make_coord(agents={"exploration": explore_agent})
         coord.reset(GOAL_EXPLORE, {"target_chunks": 20}, _WQ())
         chunk = ChunkCoord(cx=2, cy=3)
         coord.tick(_WQ(charted=0, nearby_uncharted=[chunk]), _WW, 1)
-        fp = coord._active_task.frontier_position
-        self.assertAlmostEqual(fp.x, 2 * 32 + 16.0)
-        self.assertAlmostEqual(fp.y, 3 * 32 + 16.0)
+        # frontier_position is not set on the task by the coordinator
+        self.assertFalse(hasattr(coord._active_task, "frontier_position"),
+            "coordinator should not set frontier_position — agent picks its own frontier")
 
-    def test_fallback_frontier_when_no_nearby_uncharted(self):
+    def test_single_task_pushed_and_coordinator_waits(self):
+        """_handle_explore pushes one task at step 0 and transitions to WAITING."""
         explore_agent = _make_agent("RUNNING")
         coord = _make_coord(agents={"exploration": explore_agent})
         coord.reset(GOAL_EXPLORE, {"target_chunks": 20}, _WQ())
         coord.tick(_WQ(charted=0, nearby_uncharted=[]), _WW, 1)
+        # Should have pushed one explore_region task
         self.assertIsNotNone(coord._active_task)
         self.assertEqual(coord._active_task.task_type, "explore_region")
-
-    def test_needs_frontier_signal_sets_flag(self):
-        # The needs_frontier observation is written to the blackboard, then
-        # the task succeeds. On the same tick that the task resolves,
-        # _handle_explore(step=1) runs, reads the observation, sets the flag,
-        # and resets step to 0. Check the flag after that tick.
-        explore_agent = _make_agent("RUNNING")
-        coord = _make_coord(agents={"exploration": explore_agent})
-        coord.reset(GOAL_EXPLORE, {"target_chunks": 20}, _WQ())
-        chunk = ChunkCoord(cx=5, cy=0)
-        wq = _WQ(charted=0, nearby_uncharted=[chunk])
-        coord.tick(wq, _WW, 1)   # activates explore task
-
-        # Write needs_frontier observation with GOAL scope so it survives
-        # task resolution (TASK-scoped entries are cleared when the task
-        # succeeds, before _handle_explore runs on the same tick).
-        coord._bb.write(
-            EntryCategory.OBSERVATION, EntryScope.GOAL,
-            "exploration", 2,
-            {"type": "exploration_needs_frontier"},
-        )
-        # Succeed the task — on this same tick, _handle_explore reads the
-        # observation and sets needs_frontier=True in context
-        coord._active_task.success_condition = "True"
-        coord._active_task.failure_condition = ""
-        coord.tick(wq, _WW, 2)   # task succeeds; handler sees observation,
-                                  # sets needs_frontier, resets step to 0
-
-        self.assertEqual(coord._goal_stack[0].step, 0)
-
-        # Tick 3: step==0 → handler pushes a new explore task
-        coord.tick(wq, _WW, 3)
-        self.assertIsNotNone(coord._active_task)
-        self.assertEqual(coord._active_task.task_type, "explore_region")
+        # Coordinator should be at step 1 (WAITING)
+        self.assertEqual(coord._goal_stack[0].step, 1)
 
     def test_start_chunks_context_initialised_on_first_tick(self):
         explore_agent = _make_agent("RUNNING")
@@ -1308,44 +1280,6 @@ class TestItemInNearbyChest(unittest.TestCase):
     def test_always_false_stub(self):
         self.assertFalse(_item_in_nearby_chest("iron-ore", _WQ()))
         self.assertFalse(_item_in_nearby_chest("anything", _WQ()))
-
-
-class TestNearestFrontier(unittest.TestCase):
-
-    def test_chunk_centre_from_nearby(self):
-        chunk = ChunkCoord(cx=2, cy=3)
-        pos = _nearest_frontier(_WQ(nearby_uncharted=[chunk]))
-        self.assertAlmostEqual(pos.x, 2 * 32 + 16.0)
-        self.assertAlmostEqual(pos.y, 3 * 32 + 16.0)
-
-    def test_selects_nearest_of_two_chunks(self):
-        near = ChunkCoord(cx=1, cy=0)
-        far  = ChunkCoord(cx=10, cy=0)
-        pos = _nearest_frontier(
-            _WQ(position=Position(x=0, y=0), nearby_uncharted=[far, near])
-        )
-        self.assertAlmostEqual(pos.x, 1 * 32 + 16.0)
-
-    def test_fallback_pushes_outward(self):
-        pos = _nearest_frontier(
-            _WQ(position=Position(x=0, y=0), nearby_uncharted=[], charted=0)
-        )
-        self.assertGreater(pos.x, 0)
-
-    def test_fallback_scales_with_charted_count(self):
-        small = _nearest_frontier(
-            _WQ(position=Position(x=0,y=0), nearby_uncharted=[], charted=1)
-        )
-        large = _nearest_frontier(
-            _WQ(position=Position(x=0,y=0), nearby_uncharted=[], charted=100)
-        )
-        self.assertGreater(large.x, small.x)
-
-    def test_negative_chunk_coords(self):
-        chunk = ChunkCoord(cx=-1, cy=-2)
-        pos = _nearest_frontier(_WQ(nearby_uncharted=[chunk]))
-        self.assertAlmostEqual(pos.x, -1 * 32 + 16.0)
-        self.assertAlmostEqual(pos.y, -2 * 32 + 16.0)
 
 
 class TestUndestroyableInBbox(unittest.TestCase):

@@ -535,5 +535,160 @@ class TestStateParserCraftingQueueRoundtrip(unittest.TestCase):
         self.assertEqual(state.player.crafting_queue[0].recipe, "coal")
         self.assertAlmostEqual(state.player.crafting_queue[0].progress, 0.1)
 
+class TestStateParserCharterChunkCoords(unittest.TestCase):
+    """
+    charted_chunk_coords is accumulated by WorldWriter.integrate_snapshot()
+    from newly_charted_chunks deltas, not populated by StateParser directly.
+    """
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def test_fresh_parse_charted_chunk_coords_empty(self):
+        """StateParser produces ExplorationState with empty charted_chunk_coords."""
+        raw = json.dumps({"tick": 100, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 1, "cy": 2}],
+        }})
+        state = self.parser.parse(raw, current_tick=100)
+        # Parser does NOT accumulate into charted_chunk_coords — WorldWriter does
+        self.assertEqual(state.player.exploration.charted_chunk_coords, set())
+
+    def test_writer_accumulates_charted_coords_from_newly_charted(self):
+        """WorldWriter.integrate_snapshot accumulates newly_charted into coords."""
+        from world.observable.state import WorldState
+        from world.observable.writer import WorldWriter
+
+        live = WorldState(tick=0)
+        snap_raw = json.dumps({"tick": 100, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 3, "cy": 1}, {"cx": 4, "cy": 2}],
+        }})
+        snap = self.parser.parse(snap_raw, current_tick=100)
+        WorldWriter(live).integrate_snapshot(snap)
+        self.assertIn((3, 1), live.player.exploration.charted_chunk_coords)
+        self.assertIn((4, 2), live.player.exploration.charted_chunk_coords)
+
+    def test_writer_accumulates_across_multiple_snapshots(self):
+        """Successive integrate_snapshot calls union-merge charted_chunk_coords."""
+        from world.observable.state import WorldState
+        from world.observable.writer import WorldWriter
+
+        live = WorldState(tick=0)
+        ww = WorldWriter(live)
+
+        snap1 = self.parser.parse(json.dumps({"tick": 100, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 1, "cy": 0}],
+        }}), current_tick=100)
+        ww.integrate_snapshot(snap1)
+
+        snap2 = self.parser.parse(json.dumps({"tick": 101, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 2, "cy": 0}],
+        }}), current_tick=101)
+        ww.integrate_snapshot(snap2)
+
+        coords = live.player.exploration.charted_chunk_coords
+        self.assertIn((1, 0), coords)
+        self.assertIn((2, 0), coords)
+
+    def test_writer_does_not_lose_old_coords_on_player_replace(self):
+        """Prior accumulated coords are preserved when player section is replaced."""
+        from world.observable.state import WorldState
+        from world.observable.writer import WorldWriter
+
+        live = WorldState(tick=0)
+        ww = WorldWriter(live)
+
+        # First snap adds (0,0)
+        snap1 = self.parser.parse(json.dumps({"tick": 100, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 0, "cy": 0}],
+        }}), current_tick=100)
+        ww.integrate_snapshot(snap1)
+        self.assertIn((0, 0), live.player.exploration.charted_chunk_coords)
+
+        # Second snap (player replaced) — old coords must survive
+        snap2 = self.parser.parse(json.dumps({"tick": 101, "player": {
+            "position": {"x": 5, "y": 5}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 1, "cy": 0}],
+        }}), current_tick=101)
+        ww.integrate_snapshot(snap2)
+        # Both old and new coords present
+        self.assertIn((0, 0), live.player.exploration.charted_chunk_coords)
+        self.assertIn((1, 0), live.player.exploration.charted_chunk_coords)
+
+    def test_chunk_map_query_via_wq_reflects_accumulated_coords(self):
+        """wq.chunk_map shows the accumulated charted_chunk_coords."""
+        from world.observable.state import WorldState
+        from world.observable.writer import WorldWriter
+
+        live = WorldState(tick=0)
+        ww = WorldWriter(live)
+        snap = self.parser.parse(json.dumps({"tick": 100, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "newly_charted_chunks": [{"cx": 5, "cy": 3}],
+        }}), current_tick=100)
+        ww.integrate_snapshot(snap)
+
+        wq = WorldQuery(live)
+        self.assertTrue(wq.chunk_map.is_charted(5, 3))
+        self.assertFalse(wq.chunk_map.is_charted(0, 0))
+
+
+class TestStateParserTileMapIntegration(unittest.TestCase):
+    """
+    Integration tests: tile_map flows through StateParser → WorldState →
+    WorldWriter accumulation → WorldQuery accessors.
+    """
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def _state_with_tiles(self, entries):
+        raw = json.dumps({"tick": 100, "tile_map": entries})
+        return self.parser.parse(raw, current_tick=100)
+
+    def test_tile_map_accessible_via_wq(self):
+        state = self._state_with_tiles([{"x": 3, "y": 5, "tile": "water"}])
+        wq = WorldQuery(state)
+        self.assertEqual(wq.tile_at(3, 5), "water")
+
+    def test_is_water_via_wq(self):
+        state = self._state_with_tiles([{"x": 0, "y": 0, "tile": "deepwater"}])
+        wq = WorldQuery(state)
+        self.assertTrue(wq.is_water(0, 0))
+
+    def test_is_buildable_via_wq(self):
+        state = self._state_with_tiles([{"x": 1, "y": 1, "tile": "water"}])
+        wq = WorldQuery(state)
+        self.assertFalse(wq.is_buildable(1, 1))
+        self.assertTrue(wq.is_buildable(0, 0))  # unobserved → buildable
+
+    def test_tile_map_writer_accumulation(self):
+        """Successive snapshots accumulate tile_map (union merge)."""
+        from world.observable.state import WorldState
+        from world.observable.writer import WorldWriter
+        live = WorldState(tick=0)
+        snap1 = self._state_with_tiles([{"x": 0, "y": 0, "tile": "water"}])
+        snap2 = self._state_with_tiles([{"x": 1, "y": 0, "tile": "deepwater"}])
+        ww = WorldWriter(live)
+        ww.integrate_snapshot(snap1)
+        ww.integrate_snapshot(snap2)
+        self.assertIn((0, 0), live.tile_map)
+        self.assertIn((1, 0), live.tile_map)
+
+    def test_tile_map_section_staleness(self):
+        state = self._state_with_tiles([])
+        wq = WorldQuery(state)
+        # Observed at tick 100; queried at tick 100 → staleness = 0
+        self.assertEqual(wq.section_staleness("tile_map", 100), 0)
+        # Queried at tick 200 → staleness = 100
+        self.assertEqual(wq.section_staleness("tile_map", 200), 100)
+        # Section that was never stamped → None
+        self.assertIsNone(wq.section_staleness("logistics", 100))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

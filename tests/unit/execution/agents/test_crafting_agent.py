@@ -404,5 +404,36 @@ class TestCraftingAgentPendingPatches(unittest.TestCase):
         self.assertEqual(agent.pending_patches(), [])
 
 
+# ===========================================================================
+# Section 7 — teardown()
+# ===========================================================================
+
+class TestCraftingAgentTeardown(unittest.TestCase):
+    """
+    CraftingAgent inherits teardown() from AgentProtocol — always returns [].
+    Crafting is not a persistent Lua operation, so no cleanup action is needed.
+    """
+
+    def test_teardown_returns_empty(self):
+        agent = _make_agent()
+        self.assertEqual(agent.teardown(), [])
+
+    def test_teardown_after_activate_returns_empty(self):
+        agent = _make_agent()
+        task = _Task(targets=_gear_targets())
+        agent.activate(task, _make_bb(), _WQ(), _KB)
+        self.assertEqual(agent.teardown(), [])
+
+    def test_teardown_after_ticking_returns_empty(self):
+        agent = _make_agent()
+        task = _Task(targets=_gear_targets())
+        bb = _make_bb()
+        wq = _WQ()
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)
+        self.assertEqual(agent.teardown(), [])
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

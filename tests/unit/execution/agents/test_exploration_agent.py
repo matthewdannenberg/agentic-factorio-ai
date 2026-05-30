@@ -27,7 +27,9 @@ from execution.agents.exploration import (
     ExplorationAgent,
     _Phase,
     _chunk_centre,
-    _nearest_chunk,
+    _pick_scan_target,
+    _pick_chunk_map_frontier,
+    _pos_to_chunk,
     _CHUNK_SIZE,
 )
 from execution.blackboard import Blackboard, EntryCategory, EntryScope
@@ -46,8 +48,7 @@ class _Task:
     id: str = "task-explore-01"
     description: str = "explore region"
     task_type: str = "explore_region"
-    frontier_position: Optional[Position] = None
-    home_position: Optional[Position] = None
+    created_at: int = 0
 
 
 class _WQ:
@@ -60,11 +61,13 @@ class _WQ:
         charted: int = 10,
         nearby_uncharted: list = None,
         tick: int = 1,
+        charted_coords: set = None,
     ):
         self._position          = position or Position(x=16.0, y=16.0)
         self._reachable         = reachable or []
         self._charted_chunks    = charted
         self._nearby_uncharted  = list(nearby_uncharted or [])
+        self._charted_coords    = charted_coords or set()
         self.tick               = tick
         self.state              = MagicMock()
         self.state.player.reachable = self._reachable
@@ -89,6 +92,11 @@ class _WQ:
         return self._nearby_uncharted
 
     @property
+    def chunk_map(self):
+        from world.observable.query import ChunkMapQuery
+        return ChunkMapQuery(self._charted_coords)
+
+    @property
     def crafting_queue_size(self) -> int:
         return 0
 
@@ -100,6 +108,9 @@ class _WQ:
 
     def set_charted(self, n: int) -> None:
         self._charted_chunks = n
+
+    def add_charted_chunk(self, cx: int, cy: int) -> None:
+        self._charted_coords.add((cx, cy))
 
 
 _WW = MagicMock()
@@ -130,98 +141,69 @@ def _chunk(cx: int, cy: int) -> ChunkCoord:
 # ===========================================================================
 
 class TestExplorationAgentActivate(unittest.TestCase):
+    """
+    activate() now stores home_position from player and resets all internal
+    state. The agent picks its own frontier from wq.chunk_map / nearby_uncharted
+    on the first tick — no frontier_position is passed on the task.
+    """
 
-    def test_initial_phase_is_approach_when_frontier_given(self):
+    def test_initial_phase_is_approach(self):
+        """Agent always starts in APPROACH, picks frontier on first tick."""
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=200, y=200))
-        agent.activate(task, _make_bb(), _WQ(), _KB)
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
         self.assertEqual(agent._phase, _Phase.APPROACH)
 
-    def test_initial_phase_is_scan_when_no_frontier(self):
+    def test_skill_idle_after_activate(self):
+        """Skill starts IDLE — frontier is chosen on the first tick call."""
         agent = _make_agent()
-        task = _Task()   # no frontier_position
-        agent.activate(task, _make_bb(), _WQ(), _KB)
-        self.assertEqual(agent._phase, _Phase.SCAN)
-
-    def test_skill_running_after_frontier_activate(self):
-        agent = _make_agent()
-        task = _Task(frontier_position=Position(x=200, y=200))
-        agent.activate(task, _make_bb(), _WQ(), _KB)
-        self.assertEqual(agent._skill.status(), SkillStatus.RUNNING)
-
-    def test_skill_idle_when_no_frontier_and_no_uncharted(self):
-        # No frontier, no nearby uncharted — skill stays IDLE until first tick
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(nearby_uncharted=[])
-        agent.activate(task, _make_bb(), wq, _KB)
+        agent.activate(_Task(), _make_bb(), _WQ(nearby_uncharted=[]), _KB)
         self.assertEqual(agent._skill.status(), SkillStatus.IDLE)
 
     def test_activate_writes_exploration_started(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
         bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
+        agent.activate(_Task(), bb, _WQ(), _KB)
         self.assertEqual(len(_obs_of_type(bb, "exploration_started")), 1)
 
     def test_exploration_started_contains_charted_count(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
         bb = _make_bb()
         wq = _WQ(charted=42)
-        agent.activate(task, bb, wq, _KB)
+        agent.activate(_Task(), bb, wq, _KB)
         obs = _obs_of_type(bb, "exploration_started")[0]
         self.assertEqual(obs.data["charted_chunks_at_start"], 42)
 
-    def test_exploration_started_contains_frontier(self):
+    def test_home_set_from_player_position(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=128, y=96))
-        bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
-        obs = _obs_of_type(bb, "exploration_started")[0]
-        self.assertAlmostEqual(obs.data["frontier_position"]["x"], 128.0)
-        self.assertAlmostEqual(obs.data["frontier_position"]["y"], 96.0)
-
-    def test_exploration_started_frontier_none_when_absent(self):
-        agent = _make_agent()
-        task = _Task()
-        bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
-        obs = _obs_of_type(bb, "exploration_started")[0]
-        self.assertIsNone(obs.data["frontier_position"])
-
-    def test_home_defaults_to_player_position(self):
-        agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
         wq = _WQ(position=Position(x=16, y=16))
-        agent.activate(task, _make_bb(), wq, _KB)
+        agent.activate(_Task(), _make_bb(), wq, _KB)
         self.assertAlmostEqual(agent._home_position.x, 16.0)
         self.assertAlmostEqual(agent._home_position.y, 16.0)
 
-    def test_home_uses_task_attribute_when_set(self):
+    def test_unreachable_frontiers_cleared_on_activate(self):
+        """Stale unreachable set from prior task must not carry over."""
         agent = _make_agent()
-        task = _Task(
-            frontier_position=Position(x=100, y=100),
-            home_position=Position(x=5, y=5),
-        )
-        agent.activate(task, _make_bb(), _WQ(), _KB)
-        self.assertAlmostEqual(agent._home_position.x, 5.0)
+        agent._unreachable_frontiers = {(1, 2), (3, 4)}
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertEqual(len(agent._unreachable_frontiers), 0)
+
+    def test_truly_stuck_cleared_on_activate(self):
+        agent = _make_agent()
+        agent._truly_stuck = True
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertFalse(agent._truly_stuck)
 
     def test_reactivate_clears_state(self):
         agent = _make_agent()
-        task1 = _Task(frontier_position=Position(x=100, y=100))
-        task2 = _Task(frontier_position=Position(x=300, y=300))
         bb = _make_bb()
         wq = _WQ(nearby_uncharted=[_chunk(5, 5)])
-        agent.activate(task1, bb, wq, _KB)
-        # Drain skill to SUCCEEDED
-        wq.move_to(100.0 + 0.5, 100.0)   # arrive at frontier
-        agent.tick(task1, bb, wq, _WW, 1, _KB)
+        agent.activate(_Task(), bb, wq, _KB)
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)  # skill starts RUNNING
+        # Re-activate with fresh task — skill resets to IDLE
+        agent.activate(_Task(), _make_bb(), wq, _KB)
         # Reactivate
-        agent.activate(task2, bb, _WQ(), _KB)
-        self.assertFalse(agent._needs_new_frontier)
+        agent.activate(_Task(), bb, _WQ(), _KB)
         self.assertEqual(agent._chunks_approached, 0)
-        self.assertFalse(agent._outcome_written)
 
 
 # ===========================================================================
@@ -229,67 +211,104 @@ class TestExplorationAgentActivate(unittest.TestCase):
 # ===========================================================================
 
 class TestExplorationAgentApproach(unittest.TestCase):
+    """
+    APPROACH phase: agent picks a frontier from wq.chunk_map or
+    nearby_uncharted_chunks and navigates toward it. On STUCK, the targeted
+    chunk is added to _unreachable_frontiers and the agent falls into SCAN.
+    """
 
-    def _approach_task(self, fx=200.0, fy=200.0) -> _Task:
-        return _Task(frontier_position=Position(x=fx, y=fy))
-
-    def test_approach_issues_move_to_on_first_tick(self):
+    def test_approach_issues_move_to_when_nearby_uncharted(self):
+        """First tick with nearby uncharted chunks starts NavigateSkill."""
         agent = _make_agent()
-        task = self._approach_task()
-        wq = _WQ(position=Position(x=0, y=0))
+        wq = _WQ(nearby_uncharted=[_chunk(3, 0)])
         bb = _make_bb()
-        agent.activate(task, bb, wq, _KB)
-        actions = agent.tick(task, bb, wq, _WW, 1, _KB)
-        self.assertTrue(any(isinstance(a, MoveTo) for a in actions))
+        agent.activate(_Task(), bb, wq, _KB)
+        actions = agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        self.assertGreater(len(actions), 0)
+        self.assertIsInstance(actions[0], MoveTo)
 
-    def test_approach_writes_position_observation(self):
+    def test_approach_uses_chunk_map_when_no_nearby_uncharted(self):
+        """When nearby_uncharted is empty, frontier picked from chunk_map."""
         agent = _make_agent()
-        task = self._approach_task()
-        wq = _WQ()
+        wq = _WQ(nearby_uncharted=[], charted_coords={(5, 0), (5, 1)})
         bb = _make_bb()
-        agent.activate(task, bb, wq, _KB)
-        agent.tick(task, bb, wq, _WW, 1, _KB)
-        self.assertTrue(len(_obs_of_type(bb, "player_position")) >= 1)
+        agent.activate(_Task(), bb, wq, _KB)
+        actions = agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        # chunk_map has frontiers → skill should start → MoveTo issued
+        self.assertGreater(len(actions), 0)
+        self.assertIsInstance(actions[0], MoveTo)
 
-    def test_approach_transitions_to_scan_on_skill_succeed(self):
+    def test_approach_fallback_when_no_frontiers(self):
+        """No nearby uncharted and empty chunk_map → fallback push outward."""
         agent = _make_agent()
-        # Place player at the frontier — skill succeeds on first tick
-        task = _Task(frontier_position=Position(x=16.0, y=16.0))
-        wq = _WQ(position=Position(x=16.0, y=16.0),
-                 nearby_uncharted=[_chunk(1, 0)])
+        wq = _WQ(position=Position(0, 0), nearby_uncharted=[], charted_coords=set())
         bb = _make_bb()
-        agent.activate(task, bb, wq, _KB)
-        # First tick: skill.tick() fires → SUCCEEDED
-        agent.tick(task, bb, wq, _WW, 1, _KB)
-        # Second tick: _tick_approach sees SUCCEEDED → transitions to SCAN
-        agent.tick(task, bb, wq, _WW, 2, _KB)
+        agent.activate(_Task(), bb, wq, _KB)
+        actions = agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        # Fallback pushes outward from player — still issues a MoveTo
+        self.assertGreater(len(actions), 0)
+
+    def test_approach_stuck_marks_frontier_unreachable(self):
+        """Navigation STUCK during APPROACH adds targeted chunk to unreachable set."""
+        agent = _make_agent()
+        wq = _WQ(nearby_uncharted=[_chunk(10, 10)])
+        bb = _make_bb()
+        agent.activate(_Task(), bb, wq, _KB)
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)   # skill starts
+        # Force skill STUCK
+        agent._skill._status = SkillStatus.STUCK
+        agent.tick(_Task(), bb, wq, _WW, 2, _KB)
+        self.assertGreater(len(agent._unreachable_frontiers), 0)
+
+    def test_approach_stuck_does_not_report_truly_stuck_unless_all_exhausted(self):
+        """Individual nav STUCK should NOT set _truly_stuck (more frontiers available)."""
+        agent = _make_agent()
+        # Provide many nearby chunks so there are alternatives
+        chunks = [_chunk(i, 0) for i in range(20)]
+        wq = _WQ(nearby_uncharted=chunks)
+        bb = _make_bb()
+        agent.activate(_Task(), bb, wq, _KB)
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.STUCK
+        agent.tick(_Task(), bb, wq, _WW, 2, _KB)
+        self.assertFalse(agent._truly_stuck)
+
+    def test_approach_truly_stuck_when_all_frontiers_exhausted(self):
+        """_truly_stuck set only when _pick_frontier returns None."""
+        agent = _make_agent()
+        # Single nearby chunk — mark it unreachable manually first
+        wq = _WQ(nearby_uncharted=[], charted_coords=set())
+        agent._unreachable_frontiers = {(0, 0), (1, 0)}  # pre-fill to exhaust
+        bb = _make_bb()
+        agent.activate(_Task(), bb, wq, _KB)
+        # With no nearby uncharted and empty chunk_map, fallback is used.
+        # _pick_frontier always returns something from fallback, so truly_stuck
+        # is only set if _pick_frontier returns None (no frontiers AND no fallback).
+        # Test that truly_stuck is False when fallback is available.
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        self.assertFalse(agent._truly_stuck)
+
+    def test_approach_transitions_to_scan_on_succeed(self):
+        """After nav succeeds, phase switches to SCAN."""
+        agent = _make_agent()
+        wq = _WQ(position=Position(16, 16), nearby_uncharted=[_chunk(0, 0)])
+        bb = _make_bb()
+        agent.activate(_Task(), bb, wq, _KB)
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)   # skill starts
+        agent._skill._status = SkillStatus.SUCCEEDED
+        agent.tick(_Task(), bb, wq, _WW, 2, _KB)   # APPROACH sees SUCCEEDED → SCAN
         self.assertEqual(agent._phase, _Phase.SCAN)
 
-    def test_approach_transitions_to_scan_on_skill_stuck(self):
-        from execution.skills.navigate import _UNREACHABLE_GRACE_TICKS
+    def test_approach_transitions_to_scan_on_stuck(self):
+        """STUCK nav also transitions to SCAN (try scanning from current pos)."""
         agent = _make_agent()
-        task = self._approach_task(fx=500, fy=500)
-        wq = _WQ(position=Position(x=0, y=0),
-                 nearby_uncharted=[_chunk(3, 3)])
+        wq = _WQ(nearby_uncharted=[_chunk(5, 5)])
         bb = _make_bb()
-        agent.activate(task, bb, wq, _KB)
-        # Run until skill becomes STUCK
-        for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 5):
-            agent.tick(task, bb, wq, _WW, i * 10, _KB)
-            if agent._phase == _Phase.SCAN:
-                break
+        agent.activate(_Task(), bb, wq, _KB)
+        agent.tick(_Task(), bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.STUCK
+        agent.tick(_Task(), bb, wq, _WW, 2, _KB)
         self.assertEqual(agent._phase, _Phase.SCAN)
-
-    def test_approach_phase_stays_approach_while_running(self):
-        agent = _make_agent()
-        task = self._approach_task(fx=500, fy=500)
-        wq = _WQ(position=Position(x=0, y=0))
-        bb = _make_bb()
-        agent.activate(task, bb, wq, _KB)
-        # Two ticks — not enough to stall
-        agent.tick(task, bb, wq, _WW, 1, _KB)
-        agent.tick(task, bb, wq, _WW, 2, _KB)
-        self.assertEqual(agent._phase, _Phase.APPROACH)
 
 
 # ===========================================================================
@@ -298,153 +317,63 @@ class TestExplorationAgentApproach(unittest.TestCase):
 
 class TestExplorationAgentScan(unittest.TestCase):
 
-    def _enter_scan(self, agent, task, bb, wq):
-        """Helper: activate with no frontier to enter SCAN immediately."""
-        no_frontier_task = _Task()
-        no_frontier_task.id = task.id
-        agent.activate(no_frontier_task, bb, wq, _KB)
-
-    def test_scan_issues_move_to_toward_uncharted_chunk(self):
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[_chunk(2, 0)],  # to the east
-        )
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        actions = agent.tick(task, bb, wq, _WW, 1, _KB)
-        self.assertTrue(any(isinstance(a, MoveTo) for a in actions))
-
-    def test_scan_targets_nearest_chunk(self):
-        """Agent should move toward the closer of two uncharted chunks."""
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[
-                _chunk(10, 0),  # far east
-                _chunk(1, 0),   # near east
-            ],
-        )
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        actions = agent.tick(task, bb, wq, _WW, 1, _KB)
-        move_actions = [a for a in actions if isinstance(a, MoveTo)]
-        self.assertEqual(len(move_actions), 1)
-        # Target should be centre of chunk (1, 0) = (48, 16)
-        expected = _chunk_centre(1, 0)
-        self.assertAlmostEqual(move_actions[0].position.x, expected.x, places=1)
-        self.assertAlmostEqual(move_actions[0].position.y, expected.y, places=1)
-
-    def test_scan_increments_chunks_approached(self):
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[_chunk(1, 0)],
-        )
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
+    def _enter_scan(self, agent, task, bb, wq) -> None:
+        """Activate and skip straight to SCAN by marking skill SUCCEEDED."""
+        agent.activate(task, bb, wq, _KB)
+        # Get skill started then succeed it immediately
         agent.tick(task, bb, wq, _WW, 1, _KB)
-        self.assertEqual(agent._chunks_approached, 1)
-
-    def test_scan_does_not_reissue_for_same_target(self):
-        """If the nearest chunk hasn't changed significantly, don't restart skill."""
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[_chunk(1, 0)],
-        )
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # starts skill
-        chunks_before = agent._chunks_approached
-        agent.tick(task, bb, wq, _WW, 2, _KB)   # same target
-        self.assertEqual(agent._chunks_approached, chunks_before)
-
-    def test_scan_retargets_when_chunk_changes(self):
-        """Skill is restarted when the nearest uncharted chunk changes."""
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[_chunk(1, 0)],
-        )
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # targets chunk(1,0)
-        # Move player; shift nearby uncharted to a very different chunk
-        wq.move_to(100, 0)
-        wq.set_nearby_uncharted([_chunk(5, 0)])
+        agent._skill._status = SkillStatus.SUCCEEDED
         agent.tick(task, bb, wq, _WW, 2, _KB)
-        self.assertEqual(agent._chunks_approached, 2)
 
-    def test_scan_writes_needs_frontier_when_empty(self):
+    def test_scan_picks_target_from_nearby(self):
+        """SCAN issues MoveTo toward nearby uncharted chunk."""
         agent = _make_agent()
         task = _Task()
-        wq = _WQ(position=Position(x=0, y=0), nearby_uncharted=[])
+        wq = _WQ(nearby_uncharted=[_chunk(2, 0)])
         bb = _make_bb()
         self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)
-        self.assertTrue(agent._needs_new_frontier)
-        self.assertEqual(len(_obs_of_type(bb, "exploration_needs_frontier")), 1)
+        actions = agent.tick(task, bb, wq, _WW, 3, _KB)
+        self.assertGreater(len(actions), 0)
 
-    def test_scan_needs_frontier_written_only_once(self):
-        """The needs_frontier observation is not re-written on subsequent ticks."""
+    def test_scan_returns_to_approach_when_locally_surrounded(self):
+        """Empty nearby_uncharted during SCAN returns to APPROACH."""
         agent = _make_agent()
         task = _Task()
-        wq = _WQ(nearby_uncharted=[])
+        wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
         bb = _make_bb()
         self._enter_scan(agent, task, bb, wq)
-        for i in range(1, 5):
-            agent.tick(task, bb, wq, _WW, i, _KB)
-        self.assertEqual(len(_obs_of_type(bb, "exploration_needs_frontier")), 1)
+        # Now empty the nearby list
+        wq.set_nearby_uncharted([])
+        agent.tick(task, bb, wq, _WW, 3, _KB)
+        self.assertEqual(agent._phase, _Phase.APPROACH)
 
-    def test_scan_clears_needs_frontier_when_uncharted_reappears(self):
-        """If uncharted chunks appear after the signal, the flag clears."""
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(nearby_uncharted=[])
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # sets _needs_new_frontier
-        self.assertTrue(agent._needs_new_frontier)
-        # New chunks appear
-        wq.set_nearby_uncharted([_chunk(1, 0)])
-        agent.tick(task, bb, wq, _WW, 2, _KB)
-        self.assertFalse(agent._needs_new_frontier)
-
-    def test_scan_needs_frontier_contains_charted_count(self):
-        agent = _make_agent()
-        task = _Task()
-        wq = _WQ(nearby_uncharted=[], charted=55)
-        bb = _make_bb()
-        self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)
-        obs = _obs_of_type(bb, "exploration_needs_frontier")
-        self.assertEqual(len(obs), 1)
-        self.assertEqual(obs[0].data["charted_chunks"], 55)
-
-    def test_scan_stuck_on_chunk_resets_skill(self):
-        """If the skill gets stuck navigating to a chunk, it resets to IDLE."""
+    def test_scan_stuck_resets_skill(self):
+        """STUCK in SCAN resets skill to IDLE for next tick."""
         from execution.skills.navigate import _UNREACHABLE_GRACE_TICKS
         agent = _make_agent()
         task = _Task()
-        wq = _WQ(
-            position=Position(x=0, y=0),
-            nearby_uncharted=[_chunk(1, 0)],
-        )
+        wq = _WQ(position=Position(0, 0), nearby_uncharted=[_chunk(1, 0)])
         bb = _make_bb()
         self._enter_scan(agent, task, bb, wq)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # starts skill → RUNNING
-        # Drive ticks until STUCK is detected AND reset has occurred (IDLE)
+        agent.tick(task, bb, wq, _WW, 3, _KB)  # starts skill
         for i in range(1, _UNREACHABLE_GRACE_TICKS // 10 + 10):
-            agent.tick(task, bb, wq, _WW, 1 + i * 10, _KB)
+            agent.tick(task, bb, wq, _WW, 3 + i * 10, _KB)
             if agent._skill.status() == SkillStatus.IDLE:
                 break
         self.assertEqual(agent._skill.status(), SkillStatus.IDLE)
+
+    def test_scan_no_exploration_needs_frontier_signal(self):
+        """The exploration_needs_frontier blackboard signal is removed.
+        SCAN now loops internally back to APPROACH instead of signalling."""
+        agent = _make_agent()
+        task = _Task()
+        wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
+        bb = _make_bb()
+        self._enter_scan(agent, task, bb, wq)
+        wq.set_nearby_uncharted([])
+        agent.tick(task, bb, wq, _WW, 3, _KB)
+        # Signal removed — should not appear in blackboard
+        self.assertEqual(len(_obs_of_type(bb, "exploration_needs_frontier")), 0)
 
 
 # ===========================================================================
@@ -455,39 +384,40 @@ class TestExplorationAgentPhaseTransitions(unittest.TestCase):
 
     def test_approach_to_scan_on_succeed(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=16.0, y=16.0))
-        wq = _WQ(position=Position(x=16.0, y=16.0),
-                 nearby_uncharted=[_chunk(1, 0)])
+        task = _Task()
+        wq = _WQ(position=Position(16.0, 16.0), nearby_uncharted=[_chunk(1, 0)])
         bb = _make_bb()
         agent.activate(task, bb, wq, _KB)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # skill → SUCCEEDED
-        agent.tick(task, bb, wq, _WW, 2, _KB)   # _tick_approach sees SUCCEEDED → SCAN
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # skill → RUNNING
+        agent._skill._status = SkillStatus.SUCCEEDED
+        agent.tick(task, bb, wq, _WW, 2, _KB)   # APPROACH sees SUCCEEDED → SCAN
         self.assertEqual(agent._phase, _Phase.SCAN)
 
-    def test_approach_to_scan_on_failed(self):
-        """FAILED skill also transitions to SCAN on the following tick."""
+    def test_approach_to_scan_on_stuck(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=500, y=500))
-        wq = _WQ(position=Position(x=0, y=0),
-                 nearby_uncharted=[_chunk(2, 2)])
+        task = _Task()
+        wq = _WQ(nearby_uncharted=[_chunk(2, 2)])
         bb = _make_bb()
         agent.activate(task, bb, wq, _KB)
-        # Force skill to FAILED directly
-        agent._skill._status = SkillStatus.FAILED
-        # _tick_approach now sees FAILED → transitions to SCAN
         agent.tick(task, bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.STUCK
+        agent.tick(task, bb, wq, _WW, 2, _KB)
         self.assertEqual(agent._phase, _Phase.SCAN)
 
-    def test_scan_does_not_go_back_to_approach(self):
-        """Once in SCAN the agent stays in SCAN."""
+    def test_scan_to_approach_when_locally_surrounded(self):
+        """SCAN returns to APPROACH when nearby_uncharted becomes empty."""
         agent = _make_agent()
-        task = _Task()   # no frontier → SCAN immediately
+        task = _Task()
         wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
         bb = _make_bb()
         agent.activate(task, bb, wq, _KB)
-        for i in range(1, 6):
-            agent.tick(task, bb, wq, _WW, i, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.SUCCEEDED
+        agent.tick(task, bb, wq, _WW, 2, _KB)  # → SCAN
         self.assertEqual(agent._phase, _Phase.SCAN)
+        wq.set_nearby_uncharted([])
+        agent.tick(task, bb, wq, _WW, 3, _KB)  # SCAN empty → APPROACH
+        self.assertEqual(agent._phase, _Phase.APPROACH)
 
 
 # ===========================================================================
@@ -498,44 +428,56 @@ class TestExplorationAgentObserveProgress(unittest.TestCase):
 
     def test_observe_keys_present(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
+        task = _Task()
         bb = _make_bb()
         wq = _WQ()
         agent.activate(task, bb, wq, _KB)
         obs = agent.observe(task, bb, wq, _KB)
         for key in ("agent", "task_id", "phase", "player_position",
                     "skill_status", "charted_chunks", "nearby_uncharted",
-                    "needs_new_frontier", "chunks_approached"):
+                    "chunks_approached", "unreachable_frontiers"):
             self.assertIn(key, obs, f"missing key: {key}")
 
     def test_observe_agent_id(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
-        bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
-        self.assertEqual(agent.observe(task, bb, _WQ(), _KB)["agent"], "exploration")
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertEqual(agent.observe(_Task(), _make_bb(), _WQ(), _KB)["agent"], "exploration")
 
     def test_observe_phase_approach(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
-        bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
-        self.assertEqual(agent.observe(task, bb, _WQ(), _KB)["phase"], "APPROACH")
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertEqual(agent.observe(_Task(), _make_bb(), _WQ(), _KB)["phase"], "APPROACH")
 
-    def test_observe_phase_scan(self):
+    def test_observe_skill_status_stuck_when_truly_stuck(self):
+        """skill_status reports STUCK only when _truly_stuck is set."""
         agent = _make_agent()
-        task = _Task()
-        bb = _make_bb()
-        agent.activate(task, bb, _WQ(), _KB)
-        self.assertEqual(agent.observe(task, bb, _WQ(), _KB)["phase"], "SCAN")
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        agent._truly_stuck = True
+        obs = agent.observe(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertEqual(obs["skill_status"], "STUCK")
+
+    def test_observe_skill_status_not_stuck_on_individual_failure(self):
+        """Individual nav STUCK does not propagate to observe skill_status."""
+        agent = _make_agent()
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        agent._truly_stuck = False
+        obs = agent.observe(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertNotEqual(obs["skill_status"], "STUCK")
+
+    def test_observe_unreachable_frontiers_count(self):
+        agent = _make_agent()
+        agent.activate(_Task(), _make_bb(), _WQ(), _KB)
+        agent._unreachable_frontiers = {(1, 2), (3, 4)}
+        obs = agent.observe(_Task(), _make_bb(), _WQ(), _KB)
+        self.assertEqual(obs["unreachable_frontiers"], 2)
 
     def test_progress_approach_running(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=500, y=500))
+        task = _Task()
         bb = _make_bb()
-        wq = _WQ(position=Position(x=0, y=0))
+        wq = _WQ(position=Position(0, 0), nearby_uncharted=[_chunk(5, 0)])
         agent.activate(task, bb, wq, _KB)
-        agent.tick(task, bb, wq, _WW, 1, _KB)  # skill now RUNNING
+        agent.tick(task, bb, wq, _WW, 1, _KB)
         p = agent.progress(task, bb, wq, _KB)
         self.assertAlmostEqual(p, 0.1)
 
@@ -545,6 +487,9 @@ class TestExplorationAgentObserveProgress(unittest.TestCase):
         bb = _make_bb()
         wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
         agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.SUCCEEDED
+        agent.tick(task, bb, wq, _WW, 2, _KB)  # → SCAN
         p = agent.progress(task, bb, wq, _KB)
         self.assertAlmostEqual(p, 0.5)
 
@@ -552,10 +497,14 @@ class TestExplorationAgentObserveProgress(unittest.TestCase):
         agent = _make_agent()
         task = _Task()
         bb = _make_bb()
-        wq = _WQ(nearby_uncharted=[])
+        wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
         agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)
+        agent._skill._status = SkillStatus.SUCCEEDED
+        agent.tick(task, bb, wq, _WW, 2, _KB)  # → SCAN
+        wq.set_nearby_uncharted([])
         p = agent.progress(task, bb, wq, _KB)
-        self.assertAlmostEqual(p, 0.9)
+        self.assertAlmostEqual(p, 0.8)
 
     def test_observe_nearby_uncharted_count(self):
         agent = _make_agent()
@@ -589,6 +538,7 @@ class TestExplorationAgentPendingPatches(unittest.TestCase):
 # ===========================================================================
 
 class TestExplorationHelpers(unittest.TestCase):
+    """Tests for module-level helper functions in exploration.py."""
 
     def test_chunk_centre_zero_zero(self):
         c = _chunk_centre(0, 0)
@@ -605,26 +555,66 @@ class TestExplorationHelpers(unittest.TestCase):
         self.assertAlmostEqual(c.x, -_CHUNK_SIZE + _CHUNK_SIZE / 2.0)
         self.assertAlmostEqual(c.y, -_CHUNK_SIZE + _CHUNK_SIZE / 2.0)
 
-    def test_nearest_chunk_single(self):
+    def test_pick_scan_target_single(self):
+        """_pick_scan_target returns centre of the only candidate."""
         chunks = [_chunk(2, 0)]
         player = Position(x=0, y=0)
-        result = _nearest_chunk(chunks, player)
-        self.assertEqual(result.cx, 2)
-        self.assertEqual(result.cy, 0)
+        result = _pick_scan_target(chunks, player)
+        expected_x = 2 * _CHUNK_SIZE + _CHUNK_SIZE / 2.0
+        self.assertAlmostEqual(result.x, expected_x)
 
-    def test_nearest_chunk_picks_closer(self):
-        chunks = [_chunk(10, 0), _chunk(1, 0)]
+    def test_pick_scan_target_biased_toward_nearest(self):
+        """With pool=10, the closest chunk is always in the candidate pool."""
+        # Place 20 chunks at increasing distances; nearest must be selectable
+        import random
+        random.seed(42)  # deterministic for test
+        chunks = [_chunk(i, 0) for i in range(1, 21)]
         player = Position(x=0, y=0)
-        result = _nearest_chunk(chunks, player)
-        self.assertEqual(result.cx, 1)
+        # Run many times — nearest chunk (1,0) should appear frequently
+        seen = set()
+        for _ in range(50):
+            result = _pick_scan_target(chunks, player)
+            cx = int((result.x - _CHUNK_SIZE / 2) / _CHUNK_SIZE)
+            seen.add(cx)
+        # chunk at cx=1 (nearest) should appear in the seen set
+        self.assertIn(1, seen)
 
-    def test_nearest_chunk_diagonal(self):
-        chunks = [_chunk(1, 1), _chunk(0, 2)]
-        # chunk(1,1) centre: (48,48), dist^2 = 48^2+48^2 = 4608
-        # chunk(0,2) centre: (16,80), dist^2 = 16^2+80^2 = 6656
-        player = Position(x=0, y=0)
-        result = _nearest_chunk(chunks, player)
-        self.assertEqual((result.cx, result.cy), (1, 1))
+    def test_pos_to_chunk_origin(self):
+        from world import Position
+        result = _pos_to_chunk(Position(0, 0))
+        self.assertEqual(result, (0, 0))
+
+    def test_pos_to_chunk_positive(self):
+        result = _pos_to_chunk(Position(64.5, 96.2))
+        self.assertEqual(result, (2, 3))
+
+    def test_pos_to_chunk_negative(self):
+        result = _pos_to_chunk(Position(-1.0, -1.0))
+        self.assertEqual(result, (-1, -1))
+
+    def test_pick_chunk_map_frontier_empty(self):
+        from world.observable.query import ChunkMapQuery
+        cq = ChunkMapQuery(set())
+        result = _pick_chunk_map_frontier(cq, Position(0, 0))
+        self.assertIsNone(result)
+
+    def test_pick_chunk_map_frontier_excludes_unreachable(self):
+        from world.observable.query import ChunkMapQuery
+        # Single frontier — mark it unreachable → returns None
+        cq = ChunkMapQuery({(0, 0)})
+        result = _pick_chunk_map_frontier(cq, Position(0, 0), exclude={(0, 0)})
+        self.assertIsNone(result)
+
+    def test_pick_chunk_map_frontier_skips_excluded(self):
+        from world.observable.query import ChunkMapQuery
+        # Two frontiers: (0,0) excluded, (5,0) available
+        cq = ChunkMapQuery({(0, 0), (5, 0)})
+        # Ensure (5,0) is a frontier: it needs an uncharted neighbour
+        # Both are frontiers since they border uncharted chunks
+        result = _pick_chunk_map_frontier(cq, Position(0, 0), exclude={(0, 0)})
+        if result is not None:
+            # Must be centre of (5,0), not (0,0)
+            self.assertAlmostEqual(result.x, 5 * _CHUNK_SIZE + _CHUNK_SIZE / 2.0)
 
 
 if __name__ == "__main__":

@@ -600,11 +600,12 @@ class TestStateParserFullParse(unittest.TestCase):
             "damaged_entities": [],
             "destroyed_entities": [],
             "threat": {},
+            "tile_map": [],
         }
         state = self.parser.parse(json.dumps(full), current_tick=3600)
         for section in ("player", "entities", "resource_map", "ground_items",
                         "research", "logistics", "damaged_entities",
-                        "destroyed_entities", "threat"):
+                        "destroyed_entities", "threat", "tile_map"):
             self.assertIn(section, state.observed_at, f"Missing: {section}")
             self.assertEqual(state.observed_at[section], 3600)
 
@@ -640,6 +641,93 @@ class TestStateParserFullParse(unittest.TestCase):
     def test_game_time_seconds(self):
         state = WorldState(tick=3600)
         self.assertAlmostEqual(state.game_time_seconds, 60.0)
+
+
+class TestStateParserTileMap(unittest.TestCase):
+    """Tests for tile_map section parsing in StateParser."""
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def _parse(self, tile_map_data) -> "WorldState":
+        return self.parser.parse(
+            json.dumps({"tick": 100, "tile_map": tile_map_data}),
+            current_tick=100,
+        )
+
+    def test_tile_map_empty_list_parsed(self):
+        state = self._parse([])
+        self.assertEqual(state.tile_map, {})
+
+    def test_tile_map_water_entry_parsed(self):
+        state = self._parse([{"x": 5, "y": -3, "tile": "water"}])
+        self.assertIn((5, -3), state.tile_map)
+        self.assertEqual(state.tile_map[(5, -3)], "water")
+
+    def test_tile_map_multiple_entries(self):
+        state = self._parse([
+            {"x": 0, "y": 0, "tile": "water"},
+            {"x": 1, "y": 0, "tile": "deepwater"},
+            {"x": -1, "y": 2, "tile": "out-of-map"},
+        ])
+        self.assertEqual(len(state.tile_map), 3)
+        self.assertEqual(state.tile_map[(0, 0)], "water")
+        self.assertEqual(state.tile_map[(1, 0)], "deepwater")
+        self.assertEqual(state.tile_map[(-1, 2)], "out-of-map")
+
+    def test_tile_map_keys_are_int_tuples(self):
+        state = self._parse([{"x": 3, "y": 7, "tile": "water"}])
+        key = next(iter(state.tile_map))
+        self.assertIsInstance(key, tuple)
+        self.assertIsInstance(key[0], int)
+        self.assertIsInstance(key[1], int)
+
+    def test_tile_map_malformed_entry_skipped(self):
+        """Entries missing x, y, or tile are silently skipped."""
+        state = self._parse([
+            {"x": 0, "y": 0, "tile": "water"},   # valid
+            {"y": 1, "tile": "water"},            # missing x — skipped
+            {"x": 2, "tile": "water"},            # missing y — skipped
+            {"x": 3, "y": 3},                    # missing tile — skipped
+            {"x": 4, "y": 4, "tile": "deepwater"}, # valid
+        ])
+        self.assertEqual(len(state.tile_map), 2)
+        self.assertIn((0, 0), state.tile_map)
+        self.assertIn((4, 4), state.tile_map)
+
+    def test_tile_map_section_stamps_observed_at(self):
+        state = self._parse([])
+        self.assertIn("tile_map", state.observed_at)
+        self.assertEqual(state.observed_at["tile_map"], 100)
+
+    def test_tile_map_absent_not_stamped(self):
+        """When tile_map key is absent, observed_at is not stamped."""
+        state = self.parser.parse(json.dumps({"tick": 100}), current_tick=100)
+        self.assertNotIn("tile_map", state.observed_at)
+
+    def test_tile_map_absent_gives_empty_dict(self):
+        """Missing tile_map section → empty dict, not error."""
+        state = self.parser.parse(json.dumps({"tick": 100}), current_tick=100)
+        self.assertEqual(state.tile_map, {})
+
+    def test_tile_map_accumulates_across_partial_parses(self):
+        """Successive parses union-merge tile_map entries."""
+        from world.observable.writer import WorldWriter
+        state = self.parser.parse(
+            json.dumps({"tick": 100, "tile_map": [{"x": 0, "y": 0, "tile": "water"}]}),
+            current_tick=100,
+        )
+        snap = self.parser.parse(
+            json.dumps({"tick": 101, "tile_map": [{"x": 1, "y": 0, "tile": "deepwater"}]}),
+            current_tick=101,
+        )
+        WorldWriter(state).integrate_snapshot(snap)
+        self.assertIn((0, 0), state.tile_map)
+        self.assertIn((1, 0), state.tile_map)
+
+    def test_tile_map_negative_coords_parsed(self):
+        state = self._parse([{"x": -10, "y": -7, "tile": "water-green"}])
+        self.assertIn((-10, -7), state.tile_map)
 
 
 if __name__ == "__main__":

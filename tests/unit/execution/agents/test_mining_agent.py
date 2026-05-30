@@ -580,5 +580,72 @@ class TestMiningAgentPendingPatches(unittest.TestCase):
 
 
 
+# ===========================================================================
+# Section — teardown()
+# ===========================================================================
+
+class TestMiningAgentTeardown(unittest.TestCase):
+    """
+    MiningAgent.teardown() is called by the coordinator when a task resolves.
+
+    Contract:
+      - GATHER task: always returns [StopMining] (Lua miner may be active)
+      - CLEAR task:  returns [] (no persistent miner involved)
+      - _pending_stop is always cleared, regardless of task kind
+    """
+
+    def test_gather_task_teardown_returns_stop_mining(self):
+        """StopMining is always issued after a gather task."""
+        agent = _make_agent()
+        task = _gather_task()
+        bb = _make_bb()
+        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        agent.activate(task, bb, wq, _KB)
+        actions = agent.teardown()
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMining)
+
+    def test_gather_teardown_even_after_skill_succeeded(self):
+        """StopMining is safe to send even when MineSkill already succeeded.
+        The Lua mod treats a redundant StopMining as a no-op."""
+        agent = _make_agent()
+        task = _gather_task()
+        bb = _make_bb()
+        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        agent.activate(task, bb, wq, _KB)
+        # Force skill to succeeded state
+        agent._mine_skill._status = SkillStatus.SUCCEEDED
+        actions = agent.teardown()
+        self.assertIsInstance(actions[0], StopMining)
+
+    def test_clear_task_teardown_returns_empty(self):
+        """Clear tasks don't use MineSkill persistently — no StopMining needed."""
+        agent = _make_agent()
+        task = _clear_task()
+        bb = _make_bb()
+        wq = _WQ()
+        agent.activate(task, bb, wq, _KB)
+        actions = agent.teardown()
+        self.assertEqual(actions, [])
+
+    def test_teardown_clears_pending_stop(self):
+        """_pending_stop is always cleared after teardown."""
+        agent = _make_agent()
+        task = _gather_task()
+        bb = _make_bb()
+        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        agent.activate(task, bb, wq, _KB)
+        agent._pending_stop = True
+        agent.teardown()
+        self.assertFalse(agent._pending_stop)
+
+    def test_teardown_before_activate_returns_empty(self):
+        """teardown() before any task is assigned is safe and returns []."""
+        agent = _make_agent()
+        actions = agent.teardown()
+        self.assertEqual(actions, [])
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

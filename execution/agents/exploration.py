@@ -114,6 +114,8 @@ class ExplorationAgent(AgentProtocol):
         self._phase: _Phase = _Phase.APPROACH
         self._home_position: Optional[Position] = None
         self._current_target: Optional[Position] = None
+        self._current_frontier_chunk: Optional[tuple] = None   # (cx, cy)
+        self._unreachable_frontiers: set = set()
         self._chunks_approached: int = 0
 
     # ------------------------------------------------------------------
@@ -130,7 +132,10 @@ class ExplorationAgent(AgentProtocol):
         self._skill.reset()
         self._phase = _Phase.APPROACH
         self._current_target = None
+        self._current_frontier_chunk = None
+        self._unreachable_frontiers = set()
         self._chunks_approached = 0
+        self._truly_stuck: bool = False   # True only when all frontiers exhausted
 
         player_pos = wq.player_position() if wq is not None else None
         self._home_position = player_pos
@@ -170,15 +175,23 @@ class ExplorationAgent(AgentProtocol):
     ) -> dict:
         pos = wq.player_position()
         obs = self._skill.observe()
+        # Report STUCK to the coordinator only when all known frontiers have
+        # been marked unreachable. Individual nav failures are handled internally
+        # (unreachable_frontiers set) and should not trigger coordinator STUCK.
+        reported_skill_status = (
+            "STUCK" if self._truly_stuck
+            else self._skill.status().name
+        )
         obs.update({
-            "agent":             self.AGENT_ID,
-            "task_id":           task.id[:8],
-            "phase":             self._phase.name,
-            "player_position":   {"x": pos.x, "y": pos.y},
-            "skill_status":      self._skill.status().name,
-            "charted_chunks":    wq.charted_chunks,
-            "nearby_uncharted":  len(wq.nearby_uncharted_chunks),
-            "chunks_approached": self._chunks_approached,
+            "agent":                 self.AGENT_ID,
+            "task_id":               task.id[:8],
+            "phase":                 self._phase.name,
+            "player_position":       {"x": pos.x, "y": pos.y},
+            "skill_status":          reported_skill_status,
+            "charted_chunks":        wq.charted_chunks,
+            "nearby_uncharted":      len(wq.nearby_uncharted_chunks),
+            "chunks_approached":     self._chunks_approached,
+            "unreachable_frontiers": len(self._unreachable_frontiers),
         })
         return obs
 
@@ -236,28 +249,39 @@ class ExplorationAgent(AgentProtocol):
                 self._skill.start(target_position=target)
                 self._chunks_approached += 1
                 log.debug(
-                    "ExplorationAgent: APPROACH → %s (task=%s)",
-                    target, task.id[:8],
+                    "ExplorationAgent: APPROACH → %s (task=%s, unreachable_known=%d)",
+                    target, task.id[:8], len(self._unreachable_frontiers),
                 )
             else:
-                # Nowhere to go — drop into SCAN and see if nearby chunks appear.
-                log.debug(
-                    "ExplorationAgent: no frontier available, falling back to SCAN"
+                # No frontier available at all — all known frontiers are
+                # unreachable. Signal STUCK via skill_status so the coordinator
+                # can decide whether to fail the goal or wait.
+                # We do NOT enter SCAN here because there's nowhere to go.
+                log.warning(
+                    "ExplorationAgent: all known frontiers unreachable "
+                    "(%d marked) — task=%s",
+                    len(self._unreachable_frontiers), task.id[:8],
                 )
-                self._phase = _Phase.SCAN
-                return self._tick_scan(task, blackboard, wq, ww, tick)
+                self._truly_stuck = True
+                return []
 
         skill_status = self._skill.status()
 
         if skill_status in (SkillStatus.SUCCEEDED, SkillStatus.STUCK,
                             SkillStatus.FAILED):
             if skill_status == SkillStatus.STUCK:
-                log.debug(
-                    "ExplorationAgent: approach stalled at %s — switching to SCAN",
-                    wq.player_position(),
-                )
+                # Mark this frontier chunk as unreachable so we don't retry it.
+                if self._current_frontier_chunk is not None:
+                    self._unreachable_frontiers.add(self._current_frontier_chunk)
+                    log.debug(
+                        "ExplorationAgent: approach stalled — marking chunk %s "
+                        "unreachable (%d total unreachable)",
+                        self._current_frontier_chunk,
+                        len(self._unreachable_frontiers),
+                    )
             self._skill.reset()
             self._current_target = None
+            self._current_frontier_chunk = None
             self._phase = _Phase.SCAN
             return self._tick_scan(task, blackboard, wq, ww, tick)
 
@@ -328,27 +352,42 @@ class ExplorationAgent(AgentProtocol):
           1. wq.nearby_uncharted_chunks — closest _SCAN_CANDIDATE_POOL entries,
              pick one randomly (already near the frontier edge).
           2. wq.chunk_map.frontiers() — accumulated charted-chunk set; pick
-             from the nearest _SCAN_CANDIDATE_POOL frontier chunks randomly.
-          3. Outward push — no chunk data yet; push outward from player.
+             from the nearest _SCAN_CANDIDATE_POOL frontier chunks randomly,
+             excluding chunks in _unreachable_frontiers.
+          3. Outward push — no chunk data available yet.
+
+        Returns None only when all known frontiers have been marked unreachable
+        AND there are no nearby uncharted chunks. The caller treats None as a
+        signal to report STUCK to the coordinator.
         """
         player_pos = wq.player_position()
 
         # 1. Nearby uncharted chunks (PROXIMAL, most reliable).
+        # These are per-scan and not tracked in _unreachable_frontiers — if
+        # the player is near an uncharted chunk, try to reach it.
         nearby = wq.nearby_uncharted_chunks
         if nearby:
-            return _pick_scan_target(nearby, player_pos)
+            pos = _pick_scan_target(nearby, player_pos)
+            # Record the target chunk for possible unreachable marking.
+            self._current_frontier_chunk = _pos_to_chunk(pos)
+            return pos
 
-        # 2. Accumulated chunk_map frontiers (NON-PROXIMAL).
+        # 2. Accumulated chunk_map frontiers, skipping known-unreachable ones.
         chunk_map = wq.chunk_map
         if chunk_map:
-            frontier_pos = _pick_chunk_map_frontier(chunk_map, player_pos)
+            frontier_pos = _pick_chunk_map_frontier(
+                chunk_map, player_pos, self._unreachable_frontiers
+            )
             if frontier_pos is not None:
+                self._current_frontier_chunk = _pos_to_chunk(frontier_pos)
                 return frontier_pos
 
         # 3. Fallback: push outward.
         import math as _math
         radius = max(64.0, _math.sqrt(wq.charted_chunks) * 32.0)
-        return Position(x=player_pos.x + radius, y=player_pos.y)
+        fallback = Position(x=player_pos.x + radius, y=player_pos.y)
+        self._current_frontier_chunk = _pos_to_chunk(fallback)
+        return fallback
 
     # ------------------------------------------------------------------
     # Helpers
@@ -403,14 +442,31 @@ def _pick_scan_target(chunks, player_pos: Position) -> Position:
     return _chunk_centre(candidate.cx, candidate.cy)
 
 
-def _pick_chunk_map_frontier(chunk_map, player_pos: Position) -> Optional[Position]:
+def _pos_to_chunk(pos: Position) -> tuple:
+    """Return (cx, cy) chunk coordinates containing tile position pos."""
+    return (int(pos.x // _CHUNK_SIZE), int(pos.y // _CHUNK_SIZE))
+
+
+def _pick_chunk_map_frontier(
+    chunk_map,
+    player_pos: Position,
+    exclude: set = None,
+) -> Optional[Position]:
     """
     Pick a frontier position from the accumulated chunk_map.
-    Sorts frontiers by distance, selects randomly from the nearest pool.
+
+    Sorts frontiers by distance, selects randomly from the nearest
+    _SCAN_CANDIDATE_POOL candidates, skipping any in *exclude*.
+
+    Returns None if all frontiers are in *exclude* or no frontiers exist.
     """
     frontiers = chunk_map.frontiers()
     if not frontiers:
         return None
+    if exclude:
+        frontiers = [c for c in frontiers if c not in exclude]
+        if not frontiers:
+            return None
     cx0 = int(player_pos.x // _CHUNK_SIZE)
     cy0 = int(player_pos.y // _CHUNK_SIZE)
     sorted_fronts = sorted(

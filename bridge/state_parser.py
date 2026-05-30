@@ -24,7 +24,8 @@ Expected top-level JSON structure from the Lua mod
   "logistics": { ... },
   "damaged_entities": [ ... ],
   "destroyed_entities": [ ... ],   // new events from circular buffer
-  "threat": { ... }
+  "threat": { ... },
+  "tile_map": [ ... ]               // non-default tile types in scan radius
 }
 
 Any subset of these keys may be present in a single response. Missing keys leave
@@ -234,6 +235,11 @@ class StateParser:
         if "threat" in data:
             state.threat = self._parse_threat(data["threat"])
             state.observed_at["threat"] = tick
+
+        if "tile_map" in data:
+            new_tiles = self._parse_tile_map(data["tile_map"])
+            state.tile_map.update(new_tiles)
+            state.observed_at["tile_map"] = tick
 
         # Rebuild internal indices so that WorldQuery lookups are correct
         # on the snapshot WorldState produced by parse() / parse_partial().
@@ -577,6 +583,26 @@ class StateParser:
     # ------------------------------------------------------------------
     # Primitive helpers
     # ------------------------------------------------------------------
+
+    def _parse_tile_map(self, lst: Any) -> dict:
+        """
+        Parse the tile_map section from the bridge payload.
+
+        Returns a dict mapping (tile_x, tile_y) → tile_name for non-default
+        tiles (water variants, landfill, out-of-map). Called by _populate_all
+        and also by WorldWriter.integrate_snapshot for accumulation.
+        """
+        if not isinstance(lst, list):
+            return {}
+        result: dict[tuple[int, int], str] = {}
+        for entry in lst:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                result[(int(entry["x"]), int(entry["y"]))] = str(entry["tile"])
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.debug("Skipping malformed tile entry: %s — %s", entry, exc)
+        return result
 
     def _parse_position(self, d: Any) -> Position:
         if isinstance(d, dict):
