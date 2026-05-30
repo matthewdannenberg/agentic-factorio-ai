@@ -445,21 +445,21 @@ class RuleBasedCoordinator:
         """
         Mark a goal frame as internally complete.
 
-        When the frame carries an evaluator_condition the RewardEvaluator
-        is the authoritative completion signal — setting frame.completed
-        would bypass it. In that case this method is a no-op: the evaluator
-        will fire the success_condition and the loop will advance the goal.
+        When the frame has an evaluator_condition the RewardEvaluator owns
+        goal completion — the loop suppresses CoordinatorStatus.COMPLETE in
+        that case. Handlers should not call _complete_frame on the early-exit
+        "already satisfied" paths when an evaluator condition is present;
+        instead they should proceed to push tasks so the evaluator can verify
+        genuine work was done.
 
-        When there is no evaluator condition (e.g. clear_region with an
-        empty success_condition), the coordinator drives completion directly.
+        For sub-goals (pushed via _push_goal) and for goals without an
+        evaluator condition, this sets frame.completed = True normally.
         """
         if frame.evaluator_condition:
-            log.debug(
-                "Coordinator: goal %r has evaluator condition — "
-                "skipping internal completion (evaluator owns this)",
-                frame.goal_type,
-            )
-            return
+            # The evaluator owns top-level completion. Setting completed here
+            # would cause the coordinator to return COMPLETE prematurely on
+            # sub-goal pop. Log and proceed — the loop will ignore COMPLETE.
+            pass
         frame.completed = True
 
     # ── Collection ──────────────────────────────────────────────────────
@@ -501,10 +501,14 @@ class RuleBasedCoordinator:
             frame.failed = True
             return CoordinatorStatus.STUCK, []
 
-        # Already have enough — complete internally only when no evaluator
-        # condition is present. When success_condition is set, the evaluator
-        # owns completion; _complete_frame() is a no-op in that case.
-        if wq.inventory_count(item) >= count:
+        # "Already satisfied" early exit: only fire when there is no evaluator
+        # condition. When success_condition is set (e.g. new.inventory() >= N),
+        # the evaluator measures delta from goal activation — the player may
+        # already have N units but still need to collect N *new* ones. Skipping
+        # this check and proceeding to push a gather task is correct; the task's
+        # own absolute success_condition will fire immediately if the inventory
+        # is genuinely sufficient after accounting for prior stock.
+        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
             log.info("Collection goal already satisfied: %dx %s", count, item)
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
@@ -519,38 +523,63 @@ class RuleBasedCoordinator:
                     item,
                 )
 
-            # Find nearest resource patch.
+            # --- Path A: resource patch (ore, coal, stone, crude-oil) ---
             patches = wq.resources_of_type(item)
-            if not patches:
-                log.warning(
-                    "Collection: no known %s patches — STUCK "
-                    "(explore to find resource first)",
-                    item,
+            if patches:
+                player_pos = wq.player_position()
+                nearest = min(patches, key=lambda p: _dist(p.position, player_pos))
+                frame.context["patch_pos"] = nearest.position
+                gather_target = wq.inventory_count(item) + count
+                self._push_task(
+                    task_type   = "gather_resource",
+                    description = f"Gather {count}x {item}",
+                    agent_hint  = "mining",
+                    tick        = tick,
+                    resource_type     = item,
+                    target_position   = nearest.position,
+                    count             = count,
+                    success_condition = f"inventory('{item}') >= {gather_target}",
                 )
-                frame.failed = True
-                return CoordinatorStatus.STUCK, []
+                return CoordinatorStatus.PROGRESSING, []
 
-            player_pos = wq.player_position()
-            nearest = min(
-                patches,
-                key=lambda p: _dist(p.position, player_pos),
+            # --- Path B: harvestable natural objects (wood from trees, etc.) ---
+            # Ask the KB which entity types drop this item when mined. If any
+            # are known, push a harvest_natural task — the MiningAgent will
+            # find the nearest matching natural object and mine it in a loop.
+            if self._kb:
+                harvestable = self._kb.entities_that_produce(item)
+                if harvestable:
+                    entity_types = [e.name for e in harvestable]
+                    gather_target = wq.inventory_count(item) + count
+                    log.info(
+                        "Collection: %s not a resource patch — "
+                        "harvesting from %s",
+                        item, entity_types[:3],
+                    )
+                    self._push_task(
+                        task_type   = "harvest_natural",
+                        description = f"Harvest {count}x {item} from natural objects",
+                        agent_hint  = "mining",
+                        tick        = tick,
+                        item             = item,
+                        entity_types     = entity_types,
+                        count            = count,
+                        success_condition = f"inventory('{item}') >= {gather_target}",
+                    )
+                    return CoordinatorStatus.PROGRESSING, []
+
+            # --- No known source ---
+            log.warning(
+                "Collection: no known source for %s — STUCK "
+                "(explore to find resource or natural object first)",
+                item,
             )
-            frame.context["patch_pos"] = nearest.position
+            frame.failed = True
+            return CoordinatorStatus.STUCK, []
 
-            gather_target = wq.inventory_count(item) + count
-            self._push_task(
-                task_type   = "gather_resource",
-                description = f"Gather {count}x {item}",
-                agent_hint  = "mining",
-                tick        = tick,
-                resource_type     = item,
-                target_position   = nearest.position,
-                count             = count,
-                success_condition = f"inventory('{item}') >= {gather_target}",
-            )
-            return CoordinatorStatus.PROGRESSING, []
-
-        # Step ≥ 1: check absolute count (task-level tracking uses absolute inv).
+        # Step ≥ 1: check absolute count. When there is an evaluator condition
+        # this completion will be superseded by the evaluator; we still mark the
+        # frame done so the state machine advances cleanly.
         if wq.inventory_count(item) >= count:
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
@@ -589,7 +618,7 @@ class RuleBasedCoordinator:
             frame.failed = True
             return CoordinatorStatus.STUCK, []
 
-        if wq.inventory_count(item) >= count:
+        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
@@ -698,7 +727,7 @@ class RuleBasedCoordinator:
             frame.failed = True
             return CoordinatorStatus.STUCK, []
 
-        if wq.inventory_count(item) >= count:
+        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 

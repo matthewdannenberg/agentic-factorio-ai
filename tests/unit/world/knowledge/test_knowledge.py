@@ -50,6 +50,22 @@ def _entity_json(name="assembling-machine-2", proto_type="assembling-machine",
                        "output_slots": output_slots})
 
 
+def _entity_json_with_mining_products(
+        name="tree-01", proto_type="tree",
+        minable=True,
+        mining_products=None) -> str:
+    """Entity prototype JSON that includes mining_products (new field)."""
+    return json.dumps({
+        "name": name, "type": proto_type,
+        "tile_width": 1, "tile_height": 1,
+        "has_recipe_slot": False, "ingredient_slots": 0, "output_slots": 0,
+        "minable": minable,
+        "mining_products": mining_products or [
+            {"name": "wood", "amount": 1.0}
+        ],
+    })
+
+
 def _resource_json(name="iron-ore", is_fluid=False, is_infinite=False,
                    display_name="Iron Ore") -> str:
     return json.dumps({"name": name, "is_fluid": is_fluid,
@@ -927,6 +943,218 @@ class TestPlaceholderEnrichment(unittest.TestCase):
                 self.assertIsNotNone(rec)
                 self.assertFalse(rec.is_placeholder)
                 self.assertIn("assembling-machine-1", rec.unlocks_recipes)
+
+
+# ===========================================================================
+# EntityRecord.mining_products — new field (Phase 7)
+# ===========================================================================
+
+class TestEntityMiningProducts(unittest.TestCase):
+    """
+    EntityRecord.mining_products: dict[str, float] stores items dropped when
+    the entity is mined. Used by kb.entities_that_produce(item) to find
+    harvestable sources (trees → wood, rocks → stone, etc.).
+    """
+
+    def test_mining_products_defaults_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                rec = kb.ensure_entity("tree-01")   # placeholder
+                self.assertIsInstance(rec.mining_products, dict)
+                self.assertEqual(rec.mining_products, {})
+
+    def test_mining_products_parsed_from_prototype(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _entity_json_with_mining_products(),
+                     tmp_dir=tmp) as kb:
+                rec = kb.ensure_entity("tree-01")
+                self.assertFalse(rec.is_placeholder)
+                self.assertIn("wood", rec.mining_products)
+                self.assertAlmostEqual(rec.mining_products["wood"], 1.0)
+
+    def test_mining_products_multiple_drops(self):
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(
+                name="rock-big", proto_type="simple-entity",
+                mining_products=[
+                    {"name": "stone", "amount": 20.0},
+                    {"name": "coal",  "amount": 5.0},
+                ],
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                rec = kb.ensure_entity("rock-big")
+                self.assertIn("stone", rec.mining_products)
+                self.assertIn("coal",  rec.mining_products)
+                self.assertAlmostEqual(rec.mining_products["stone"], 20.0)
+
+    def test_mining_products_amount_range_averaged(self):
+        """amount_min/amount_max range → stored as average."""
+        def qfn(domain, name):
+            return json.dumps({
+                "name": name, "type": "simple-entity",
+                "tile_width": 1, "tile_height": 1,
+                "has_recipe_slot": False, "ingredient_slots": 0, "output_slots": 0,
+                "minable": True,
+                "mining_products": [
+                    {"name": "stone", "amount_min": 10.0, "amount_max": 20.0},
+                ],
+            })
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                rec = kb.ensure_entity("rock-huge")
+                self.assertAlmostEqual(rec.mining_products["stone"], 15.0)
+
+    def test_mining_products_persisted_and_reloaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=lambda d, n: _entity_json_with_mining_products(),
+                     tmp_dir=tmp) as kb:
+                kb.ensure_entity("tree-01")
+
+            with _kb(tmp_dir=tmp) as kb:   # no query_fn — from DB
+                rec = kb.get_entity("tree-01")
+                self.assertIsNotNone(rec)
+                self.assertIn("wood", rec.mining_products)
+                self.assertAlmostEqual(rec.mining_products["wood"], 1.0)
+
+    def test_placeholder_has_empty_mining_products(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                ph = EntityRecord.placeholder("ghost-entity")
+                self.assertEqual(ph.mining_products, {})
+
+    def test_minable_field_persisted(self):
+        """minable was always in EntityRecord but not persisted — now it is."""
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(minable=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("tree-01")
+
+            with _kb(tmp_dir=tmp) as kb:
+                rec = kb.get_entity("tree-01")
+                self.assertTrue(rec.minable)
+
+    def test_non_minable_entity_loaded_correctly(self):
+        """A non-minable entity has minable=False regardless of mining_products.
+        The products field may be non-empty (prototype defines them) but the
+        entity won't appear in entities_that_produce() due to the minable filter."""
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(
+                name="cliff", proto_type="cliff", minable=False,
+                mining_products=[{"name": "stone", "amount": 1.0}],
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                rec = kb.ensure_entity("cliff")
+                self.assertFalse(rec.minable)
+                # entities_that_produce filters out non-minable entities
+                self.assertEqual(kb.entities_that_produce("stone"), [])
+
+
+# ===========================================================================
+# KnowledgeBase.entities_that_produce — new query (Phase 7)
+# ===========================================================================
+
+class TestEntitiesThatProduce(unittest.TestCase):
+    """
+    entities_that_produce(item) returns EntityRecords for all minable entities
+    whose mining_products contain the given item. Enables the coordinator to
+    find harvestable natural objects (wood from trees, etc.).
+    """
+
+    def _tree_qfn(self, domain, name):
+        return _entity_json_with_mining_products(
+            name=name, proto_type="tree", minable=True,
+            mining_products=[{"name": "wood", "amount": 1.0}],
+        )
+
+    def test_finds_entity_producing_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=self._tree_qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("tree-01")
+                results = kb.entities_that_produce("wood")
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0].name, "tree-01")
+
+    def test_returns_empty_for_unknown_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=self._tree_qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("tree-01")
+                self.assertEqual(kb.entities_that_produce("alien-artifact"), [])
+
+    def test_multiple_trees_all_returned(self):
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(
+                name=name, proto_type="tree", minable=True,
+                mining_products=[{"name": "wood", "amount": 1.0}],
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                for t in ("tree-01", "tree-02", "tree-04"):
+                    kb.ensure_entity(t)
+                results = kb.entities_that_produce("wood")
+                names = {r.name for r in results}
+                self.assertIn("tree-01", names)
+                self.assertIn("tree-02", names)
+                self.assertIn("tree-04", names)
+
+    def test_non_minable_excluded(self):
+        """Non-minable entities (e.g. cliffs) must not appear even if they
+        somehow have mining_products entries."""
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(
+                name=name, proto_type="cliff", minable=False,
+                mining_products=[{"name": "stone", "amount": 1.0}],
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("cliff")
+                self.assertEqual(kb.entities_that_produce("stone"), [])
+
+    def test_only_matching_item_returned(self):
+        """A rock drops both stone and coal — querying stone should not
+        return results for coal, and vice versa."""
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(
+                name=name, proto_type="simple-entity", minable=True,
+                mining_products=[
+                    {"name": "stone", "amount": 10.0},
+                    {"name": "coal",  "amount": 5.0},
+                ],
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("rock-big")
+                stone_results = kb.entities_that_produce("stone")
+                coal_results  = kb.entities_that_produce("coal")
+                self.assertEqual(len(stone_results), 1)
+                self.assertEqual(stone_results[0].name, "rock-big")
+                self.assertEqual(len(coal_results), 1)
+                self.assertEqual(coal_results[0].name, "rock-big")
+                self.assertEqual(kb.entities_that_produce("wood"), [])
+
+    def test_placeholder_excluded(self):
+        """Placeholders (is_placeholder=1) must not appear in results."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:   # no query_fn → placeholder
+                kb.ensure_entity("tree-01")
+                self.assertEqual(kb.entities_that_produce("wood"), [])
+
+    def test_results_include_minable_true(self):
+        """All returned entities must have minable=True."""
+        def qfn(domain, name):
+            return _entity_json_with_mining_products(minable=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(query_fn=qfn, tmp_dir=tmp) as kb:
+                kb.ensure_entity("tree-01")
+                for rec in kb.entities_that_produce("wood"):
+                    self.assertTrue(rec.minable)
+
+    def test_empty_when_no_entities_known(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with _kb(tmp_dir=tmp) as kb:
+                self.assertEqual(kb.entities_that_produce("wood"), [])
 
 
 # ===========================================================================

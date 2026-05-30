@@ -607,4 +607,227 @@ TP.suite("entity_mineable_properties", {
     end,
 })
 
+
+-- ============================================================
+-- Suite: entity_mining_products
+-- Verifies that get_entity_prototype() returns the mining_products
+-- field introduced to support kb.entities_that_produce(item) and
+-- the harvest_natural task type.
+--
+-- Trees drop wood, rocks drop stone/coal/iron-ore depending on type.
+-- Machines drop themselves (their item equivalent).
+-- The mining_products list enables the coordinator to find harvestable
+-- sources for items that are not resource patches.
+-- ============================================================
+
+TP.suite("entity_mining_products", {
+
+    mining_products_field_present = function(t)
+        -- The field must be present on every entity response regardless of
+        -- whether the entity has any mining products.
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.mining_products ~= nil,
+            "get_entity_prototype must return mining_products field. "
+            .. "Check control.lua fa.get_entity_prototype() return table.")
+        t.is_table(parsed.mining_products,
+            "mining_products must be a table (array); got " ..
+            type(parsed.mining_products))
+    end,
+
+    machine_mining_products_empty_or_has_item = function(t)
+        -- Assembling machines return themselves as a product when mined.
+        -- In some modded scenarios this may be empty, so we accept both.
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.is_table(parsed.mining_products, "mining_products must be a table")
+        -- If non-empty, each entry must have name (string) and amount (number).
+        for i, prod in ipairs(parsed.mining_products) do
+            t.ok(prod.name ~= nil,
+                "mining_products[" .. i .. "] must have name field")
+            t.is_string(prod.name,
+                "mining_products[" .. i .. "].name must be string")
+            t.ok(prod.amount ~= nil,
+                "mining_products[" .. i .. "] must have amount field")
+            t.is_number(prod.amount,
+                "mining_products[" .. i .. "].amount must be number; got " ..
+                type(prod.amount))
+            t.ok(prod.amount > 0,
+                "mining_products[" .. i .. "].amount must be positive; got " ..
+                tostring(prod.amount))
+        end
+    end,
+
+    tree_drops_wood = function(t)
+        -- Find any tree prototype on this map and verify it drops wood.
+        -- Trees are the canonical example of a harvestable natural entity.
+        local tree_proto = nil
+        for name, proto in pairs(prototypes.entity) do
+            if proto.type == "tree" then tree_proto = name break end
+        end
+        if not tree_proto then
+            test_print("[SKIP] No tree prototype found on this map — skip")
+            return
+        end
+        local raw = fa.get_entity_prototype(tree_proto)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for " .. tree_proto)
+        t.is_table(parsed.mining_products,
+            "tree mining_products must be a table")
+        t.ok(#parsed.mining_products > 0,
+            tree_proto .. " must have at least one mining product (wood); "
+            .. "got empty mining_products. Check that mineable_properties.products "
+            .. "is being read in fa.get_entity_prototype().")
+        local found_wood = false
+        for _, prod in ipairs(parsed.mining_products) do
+            if prod.name == "wood" then found_wood = true break end
+        end
+        t.ok(found_wood,
+            tree_proto .. " mining_products must include wood; "
+            .. "got " .. tostring(#parsed.mining_products) .. " product(s) but no wood.")
+    end,
+
+    rock_drops_stone_or_ore = function(t)
+        -- Rocks (simple-entity with minable=true) typically drop stone,
+        -- coal, or iron-ore depending on type. Verify the field is populated.
+        local rock_proto = nil
+        local rock_products_count = 0
+        for name, proto in pairs(prototypes.entity) do
+            if proto.type == "simple-entity"
+                    and proto.mineable_properties
+                    and proto.mineable_properties.minable
+                    and proto.mineable_properties.products
+                    and #proto.mineable_properties.products > 0 then
+                rock_proto = name
+                rock_products_count = #proto.mineable_properties.products
+                break
+            end
+        end
+        if not rock_proto then
+            test_print("[SKIP] No minable simple-entity with products found — skip")
+            return
+        end
+        local raw = fa.get_entity_prototype(rock_proto)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for " .. rock_proto)
+        t.is_table(parsed.mining_products, "mining_products must be a table")
+        t.ok(#parsed.mining_products > 0,
+            rock_proto .. " must have mining products (drops stone/ore/coal); "
+            .. "raw prototype had " .. rock_products_count .. " product(s) but "
+            .. "mining_products is empty. Check product.type == 'fluid' filter.")
+        -- Every product must have valid fields.
+        for i, prod in ipairs(parsed.mining_products) do
+            t.is_string(prod.name,
+                rock_proto .. " product[" .. i .. "].name must be string")
+            t.is_number(prod.amount,
+                rock_proto .. " product[" .. i .. "].amount must be number")
+            t.ok(prod.amount > 0,
+                rock_proto .. " product[" .. i .. "].amount must be positive")
+        end
+    end,
+
+    chest_mining_products_field_present = function(t)
+        -- Chests are minable — they drop themselves. The field must be present
+        -- even for entities where the product is the entity item itself.
+        local raw = fa.get_entity_prototype("iron-chest")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.mining_products ~= nil,
+            "iron-chest must have mining_products field")
+        t.is_table(parsed.mining_products, "mining_products must be a table")
+    end,
+
+    mining_products_coexists_with_minable = function(t)
+        -- Both minable (bool) and mining_products (table) must be present
+        -- in the same response — they come from the same mineable_properties.
+        local raw = fa.get_entity_prototype("assembling-machine-1")
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON")
+        t.ok(parsed.minable ~= nil,
+            "minable field must still be present alongside mining_products")
+        t.ok(parsed.mining_products ~= nil,
+            "mining_products must be present alongside minable")
+        t.is_bool(parsed.minable,
+            "minable must be boolean")
+        t.is_table(parsed.mining_products,
+            "mining_products must be table")
+    end,
+
+    mining_products_amount_is_average_of_range = function(t)
+        -- When a product has amount_min and amount_max (a range), the returned
+        -- amount should be their average. Find a prototype with a range if possible.
+        -- If none found, just verify the field structure is always correct.
+        local range_proto = nil
+        local expected_avg = nil
+        for name, proto in pairs(prototypes.entity) do
+            if proto.type == "simple-entity"
+                    and proto.mineable_properties
+                    and proto.mineable_properties.products then
+                for _, prod in ipairs(proto.mineable_properties.products) do
+                    if prod.amount_min and prod.amount_max
+                            and prod.amount_min ~= prod.amount_max then
+                        range_proto = name
+                        expected_avg = (prod.amount_min + prod.amount_max) / 2
+                        break
+                    end
+                end
+            end
+            if range_proto then break end
+        end
+        if not range_proto then
+            test_print("[SKIP] No prototype with amount range found — skip")
+            return
+        end
+        local raw = fa.get_entity_prototype(range_proto)
+        local parsed = parse_json(raw)
+        t.ok(parsed ~= nil, "must return valid JSON for " .. range_proto)
+        t.ok(#parsed.mining_products > 0,
+            range_proto .. " must have mining products")
+        -- The first product's amount should be the average of the range.
+        local got_amount = parsed.mining_products[1].amount
+        t.ok(math.abs(got_amount - expected_avg) < 0.01,
+            "amount for range product should be average of min+max; "
+            .. "expected " .. expected_avg .. " got " .. tostring(got_amount))
+    end,
+
+    fluid_products_excluded = function(t)
+        -- Fluid products (e.g. crude-oil from an oil resource) should NOT
+        -- appear in mining_products — the agent cannot collect fluids via
+        -- MineEntity. Verify by finding an entity with fluid products if any.
+        -- Most entities in vanilla won't have this, so this is a structural test.
+        for name, proto in pairs(prototypes.entity) do
+            if proto.mineable_properties
+                    and proto.mineable_properties.products then
+                local has_fluid = false
+                for _, prod in ipairs(proto.mineable_properties.products) do
+                    if prod.type == "fluid" then has_fluid = true break end
+                end
+                if has_fluid then
+                    local raw = fa.get_entity_prototype(name)
+                    local parsed = parse_json(raw)
+                    if parsed and parsed.ok ~= false then
+                        for _, mp in ipairs(parsed.mining_products or {}) do
+                            -- Fluid items typically have a "/" in their internal
+                            -- representation or a specific type marker. The filter
+                            -- in get_entity_prototype checks product.type ~= "fluid".
+                            -- We just verify no obviously fluid name leaked through.
+                            t.ok(mp.name ~= "water" and mp.name ~= "crude-oil"
+                                    and mp.name ~= "heavy-oil"
+                                    and mp.name ~= "light-oil"
+                                    and mp.name ~= "petroleum-gas"
+                                    and mp.name ~= "steam",
+                                name .. " mining_products contains fluid " ..
+                                tostring(mp.name) .. " — fluid products should be filtered")
+                        end
+                    end
+                    break   -- one check is enough
+                end
+            end
+        end
+        -- If no entity with fluid products found, test vacuously passes.
+    end,
+})
+
 return TP

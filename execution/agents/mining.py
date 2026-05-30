@@ -82,6 +82,7 @@ log = logging.getLogger(__name__)
 class _TaskKind(Enum):
     GATHER  = auto()
     CLEAR   = auto()
+    HARVEST = auto()   # mine natural objects for their drops (wood, fish, etc.)
     UNKNOWN = auto()
 
 
@@ -110,7 +111,7 @@ class MiningAgent(AgentProtocol):
 
     AGENT_ID = "mining"
 
-    TASK_TYPES = frozenset({"gather_resource", "clear_region"})
+    TASK_TYPES = frozenset({"gather_resource", "clear_region", "harvest_natural"})
 
     def __init__(self) -> None:
         self._task_kind: _TaskKind = _TaskKind.UNKNOWN
@@ -130,6 +131,9 @@ class MiningAgent(AgentProtocol):
         self._current_target: Optional[_ClearTarget] = None
         self._clear_phase: _ClearPhase = _ClearPhase.NAVIGATE
         self._targets_total: int = 0
+
+        # Harvest state
+        self._harvest_entity_types: list[str] = []
 
     # ------------------------------------------------------------------
     # AgentProtocol
@@ -153,6 +157,7 @@ class MiningAgent(AgentProtocol):
         self._current_target = None
         self._clear_phase = _ClearPhase.NAVIGATE
         self._targets_total = 0
+        self._harvest_entity_types = []
         # Halt any persistent Lua miner from a previous task.
         self._pending_stop = True
 
@@ -175,6 +180,15 @@ class MiningAgent(AgentProtocol):
         elif task_type == "clear_region":
             self._task_kind = _TaskKind.CLEAR
             # Target list built on first tick (needs wq.state.entities scan).
+
+        elif task_type == "harvest_natural":
+            self._task_kind = _TaskKind.HARVEST
+            self._harvest_entity_types = list(getattr(task, "entity_types", []))
+            if not self._harvest_entity_types:
+                log.error(
+                    "MiningAgent: harvest_natural task %s missing entity_types",
+                    task.id[:8],
+                )
 
         else:
             log.warning(
@@ -215,6 +229,8 @@ class MiningAgent(AgentProtocol):
             return self._tick_gather(task, blackboard, wq, ww, tick)
         elif self._task_kind == _TaskKind.CLEAR:
             return self._tick_clear(task, blackboard, wq, ww, tick, kb)
+        elif self._task_kind == _TaskKind.HARVEST:
+            return self._tick_harvest(task, blackboard, wq, ww, tick, kb)
         return []
 
     def observe(
@@ -237,6 +253,17 @@ class MiningAgent(AgentProtocol):
                 obs.update(self._mine_skill.observe())
         elif self._task_kind == _TaskKind.CLEAR:
             obs.update({
+                "clear_targets_remaining": len(self._clear_targets),
+                "clear_current_entity":    (
+                    self._current_target.entity_id
+                    if self._current_target else None
+                ),
+                "clear_phase":             self._clear_phase.name,
+            })
+            obs.update(self._destroy_skill.observe())
+        elif self._task_kind == _TaskKind.HARVEST:
+            obs.update({
+                "harvest_entity_types":    self._harvest_entity_types[:3],
                 "clear_targets_remaining": len(self._clear_targets),
                 "clear_current_entity":    (
                     self._current_target.entity_id
@@ -297,14 +324,9 @@ class MiningAgent(AgentProtocol):
         is mining.
         """
         self._pending_stop = False
-        if self._task_kind == _TaskKind.GATHER:
-            # Always issue StopMining for gather tasks. Two cases:
-            #   - MineSkill is still RUNNING: the goal-level evaluator fired
-            #     before the skill completed (e.g. inventory threshold met
-            #     mid-mine). _pending_stop was cleared on the first tick so
-            #     this is the only remaining signal to halt the Lua miner.
-            #   - MineSkill already SUCCEEDED: the miner stopped naturally,
-            #     but StopMining is a no-op and costs nothing to send.
+        if self._task_kind in (_TaskKind.GATHER, _TaskKind.HARVEST):
+            # Always issue StopMining for gather/harvest tasks — the Lua
+            # persistent miner may still be active when the task resolves.
             log.debug("MiningAgent: teardown — issuing StopMining")
             return [StopMining()]
         return []
@@ -552,6 +574,95 @@ class MiningAgent(AgentProtocol):
             return []
 
         return self._destroy_skill.tick(wq, ww, tick)
+
+    # ------------------------------------------------------------------
+    # Harvest (harvest_natural task)
+    # ------------------------------------------------------------------
+
+    def _tick_harvest(
+        self,
+        task: "Task",
+        blackboard: "Blackboard",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+        kb: "KnowledgeBase",
+    ) -> list[Action]:
+        """
+        Mine natural objects of specific entity types to collect item drops.
+
+        Unlike clear_region (bounded by a bbox, completes when region empty),
+        harvest_natural loops continuously — when the target queue empties it
+        rebuilds from the next scan, and keeps harvesting until the task's
+        success_condition fires externally (evaluated by the coordinator).
+        """
+        # Advance if current target was destroyed or gone from scan.
+        if self._current_target is not None:
+            if wq.entity_by_id(self._current_target.entity_id) is None:
+                log.debug(
+                    "MiningAgent: harvest target %d gone — advancing",
+                    self._current_target.entity_id,
+                )
+                self._current_target = None
+                self._nav_skill.reset()
+                self._destroy_skill.reset()
+                self._clear_phase = _ClearPhase.NAVIGATE
+
+        # Pick next target from queue, or rebuild from current scan.
+        if self._current_target is None:
+            if not self._clear_targets:
+                self._build_harvest_targets(wq, kb)
+            if not self._clear_targets:
+                log.debug(
+                    "MiningAgent: no harvestable %s in scan radius — waiting",
+                    self._harvest_entity_types[:3],
+                )
+                return []
+            self._current_target = self._clear_targets.pop(0)
+            self._nav_skill.reset()
+            self._destroy_skill.reset()
+            self._clear_phase = _ClearPhase.NAVIGATE
+            log.debug(
+                "MiningAgent: harvesting entity %d",
+                self._current_target.entity_id,
+            )
+
+        # Route to nav or destroy phase (reuse clear phase machinery).
+        if self._clear_phase == _ClearPhase.NAVIGATE:
+            return self._clear_navigate(task, blackboard, wq, ww, tick)
+        return self._clear_destroy(task, blackboard, wq, ww, tick)
+
+    def _build_harvest_targets(
+        self,
+        wq: "WorldQuery",
+        kb: "KnowledgeBase",
+    ) -> None:
+        """
+        Scan wq.natural_objects for entities in _harvest_entity_types and
+        queue them as _ClearTarget entries, nearest-first.
+        Called each time the queue empties during a harvest_natural task.
+        """
+        type_set = set(self._harvest_entity_types)
+        targets: list[_ClearTarget] = []
+        for obj in wq.natural_objects:
+            if obj.name not in type_set:
+                continue
+            if not obj.is_minable or not can_destroy(obj, kb):
+                continue
+            targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position))
+        player_pos = wq.player_position()
+        targets.sort(
+            key=lambda t: math.hypot(
+                t.position.x - player_pos.x,
+                t.position.y - player_pos.y,
+            )
+        )
+        self._clear_targets = targets
+        log.debug(
+            "MiningAgent: harvest scan: %d %s targets",
+            len(targets), self._harvest_entity_types[:3],
+        )
+
 
     # ------------------------------------------------------------------
     # Helpers

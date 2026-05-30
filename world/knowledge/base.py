@@ -141,6 +141,16 @@ class EntityRecord:
     # Note: has_mining_trigger was removed — it fires for cosmetic effects on
     # trees and does not indicate a resource requirement.
     minable: bool = True
+    # Items dropped when this entity is mined, as {item_name: avg_amount}.
+    # Populated from mineable_properties.products at prototype query time.
+    # Empty for entities with no drop (e.g. ghosts, some decoratives).
+    # Used by kb.entities_that_produce(item) to find harvestable sources
+    # of items like wood that are not resource patches.
+    mining_products: dict = None  # set to {} not None after __post_init__
+
+    def __post_init__(self):
+        if self.mining_products is None:
+            object.__setattr__(self, 'mining_products', {})
 
     @property
     def category_enum(self) -> EntityCategory:
@@ -156,12 +166,23 @@ class EntityRecord:
                    tile_width=1, tile_height=1,
                    has_recipe_slot=False, ingredient_slots=0,
                    output_slots=0, is_placeholder=True,
-                   minable=False)
+                   minable=False, mining_products={})
 
     @classmethod
     def from_prototype_json(cls, name: str, data: dict) -> "EntityRecord":
         proto_type = str(data.get("type", "unknown"))
         category = _PROTO_TYPE_TO_CATEGORY.get(proto_type, EntityCategory.OTHER)
+        # Parse mining_products from mineable_properties.products.
+        # Each product entry has "name" and "amount" (or "amount_min"/"amount_max").
+        raw_products = data.get("mining_products", [])
+        if isinstance(raw_products, dict):
+            raw_products = list(raw_products.values())
+        mining_products: dict[str, float] = {}
+        for p in raw_products:
+            if isinstance(p, dict) and p.get("name"):
+                amount = float(p.get("amount",
+                               (p.get("amount_min", 1) + p.get("amount_max", 1)) / 2))
+                mining_products[str(p["name"])] = amount
         return cls(
             name=name, proto_type=proto_type, category=category.value,
             tile_width=int(data.get("tile_width", 1)),
@@ -171,6 +192,7 @@ class EntityRecord:
             output_slots=int(data.get("output_slots", 0)),
             is_placeholder=False,
             minable=bool(data.get("minable", True)),
+            mining_products=mining_products,
         )
 
 
@@ -400,7 +422,15 @@ CREATE TABLE IF NOT EXISTS entities (
     has_recipe_slot  INTEGER NOT NULL DEFAULT 0,
     ingredient_slots INTEGER NOT NULL DEFAULT 0,
     output_slots     INTEGER NOT NULL DEFAULT 0,
-    is_placeholder   INTEGER NOT NULL DEFAULT 1
+    is_placeholder   INTEGER NOT NULL DEFAULT 1,
+    minable          INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS entity_mining_products (
+    entity_name  TEXT NOT NULL REFERENCES entities(name) ON DELETE CASCADE,
+    item_name    TEXT NOT NULL,
+    amount       REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (entity_name, item_name)
 );
 
 CREATE TABLE IF NOT EXISTS resources (
@@ -481,6 +511,7 @@ CREATE TABLE IF NOT EXISTS tech_unlocks_entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_item ON recipe_ingredients(item_name);
+CREATE INDEX IF NOT EXISTS idx_entity_mining_products_item ON entity_mining_products(item_name);
 CREATE INDEX IF NOT EXISTS idx_recipe_products_item    ON recipe_products(item_name);
 CREATE INDEX IF NOT EXISTS idx_recipe_made_in_entity   ON recipe_made_in(entity_name);
 CREATE INDEX IF NOT EXISTS idx_tech_unlocks_recipe     ON tech_unlocks_recipes(recipe_name);
@@ -561,6 +592,13 @@ class KnowledgeBase:
         self._load_items()
 
     def _load_entities(self) -> None:
+        # Load mining products first, keyed by entity name.
+        mp_rows: dict[str, dict[str, float]] = {}
+        try:
+            for row in self._conn.execute("SELECT * FROM entity_mining_products"):
+                mp_rows.setdefault(row["entity_name"], {})[row["item_name"]] = row["amount"]
+        except Exception:
+            pass  # table may not exist in older DBs — safe to ignore
         for row in self._conn.execute("SELECT * FROM entities"):
             r = EntityRecord(
                 name=row["name"], proto_type=row["proto_type"],
@@ -570,6 +608,8 @@ class KnowledgeBase:
                 ingredient_slots=row["ingredient_slots"],
                 output_slots=row["output_slots"],
                 is_placeholder=bool(row["is_placeholder"]),
+                minable=bool(row["minable"]) if "minable" in row.keys() else True,
+                mining_products=mp_rows.get(row["name"], {}),
             )
             self._entities[r.name] = r
 
@@ -683,11 +723,21 @@ class KnowledgeBase:
         self._conn.execute("""
             INSERT OR REPLACE INTO entities
             (name, proto_type, category, tile_width, tile_height,
-             has_recipe_slot, ingredient_slots, output_slots, is_placeholder)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             has_recipe_slot, ingredient_slots, output_slots, is_placeholder, minable)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, (r.name, r.proto_type, r.category, r.tile_width, r.tile_height,
               int(r.has_recipe_slot), r.ingredient_slots, r.output_slots,
-              int(r.is_placeholder)))
+              int(r.is_placeholder), int(r.minable)))
+        # Persist mining products.
+        self._conn.execute(
+            "DELETE FROM entity_mining_products WHERE entity_name=?", (r.name,)
+        )
+        for item_name, amount in (r.mining_products or {}).items():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO entity_mining_products "
+                "(entity_name, item_name, amount) VALUES (?,?,?)",
+                (r.name, item_name, amount),
+            )
         self._conn.commit()
 
     def _insert_resource(self, r: ResourceRecord) -> None:
@@ -1069,6 +1119,29 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # Cross-domain queries
     # ------------------------------------------------------------------
+
+    def entities_that_produce(self, item: str) -> list["EntityRecord"]:
+        """
+        Return all known entity types whose mining drops the given item.
+
+        Used by the coordinator to find harvestable sources for items that
+        are not resource patches — e.g. "wood" from trees, "fish" from
+        fish entities, "stone" from boulders.
+
+        Only returns entities that are minable (can be targeted by MineEntity).
+        Results are ordered by item amount descending (best yield first).
+        """
+        try:
+            rows = self._conn.execute("""
+                SELECT e.name FROM entities e
+                JOIN entity_mining_products emp ON emp.entity_name = e.name
+                WHERE emp.item_name = ? AND e.minable = 1 AND e.is_placeholder = 0
+                ORDER BY emp.amount DESC
+            """, (item,)).fetchall()
+        except Exception:
+            return []
+        return [self._entities[r["name"]] for r in rows
+                if r["name"] in self._entities]
 
     def production_chain(self, target_item: str) -> set[str]:
         """

@@ -171,10 +171,15 @@ def _make_agent(skill_status: str = "RUNNING") -> MagicMock:
     return agent
 
 
-def _make_kb(recipes: dict = None, entities: dict = None) -> MagicMock:
+def _make_kb(
+    recipes: dict = None,
+    entities: dict = None,
+    harvestable: dict = None,
+) -> MagicMock:
     kb = MagicMock()
-    recipes  = recipes  or {}
-    entities = entities or {}
+    recipes    = recipes    or {}
+    entities   = entities   or {}
+    harvestable = harvestable or {}
 
     def recipes_for_product(item):
         return recipes.get(item, [])
@@ -188,8 +193,12 @@ def _make_kb(recipes: dict = None, entities: dict = None) -> MagicMock:
             return r
         return rec
 
+    def entities_that_produce(item):
+        return harvestable.get(item, [])
+
     kb.recipes_for_product.side_effect = recipes_for_product
     kb.get_entity.side_effect = get_entity
+    kb.entities_that_produce.side_effect = entities_that_produce
     return kb
 
 
@@ -559,6 +568,84 @@ class TestHandleCollection(unittest.TestCase):
         wq = _WQ(inventory={"iron-ore": 2})   # not enough
         coord.tick(wq, _WW, 1)
         self.assertEqual(frame.step, 0)
+
+
+# ===========================================================================
+# Section — _handle_collection Path B (harvest_natural)
+# ===========================================================================
+
+def _make_harvestable_entity(name="tree-01"):
+    rec = MagicMock()
+    rec.name = name
+    rec.minable = True
+    rec.is_placeholder = False
+    return rec
+
+
+class TestHandleCollectionHarvestPath(unittest.TestCase):
+    """Path B of _handle_collection: no resource patch, but KB has entities
+    that drop the item → push harvest_natural task."""
+
+    def _coord_with_wood_harvestable(self, tree_names=("tree-01",)):
+        trees = [_make_harvestable_entity(n) for n in tree_names]
+        kb = _make_kb(harvestable={"wood": trees})
+        # Must include a mining agent so _push_task("mining") can activate.
+        return _make_coord(agents={"mining": _make_agent()}, kb=kb)
+
+    def _activate_wood_goal(self, coord):
+        coord.reset(GOAL_COLLECTION, {}, _WQ(),
+                    success_condition="new.inventory('wood') >= 5")
+        coord._goal_stack[0].params = {"item": "wood", "count": 5}
+
+    def test_harvest_task_pushed_when_no_resource_patch(self):
+        coord = self._coord_with_wood_harvestable()
+        self._activate_wood_goal(coord)
+        coord.tick(_WQ(resources={}), _WW, 1)
+        self.assertIsNotNone(coord._active_task)
+        self.assertEqual(coord._active_task.task_type, "harvest_natural")
+
+    def test_harvest_task_carries_entity_types(self):
+        coord = self._coord_with_wood_harvestable(["tree-01", "tree-02"])
+        self._activate_wood_goal(coord)
+        coord.tick(_WQ(resources={}), _WW, 1)
+        task = coord._active_task
+        self.assertIn("tree-01", task.entity_types)
+        self.assertIn("tree-02", task.entity_types)
+
+    def test_harvest_task_carries_item_and_count(self):
+        coord = self._coord_with_wood_harvestable()
+        self._activate_wood_goal(coord)
+        coord.tick(_WQ(resources={}), _WW, 1)
+        task = coord._active_task
+        self.assertEqual(task.item, "wood")
+        self.assertEqual(task.count, 5)
+
+    def test_harvest_task_success_condition_uses_absolute_inventory(self):
+        coord = self._coord_with_wood_harvestable()
+        self._activate_wood_goal(coord)
+        coord.tick(_WQ(resources={}, inventory={}), _WW, 1)
+        self.assertIn("inventory('wood')", coord._active_task.success_condition)
+
+    def test_stuck_when_no_patch_and_no_harvestable(self):
+        kb = _make_kb(harvestable={})
+        coord = _make_coord(agents={"mining": _make_agent()}, kb=kb)
+        coord.reset(GOAL_COLLECTION, {}, _WQ(),
+                    success_condition="new.inventory('wood') >= 5")
+        coord._goal_stack[0].params = {"item": "wood", "count": 5}
+        coord.tick(_WQ(resources={}), _WW, 1)
+        self.assertTrue(coord._goal_stack[0].failed)
+
+    def test_resource_patch_takes_priority_over_harvest(self):
+        tree = _make_harvestable_entity("tree-01")
+        kb = _make_kb(harvestable={"iron-ore": [tree]})
+        coord = _make_coord(agents={"mining": _make_agent()}, kb=kb)
+        coord.reset(GOAL_COLLECTION, {}, _WQ(),
+                    success_condition="new.inventory('iron-ore') >= 5")
+        coord._goal_stack[0].params = {"item": "iron-ore", "count": 5}
+        patch = MagicMock()
+        patch.position = Position(10.0, 10.0)
+        coord.tick(_WQ(resources={"iron-ore": [patch]}), _WW, 1)
+        self.assertEqual(coord._active_task.task_type, "gather_resource")
 
 
 # ===========================================================================
@@ -1313,6 +1400,7 @@ class TestItemInNearbyChest(unittest.TestCase):
     def test_always_false_stub(self):
         self.assertFalse(_item_in_nearby_chest("iron-ore", _WQ()))
         self.assertFalse(_item_in_nearby_chest("anything", _WQ()))
+
 
 class TestUndestroyableInBbox(unittest.TestCase):
 

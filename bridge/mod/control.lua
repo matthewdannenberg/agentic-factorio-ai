@@ -1271,9 +1271,23 @@ function fa.get_entity_prototype(entity_name)
     -- The has_mining_trigger field was removed — it fires for cosmetic triggers
     -- (tree leaf particles etc.) and does not indicate a resource requirement.
     local minable = false
+    local mining_products = {}
     local ok_mp, mp = pcall(function() return proto.mineable_properties end)
     if ok_mp and mp then
         minable = mp.minable == true
+        -- Collect item/fluid products dropped when this entity is mined.
+        -- Used by KB.entities_that_produce(item) to find harvestable sources
+        -- of items like wood that are not resource patches.
+        for _, product in ipairs(mp.products or {}) do
+            if product.name and product.type ~= "fluid" then
+                local amount = product.amount
+                    or ((product.amount_min or 1) + (product.amount_max or 1)) / 2
+                table.insert(mining_products, {
+                    name   = product.name,
+                    amount = amount,
+                })
+            end
+        end
     end
 
     return safe_json({
@@ -1287,6 +1301,7 @@ function fa.get_entity_prototype(entity_name)
         output_slots     = output_slots,
         inventory_size   = inventory_size,
         minable          = minable,
+        mining_products  = mining_products,
     })
 end
 

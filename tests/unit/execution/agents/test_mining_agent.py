@@ -52,6 +52,9 @@ class _Task:
     count: int = 10
     bbox: Optional[_BBox] = None
     clear_mode: str = "clear_natural"
+    entity_types: list = field(default_factory=list)
+    item: str = ""
+    created_at: int = 0
 
 
 @dataclass
@@ -610,6 +613,139 @@ class TestMiningAgentPendingPatches(unittest.TestCase):
 
 
 
+
+
+# ===========================================================================
+# Section — harvest_natural task
+# ===========================================================================
+
+class TestMiningAgentHarvest(unittest.TestCase):
+    """
+    harvest_natural task: mine natural objects by entity type to collect drops.
+    Uses the same NAVIGATE→DESTROY machinery as clear_region but loops
+    continuously until the task success_condition fires externally.
+    """
+
+    def _make_natural_obj(self, name="tree-01", entity_id=1,
+                           x=5.0, y=5.0, is_minable=True):
+        obj = MagicMock()
+        obj.name = name
+        obj.entity_id = entity_id
+        obj.position = Position(x=x, y=y)
+        obj.is_minable = is_minable
+        return obj
+
+    def _harvest_task(self, entity_types=None):
+        return _Task(
+            task_type="harvest_natural",
+            entity_types=entity_types or ["tree-01", "tree-02"],
+            item="wood",
+            count=5,
+        )
+
+    def test_harvest_task_sets_harvest_kind(self):
+        agent = _make_agent()
+        task = self._harvest_task()
+        bb = _make_bb()
+        wq = _WQ()
+        agent.activate(task, bb, wq, _KB)
+        self.assertEqual(agent._task_kind, _TaskKind.HARVEST)
+
+    def test_harvest_entity_types_stored(self):
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["tree-01", "tree-04"])
+        agent.activate(task, _make_bb(), _WQ(), _KB)
+        self.assertEqual(agent._harvest_entity_types, ["tree-01", "tree-04"])
+
+    def test_harvest_task_in_task_types(self):
+        self.assertIn("harvest_natural", MiningAgent.TASK_TYPES)
+
+    def test_harvest_tick_returns_empty_when_no_natural_objects(self):
+        agent = _make_agent()
+        task = self._harvest_task()
+        bb = _make_bb()
+        wq = _WQ(natural_objects=[])
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # drain StopMining
+        actions = agent.tick(task, bb, wq, _WW, 2, _KB)
+        # No natural objects in scan → waits
+        self.assertFalse(any(isinstance(a, MineResource) for a in actions))
+
+    def test_harvest_ignores_wrong_entity_type(self):
+        """Natural objects not in entity_types are ignored."""
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["tree-01"])
+        wrong_obj = self._make_natural_obj(name="rock-big", entity_id=99)
+        bb = _make_bb()
+        wq = _WQ(natural_objects=[wrong_obj])
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # StopMining
+        actions = agent.tick(task, bb, wq, _WW, 2, _KB)
+        # Wrong type — no target selected, no actions
+        self.assertIsNone(agent._current_target)
+
+    def test_harvest_selects_matching_entity_type(self):
+        """Natural objects matching entity_types are queued as targets."""
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["tree-01"])
+        tree = self._make_natural_obj(name="tree-01", entity_id=7,
+                                       x=10.0, y=10.0)
+        bb = _make_bb()
+        wq = _WQ(natural_objects=[tree])
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # StopMining
+        agent.tick(task, bb, wq, _WW, 2, _KB)   # target selected, nav starts
+        self.assertIsNotNone(agent._current_target)
+        self.assertEqual(agent._current_target.entity_id, 7)
+
+    def test_harvest_skips_non_minable(self):
+        """Non-minable natural objects are filtered out by _build_harvest_targets."""
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["cliff"])
+        cliff = self._make_natural_obj(name="cliff", entity_id=3,
+                                        is_minable=False)
+        bb = _make_bb()
+        wq = _WQ(natural_objects=[cliff])
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # StopMining
+        agent.tick(task, bb, wq, _WW, 2, _KB)
+        self.assertIsNone(agent._current_target)
+
+    def test_harvest_teardown_returns_stop_mining(self):
+        agent = _make_agent()
+        task = self._harvest_task()
+        agent.activate(task, _make_bb(), _WQ(), _KB)
+        actions = agent.teardown()
+        self.assertEqual(len(actions), 1)
+        self.assertIsInstance(actions[0], StopMining)
+
+    def test_harvest_observe_includes_entity_types(self):
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["tree-01"])
+        bb = _make_bb()
+        agent.activate(task, bb, _WQ(), _KB)
+        obs = agent.observe(task, bb, _WQ(), _KB)
+        self.assertIn("harvest_entity_types", obs)
+        self.assertIn("tree-01", obs["harvest_entity_types"])
+
+    def test_harvest_advances_when_entity_disappears(self):
+        """When current target entity_id is gone from scan, agent picks next."""
+        agent = _make_agent()
+        task = self._harvest_task(entity_types=["tree-01"])
+        tree = self._make_natural_obj(name="tree-01", entity_id=42, x=5.0, y=5.0)
+        bb = _make_bb()
+        wq = _WQ(natural_objects=[tree])
+        agent.activate(task, bb, wq, _KB)
+        agent.tick(task, bb, wq, _WW, 1, _KB)   # StopMining
+        agent.tick(task, bb, wq, _WW, 2, _KB)   # picks tree as target
+
+        self.assertIsNotNone(agent._current_target)
+        self.assertEqual(agent._current_target.entity_id, 42)
+
+        # Entity disappears — entity_by_id returns None
+        wq2 = _WQ(natural_objects=[])   # empty scan, entity gone
+        agent.tick(task, bb, wq2, _WW, 3, _KB)  # should advance (clear target)
+        self.assertIsNone(agent._current_target)
 
 
 # ===========================================================================
