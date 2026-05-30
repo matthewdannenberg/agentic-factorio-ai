@@ -713,28 +713,58 @@ class RuleBasedCoordinator:
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
         """
-        Chart at least N new chunks.
+        Explore until a given condition is met.
 
-        params: {target_chunks}
+        params
+        ------
+        target_chunks : int (optional, default 0)
+            Number of new chunks to chart. Used to build the default
+            success_condition when no explicit condition is provided.
+
+        success_condition : str (optional)
+            A reward-evaluator condition string. When provided, overrides
+            the default chunk-count condition entirely. Use this for
+            resource-discovery goals:
+                "len(resources_of_type('copper-ore')) >= 1"
+                "len(resources_of_type('oil')) >= 2"
+            or any other condition the evaluator can test.
+
+        description : str (optional)
+            Human-readable task description. Defaults to
+            "Explore {target} new chunks".
 
         The ExplorationAgent owns all frontier selection and navigation
         internally. The coordinator pushes a single explore_region task and
         waits — the task's success_condition drives completion.
         """
-        target = frame.params.get("target_chunks", 0)
-        start  = frame.context.setdefault("start_chunks", wq.charted_chunks)
+        target     = frame.params.get("target_chunks", 0)
+        start      = frame.context.setdefault("start_chunks", wq.charted_chunks)
+        custom_cond = frame.params.get("success_condition", "")
+        description = frame.params.get(
+            "description", f"Explore {target} new chunks"
+        )
 
-        if wq.charted_chunks - start >= target:
+        # Build the effective success condition.
+        if custom_cond:
+            # Caller supplied an explicit condition — use it directly.
+            effective_cond = custom_cond
+        else:
+            # Default: chart at least target new chunks.
+            effective_cond = f"charted_chunks >= {start + target}"
+
+        # Short-circuit: if the default chunk condition is already met,
+        # complete immediately (only meaningful when no custom condition).
+        if not custom_cond and wq.charted_chunks - start >= target:
             frame.completed = True
             return CoordinatorStatus.PROGRESSING, []
 
         if frame.step == 0:
             self._push_task(
                 task_type         = "explore_region",
-                description       = f"Explore {target} new chunks",
+                description       = description,
                 agent_hint        = "exploration",
                 tick              = tick,
-                success_condition = f"charted_chunks >= {start + target}",
+                success_condition = effective_cond,
             )
             frame.step = 1
             return CoordinatorStatus.PROGRESSING, []

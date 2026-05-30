@@ -16,7 +16,8 @@ Test organisation
     collection, producible but unimplemented, no source
 7.  _handle_crafting — already-satisfied, missing ingredients triggers
     acquire sub-goals, crafts when ingredients present, verifies after craft
-8.  _handle_explore — target already met, pushes explore task
+8.  _handle_explore — target already met, pushes explore task, needs-frontier
+    signal triggers re-derive, fallback frontier
 9.  _handle_clear_region — undestroyable blocker fails, pushes clear task,
     verifies empty after task
 10. _handle_prep_region — factory intersection fails, undestroyable fails,
@@ -30,7 +31,7 @@ Test organisation
 15. _tick_task — success condition fires, failure condition fires,
     STUCK from agent observe, agent ticked when running
 16. drain_patches — empty initially, drained from agent after tick
-17. Module-level helpers — _dist, _item_in_nearby_chest,
+17. Module-level helpers — _dist, _item_in_nearby_chest, _nearest_frontier,
     _undestroyable_in_bbox, _bbox_is_clear, _bbox_empty_condition,
     _intersects_major_factory, _intersects_logistics
 
@@ -753,11 +754,43 @@ class TestHandleExplore(unittest.TestCase):
         coord = _make_coord(agents={"exploration": explore_agent})
         coord.reset(GOAL_EXPLORE, {"target_chunks": 20}, _WQ())
         coord.tick(_WQ(charted=0, nearby_uncharted=[]), _WW, 1)
-        # Should have pushed one explore_region task
         self.assertIsNotNone(coord._active_task)
         self.assertEqual(coord._active_task.task_type, "explore_region")
-        # Coordinator should be at step 1 (WAITING)
         self.assertEqual(coord._goal_stack[0].step, 1)
+
+    def test_custom_success_condition_passed_to_task(self):
+        """When success_condition is in params, it overrides the chunk-count default."""
+        explore_agent = _make_agent("RUNNING")
+        coord = _make_coord(agents={"exploration": explore_agent})
+        cond = "len(resources_of_type('copper-ore')) >= 1"
+        coord.reset(GOAL_EXPLORE, {"success_condition": cond}, _WQ())
+        coord.tick(_WQ(charted=0, nearby_uncharted=[]), _WW, 1)
+        self.assertIsNotNone(coord._active_task)
+        self.assertEqual(coord._active_task.success_condition, cond)
+
+    def test_custom_description_passed_to_task(self):
+        """Custom description param is forwarded to the task."""
+        explore_agent = _make_agent("RUNNING")
+        coord = _make_coord(agents={"exploration": explore_agent})
+        coord.reset(
+            GOAL_EXPLORE,
+            {"success_condition": "len(resources_of_type('oil')) >= 1",
+             "description": "Find an oil patch"},
+            _WQ(),
+        )
+        coord.tick(_WQ(charted=0, nearby_uncharted=[]), _WW, 1)
+        self.assertIsNotNone(coord._active_task)
+        self.assertIn("oil", coord._active_task.description.lower())
+
+    def test_default_condition_used_when_no_custom(self):
+        """Without a custom condition, the task gets the charted_chunks condition."""
+        explore_agent = _make_agent("RUNNING")
+        coord = _make_coord(agents={"exploration": explore_agent})
+        coord.reset(GOAL_EXPLORE, {"target_chunks": 10}, _WQ(charted=50))
+        coord.tick(_WQ(charted=50, nearby_uncharted=[]), _WW, 1)
+        self.assertIsNotNone(coord._active_task)
+        self.assertIn("charted_chunks", coord._active_task.success_condition)
+        self.assertIn("60", coord._active_task.success_condition)
 
     def test_start_chunks_context_initialised_on_first_tick(self):
         explore_agent = _make_agent("RUNNING")
@@ -1280,7 +1313,6 @@ class TestItemInNearbyChest(unittest.TestCase):
     def test_always_false_stub(self):
         self.assertFalse(_item_in_nearby_chest("iron-ore", _WQ()))
         self.assertFalse(_item_in_nearby_chest("anything", _WQ()))
-
 
 class TestUndestroyableInBbox(unittest.TestCase):
 
