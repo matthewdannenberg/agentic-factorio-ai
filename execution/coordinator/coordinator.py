@@ -1448,22 +1448,23 @@ _FRONTIER_CANDIDATE_POOL = 10   # draw randomly from this many nearest frontiers
 
 def _nearest_frontier(wq: "WorldQuery") -> Optional[Position]:
     """
-    Return the tile-space centre of a randomly selected nearby uncharted chunk.
+    Return the tile-space centre of a randomly selected frontier chunk.
 
-    Rather than always picking the single nearest frontier (which causes the
-    coordinator to retry the same unreachable point after a navigation STUCK),
-    we gather the _FRONTIER_CANDIDATE_POOL nearest candidates and pick one
-    uniformly at random. This means a second attempt will usually target a
-    different chunk, breaking the deterministic failure loop.
+    Primary source: wq.nearby_uncharted_chunks (PROXIMAL, scan-radius
+    limited, refreshed every poll). From the nearest
+    _FRONTIER_CANDIDATE_POOL candidates, one is chosen at random so that a
+    navigation STUCK on one attempt targets a different chunk on the next.
 
-    Reads wq.nearby_uncharted_chunks if available (PROXIMAL, scan-radius
-    limited), falling back to a distance-based outward push when empty.
+    Secondary source: wq.chunk_map.frontiers() — the accumulated charted-
+    chunk set in WorldState. Used when nearby_uncharted_chunks is empty but
+    the session has charted some chunks with known frontier edges.
+
+    Fallback: push outward from current position when neither source has data.
     """
     import random as _random
     nearby = getattr(wq, "nearby_uncharted_chunks", [])
     if nearby:
         player = wq.player_position()
-        # Sort by distance, take up to _FRONTIER_CANDIDATE_POOL nearest.
         sorted_chunks = sorted(
             nearby,
             key=lambda c: math.hypot(
@@ -1474,7 +1475,15 @@ def _nearest_frontier(wq: "WorldQuery") -> Optional[Position]:
         candidate = _random.choice(sorted_chunks[:_FRONTIER_CANDIDATE_POOL])
         return Position(x=candidate.cx * 32 + 16.0, y=candidate.cy * 32 + 16.0)
 
-    # Fallback: push outward from current position in a simple spiral.
+    # Secondary: use the accumulated chunk_map from WorldState.
+    chunk_map = wq.chunk_map
+    if chunk_map:
+        player = wq.player_position()
+        frontier_pos = chunk_map.nearest_frontier_position(player)
+        if frontier_pos is not None:
+            return frontier_pos
+
+    # Fallback: push outward from current position.
     pos    = wq.player_position()
     radius = max(64.0, math.sqrt(wq.charted_chunks) * 32.0)
     return Position(x=pos.x + radius, y=pos.y)

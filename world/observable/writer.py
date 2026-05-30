@@ -115,7 +115,16 @@ class WorldWriter:
             return snap_obs >= live_obs
 
         if _is_fresh("player"):
+            # Carry the accumulated charted_chunk_coords forward across the
+            # player replacement. snapshot.player always has an empty set
+            # (StateParser constructs fresh objects); the running accumulation
+            # lives in live.player.exploration.charted_chunk_coords and must
+            # be preserved, then extended with the new delta.
+            accumulated = live.player.exploration.charted_chunk_coords
+            for c in snapshot.player.exploration.newly_charted_chunks:
+                accumulated.add((c.cx, c.cy))
             live.player = snapshot.player
+            live.player.exploration.charted_chunk_coords = accumulated
             live.observed_at["player"] = snapshot.observed_at["player"]
 
         if _is_fresh("entities"):

@@ -3,9 +3,8 @@ world/model/self_model.py
 
 SelfModel -- the coordinator's persistent, layered model of the game world.
 
-Contains two layers:
+Contains one layer for now:
   factory  : FactoryGraph -- directed graph of factory components and flows.
-  chunks   : ChunkGrid    -- spatial index of charted map chunks (stub).
 
 The coordinator accesses layers directly (sm.factory.find_producers(...)) for
 queries, and applies mutations via SelfModel.apply(patch), which routes each
@@ -31,7 +30,6 @@ from __future__ import annotations
 
 import logging
 
-from world.model.layers.chunk_grid import ChunkGrid
 from world.model.layers.factory_graph import (
     EdgeType,
     FactoryEdge,
@@ -55,13 +53,10 @@ class SelfModel:
     ----------
     factory : FactoryGraph
         The factory component graph. Primary coordination data structure.
-    chunks  : ChunkGrid
-        Spatial index of charted chunks. Stub until bridge supports it.
-    """
+"""
 
     def __init__(self) -> None:
         self.factory = FactoryGraph()
-        self.chunks = ChunkGrid()
 
     # ------------------------------------------------------------------
     # Patch application
@@ -82,8 +77,6 @@ class SelfModel:
         try:
             if patch.layer == "factory":
                 self._apply_factory(patch)
-            elif patch.layer == "chunks":
-                self._apply_chunks(patch)
             else:
                 log.warning(
                     "SelfModel.apply: unknown layer %r (action=%r source=%r)",
@@ -148,23 +141,6 @@ class SelfModel:
         else:
             log.warning("Unknown factory patch action: %r", action)
 
-    def _apply_chunks(self, patch: SelfModelPatch) -> None:
-        # Chunk patches route bulk charting updates from the coordinator
-        # to the ChunkGrid. These are not agent-emitted patches -- they come
-        # from the loop draining WorldQuery.newly_charted_chunks each tick.
-        # Using the patch mechanism keeps the update pathway consistent with
-        # all other SelfModel mutations.
-        if patch.action == "mark_charted_bulk":
-            if patch.chunk_coords is not None:
-                self.chunks.mark_charted_bulk(patch.chunk_coords)
-            else:
-                log.warning("mark_charted_bulk patch missing chunk_coords")
-        else:
-            log.warning(
-                "SelfModel._apply_chunks: unknown action %r (source=%r)",
-                patch.action, patch.source_agent,
-            )
-
     # ------------------------------------------------------------------
     # Convenience pass-throughs for the most common coordinator queries
     # ------------------------------------------------------------------
@@ -190,9 +166,7 @@ class SelfModel:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
-        return (
-            f"SelfModel(factory={self.factory!r}, chunks={self.chunks!r})"
-        )
+        return f"SelfModel(factory={self.factory!r})"
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +184,6 @@ __all__ = [
     "NodeStatus",
     "EdgeType",
     "ProcessType",
-    # From chunk_grid
-    "ChunkGrid",
     # From types
     "BoundingBox",
     "IOPoint",

@@ -56,6 +56,7 @@ All methods return values or empty collections; none raise.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional, TYPE_CHECKING
 
 from world.observable.state import (
@@ -164,6 +165,106 @@ class EntityQuery:
     def first(self) -> Optional[EntityState]:
         """Return the first matching entity, or None."""
         return self._working[0] if self._working else None
+
+
+
+# ---------------------------------------------------------------------------
+# ChunkMapQuery — spatial queries over the accumulated charted-chunk set
+# ---------------------------------------------------------------------------
+
+class ChunkMapQuery:
+    """
+    Spatial query interface over ExplorationState.charted_chunk_coords.
+
+    Mirrors the ChunkGrid API that previously lived in world/model/self_model.py,
+    now computed directly from WorldState so it stays in the observable layer
+    where it belongs. Constructed by WorldQuery.chunk_map; not instantiated
+    directly.
+
+    All methods return safe empty defaults when the coord set is empty.
+    """
+
+    CHUNK_SIZE: int = 32   # tiles per chunk side
+
+    def __init__(self, coords: set) -> None:
+        # coords is a set of (cx, cy) int tuples
+        self._charted: set = coords
+
+    # ------------------------------------------------------------------
+    # Membership / count
+    # ------------------------------------------------------------------
+
+    def is_charted(self, cx: int, cy: int) -> bool:
+        """True if chunk (cx, cy) has been charted this session."""
+        return (cx, cy) in self._charted
+
+    def charted_count(self) -> int:
+        """Number of chunk coordinates accumulated this session."""
+        return len(self._charted)
+
+    def all_charted(self) -> list[tuple[int, int]]:
+        """Return all charted chunk coordinates as (cx, cy) tuples."""
+        return list(self._charted)
+
+    def __len__(self) -> int:
+        return len(self._charted)
+
+    def __bool__(self) -> bool:
+        return bool(self._charted)
+
+    def __repr__(self) -> str:
+        return (
+            f"ChunkMapQuery({len(self._charted)} chunks, "
+            f"{len(self.frontiers())} frontiers)"
+        )
+
+    # ------------------------------------------------------------------
+    # Frontier detection
+    # ------------------------------------------------------------------
+
+    def frontiers(self) -> list[tuple[int, int]]:
+        """
+        Charted chunks that have at least one uncharted cardinal neighbour.
+        Returns [] when the set is empty.
+        """
+        result = []
+        for (cx, cy) in self._charted:
+            neighbours = [(cx, cy-1), (cx, cy+1), (cx-1, cy), (cx+1, cy)]
+            if any(n not in self._charted for n in neighbours):
+                result.append((cx, cy))
+        return result
+
+    def nearest_frontier(self, position: "Position") -> Optional[tuple[int, int]]:
+        """
+        Nearest frontier chunk to position, or None if no frontiers exist.
+        """
+        fronts = self.frontiers()
+        if not fronts:
+            return None
+        cx0, cy0 = self.chunk_for_position(position)
+        return min(fronts, key=lambda c: (c[0]-cx0)**2 + (c[1]-cy0)**2)
+
+    def nearest_frontier_position(self, position: "Position") -> Optional["Position"]:
+        """Tile-space centre of the nearest frontier chunk, or None."""
+        frontier = self.nearest_frontier(position)
+        if frontier is None:
+            return None
+        return self.centre_of_chunk(*frontier)
+
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def chunk_for_position(self, position: "Position") -> tuple[int, int]:
+        """Return the chunk coordinates containing the given tile position."""
+        return (int(position.x // self.CHUNK_SIZE), int(position.y // self.CHUNK_SIZE))
+
+    def centre_of_chunk(self, cx: int, cy: int) -> "Position":
+        """Return the tile-space centre of chunk (cx, cy)."""
+        return Position(
+            x=cx * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0,
+            y=cy * self.CHUNK_SIZE + self.CHUNK_SIZE / 2.0,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +557,27 @@ class WorldQuery:
         radius — the agent should signal the coordinator for a new frontier.
         """
         return self._state.player.exploration.nearby_uncharted_chunks
+
+    @property
+    def chunk_map(self) -> "ChunkMapQuery":
+        """
+        Spatial query interface over the accumulated charted-chunk set.
+
+        NON-PROXIMAL. Provides frontier detection, nearest-frontier lookup,
+        and coordinate helpers over every chunk charted this session.
+        Populated by WorldWriter from newly_charted_chunks deltas on every
+        integrate_snapshot() call. Empty at session start; grows as the
+        agent explores.
+
+        Usage:
+            wq.chunk_map.charted_count()
+            wq.chunk_map.frontiers()
+            wq.chunk_map.nearest_frontier_position(player_pos)
+            wq.chunk_map.is_charted(cx, cy)
+        """
+        return ChunkMapQuery(
+            self._state.player.exploration.charted_chunk_coords
+        )
 
     # ------------------------------------------------------------------
     # Research

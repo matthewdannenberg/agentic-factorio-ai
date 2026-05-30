@@ -13,8 +13,4 @@ factory_graph.py   FactoryGraph — directed graph of factory components.
                    The primary coordination data structure. Nodes are logical
                    factory units (production lines, mining sites, power grids,
                    etc.); edges are item flows between them.
-
-chunk_grid.py      ChunkGrid — spatial index of charted map chunks.
-                   STUB: requires bridge/mod changes to populate with real data.
-                   Returns safe empty defaults in the interim.
 """

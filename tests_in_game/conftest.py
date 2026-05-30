@@ -78,7 +78,7 @@ from execution.agents.mining import MiningAgent
 from execution.agents.navigation import NavigationAgent
 from execution.agents.crafting import CraftingAgent
 from execution.agents.exploration import ExplorationAgent
-from execution.coordinator.coordinator import RuleBasedCoordinator
+from execution.coordinator import RuleBasedCoordinator
 from execution.coordinator.registry import AgentRegistry
 
 from planning import (
@@ -169,7 +169,7 @@ def rcon(rcon_client):
 class RunResult:
     stats: LoopStats
     wq: WorldQuery
-    sm: SelfModel               # self-model state at end of run
+    sm: SelfModel               # self-model state at end of run (factory layer only)
     goals_attempted: list[str]  # entry.description for each goal in the run
     final_tick: int             # wq.tick at end of run
     kb_summary: dict            # kb.summary() at end of run

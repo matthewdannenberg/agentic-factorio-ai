@@ -309,10 +309,16 @@ class ExplorationState:
 
     charted_chunks           : Total chunks revealed. NON-PROXIMAL, monotonically
                                increasing. Sourced from iterating surface.get_chunks().
+    charted_chunk_coords     : Set of (cx, cy) tuples for every chunk confirmed
+                               charted this session. NON-PROXIMAL, persistent.
+                               Accumulated by WorldWriter from newly_charted_chunks
+                               deltas on every integrate_snapshot() call. Starts
+                               empty; grows as the agent explores. Used by
+                               WorldQuery.chunk_map for frontier algorithms.
     newly_charted_chunks     : Chunks charted since the last bridge poll. TRANSIENT.
                                The mod emits only newly-charted chunks each poll
-                               (delta); empty on most ticks. The coordinator drains
-                               these each poll to update ChunkGrid.
+                               (delta); empty on most ticks. WorldWriter drains
+                               these into charted_chunk_coords each integrate call.
     nearby_uncharted_chunks  : PROXIMAL. Uncharted chunks within
                                EXPLORATION_SCAN_RADIUS chunks of the player's current
                                chunk. Refreshed every poll. Used by the exploration
@@ -320,6 +326,7 @@ class ExplorationState:
                                nearest entry and walk toward its tile-space centre.
     """
     charted_chunks: int = 0
+    charted_chunk_coords: set = field(default_factory=set)
     newly_charted_chunks: list["ChunkCoord"] = field(default_factory=list)
     nearby_uncharted_chunks: list["ChunkCoord"] = field(default_factory=list)
 

@@ -338,12 +338,9 @@ class FactorioLoop:
         raw = self._poller.poll()
         if raw:
             snapshot = self._parser.parse(raw, self._state.tick)
+            # integrate_snapshot accumulates newly_charted_chunks into
+            # ExplorationState.charted_chunk_coords automatically.
             self._ww.integrate_snapshot(snapshot)
-        # Drain newly-charted chunks into the SelfModel's ChunkGrid.
-        # This is bookkeeping, not an agent decision, so it bypasses patches.
-        newly = self._wq.newly_charted_chunks
-        if newly:
-            self._sm.chunks.mark_charted_bulk(newly)
 
     # ------------------------------------------------------------------
     # Goal lifecycle
