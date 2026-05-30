@@ -326,14 +326,26 @@ class TestExplorationAgentScan(unittest.TestCase):
         agent.tick(task, bb, wq, _WW, 2, _KB)
 
     def test_scan_picks_target_from_nearby(self):
-        """SCAN issues MoveTo toward nearby uncharted chunk."""
+        """SCAN selects a target from nearby uncharted chunks and starts navigation.
+
+        NavigateSkill issues MoveTo via an internal command on start(), but
+        skill.tick() returns [] until the game loop provides position feedback —
+        which doesn't happen in unit tests. Instead we verify that:
+          - the skill is RUNNING (start() was called with a valid target), and
+          - _current_target is set to the chunk centre.
+        The MoveTo action itself is tested by NavigateSkill's own unit tests.
+        """
         agent = _make_agent()
         task = _Task()
         wq = _WQ(nearby_uncharted=[_chunk(2, 0)])
         bb = _make_bb()
         self._enter_scan(agent, task, bb, wq)
-        actions = agent.tick(task, bb, wq, _WW, 3, _KB)
-        self.assertGreater(len(actions), 0)
+        # After _enter_scan: skill was started on chunk (2,0) during tick 2.
+        # Skill should be RUNNING and _current_target set.
+        self.assertEqual(agent._skill.status(), SkillStatus.RUNNING)
+        expected_x = 2 * _CHUNK_SIZE + _CHUNK_SIZE / 2.0
+        self.assertIsNotNone(agent._current_target)
+        self.assertAlmostEqual(agent._current_target.x, expected_x)
 
     def test_scan_returns_to_approach_when_locally_surrounded(self):
         """Empty nearby_uncharted during SCAN returns to APPROACH."""
@@ -524,7 +536,7 @@ class TestExplorationAgentPendingPatches(unittest.TestCase):
 
     def test_always_empty(self):
         agent = _make_agent()
-        task = _Task(frontier_position=Position(x=100, y=100))
+        task = _Task()
         bb = _make_bb()
         wq = _WQ(nearby_uncharted=[_chunk(1, 0)])
         agent.activate(task, bb, wq, _KB)

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from unittest.mock import MagicMock
 
-from execution.agents.mining import MiningAgent, _TaskKind, _ClearPhase
+from execution.agents.mining import MiningAgent, _TaskKind, _ClearPhase, _GatherPhase
 from execution.blackboard import Blackboard, EntryCategory, EntryScope
 from execution.skills.base import SkillStatus
 from world import Position, NaturalObject
@@ -155,6 +155,23 @@ class _WQ:
 
 
 _WW = MagicMock()
+
+def _gather_task(resource_type="iron-ore", count=10):
+    """Module-level gather task helper for teardown tests."""
+    return _Task(
+        task_type="gather_resource",
+        resource_type=resource_type,
+        target_position=Position(x=10, y=10),
+        count=count,
+    )
+
+def _clear_task(bbox=None):
+    """Module-level clear task helper for teardown tests."""
+    return _Task(
+        task_type="clear_region",
+        bbox=bbox or _BBox(0, 0, 100, 100),
+    )
+
 def _make_kb(minable=True):
     """KB stub whose get_entity() returns a proper minable record."""
     record = MagicMock()
@@ -261,6 +278,15 @@ class TestMiningAgentActivate(unittest.TestCase):
 class TestMiningAgentGather(unittest.TestCase):
 
     def _setup(self, count=10, inv=None):
+        """
+        Set up a gather agent ready for MineResource testing.
+
+        The mining agent now has two phases: NAVIGATE → MINE.
+        After StopMining (tick 1), tick 2 starts NavigateSkill.
+        We force NavigateSkill to SUCCEEDED so the agent transitions
+        to the MINE phase, making MineResource appear on tick 3.
+        """
+        from execution.skills.navigate import NavigateSkill
         agent = _make_agent()
         task = _Task(
             target_position=Position(x=10, y=10),
@@ -271,10 +297,16 @@ class TestMiningAgentGather(unittest.TestCase):
         wq = _WQ(inventory=inv or {"iron-ore": 0})
         agent.activate(task, bb, wq, _KB)
         agent.tick(task, bb, wq, _WW, 1, _KB)   # drain StopMining
+        # Force the NAVIGATE→MINE phase transition directly without ticking
+        # _gather_mine (which would issue MineResource and consume the first
+        # issue). Set gather_phase directly so tick 2 is the first mine tick.
+        agent._nav_skill._status = SkillStatus.SUCCEEDED
+        agent._gather_phase = _GatherPhase.MINE
         return agent, task, bb, wq
 
     def test_issues_mine_resource_after_stop(self):
         agent, task, bb, wq = self._setup()
+        # _setup() leaves agent in MINE phase; first mine tick issues MineResource
         actions = agent.tick(task, bb, wq, _WW, 2, _KB)
         self.assertTrue(any(isinstance(a, MineResource) for a in actions))
 
@@ -294,7 +326,6 @@ class TestMiningAgentGather(unittest.TestCase):
     def test_gather_succeeded_observation_written(self):
         agent, task, bb, wq = self._setup(count=5)
         agent.tick(task, bb, wq, _WW, 2, _KB)   # first MineResource
-        # Simulate count reached
         wq.set_inventory({"iron-ore": 5})
         agent.tick(task, bb, wq, _WW, 3, _KB)   # skill → SUCCEEDED
         agent.tick(task, bb, wq, _WW, 4, _KB)   # outcome written
@@ -316,14 +347,14 @@ class TestMiningAgentGather(unittest.TestCase):
         for _ in range(_MAX_REISSUE + 2):
             tick += _MINING_GRACE_TICKS + 10
             agent.tick(task, bb, wq, _WW, tick, _KB)
-        # One more tick for outcome to be written
         agent.tick(task, bb, wq, _WW, tick + 1, _KB)
         self.assertEqual(len(_obs_of_type(bb, "gather_stuck")), 1)
 
-    def test_progress_zero_before_mine_issued(self):
+    def test_progress_in_mine_phase_running(self):
+        """After nav completes, MineSkill is RUNNING (started by activate()).
+        progress() returns 0.6 (MINE phase, RUNNING, not yet SUCCEEDED)."""
         agent, task, bb, wq = self._setup()
-        # After StopMining tick but before MineResource
-        self.assertAlmostEqual(agent.progress(task, bb, wq, _KB), 0.5)
+        self.assertAlmostEqual(agent.progress(task, bb, wq, _KB), 0.6)
 
     def test_progress_one_on_succeeded(self):
         agent, task, bb, wq = self._setup(count=5)
@@ -515,7 +546,8 @@ class TestMiningAgentObserveProgress(unittest.TestCase):
         wq = _WQ()
         agent.activate(task, bb, wq, _KB)
         obs = agent.observe(task, bb, wq, _KB)
-        for key in ("agent", "task_id", "task_kind", "mine_status"):
+        # gather observe includes gather_phase plus nav/mine skill sub-keys
+        for key in ("agent", "task_id", "task_kind", "gather_phase"):
             self.assertIn(key, obs, f"missing key: {key}")
 
     def test_observe_keys_clear(self):
@@ -599,7 +631,7 @@ class TestMiningAgentTeardown(unittest.TestCase):
         agent = _make_agent()
         task = _gather_task()
         bb = _make_bb()
-        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        wq = _WQ()
         agent.activate(task, bb, wq, _KB)
         actions = agent.teardown()
         self.assertEqual(len(actions), 1)
@@ -611,7 +643,7 @@ class TestMiningAgentTeardown(unittest.TestCase):
         agent = _make_agent()
         task = _gather_task()
         bb = _make_bb()
-        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        wq = _WQ()
         agent.activate(task, bb, wq, _KB)
         # Force skill to succeeded state
         agent._mine_skill._status = SkillStatus.SUCCEEDED
@@ -633,7 +665,7 @@ class TestMiningAgentTeardown(unittest.TestCase):
         agent = _make_agent()
         task = _gather_task()
         bb = _make_bb()
-        wq = _WQ(resource_patches=[_patch("iron-ore", 50, 100)])
+        wq = _WQ()
         agent.activate(task, bb, wq, _KB)
         agent._pending_stop = True
         agent.teardown()
