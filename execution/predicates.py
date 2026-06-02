@@ -110,18 +110,16 @@ def can_destroy(obj: "NaturalObject", kb: "KnowledgeBase") -> bool:
     fa.get_entity_prototype. This works correctly for any total-conversion
     mod — nothing is hardcoded about entity names.
 
-    Note: obj.is_minable checks entity_id != 0, but in Factorio 2.x trees
-    have no unit_number (entity_id=0) yet are still minable. The KB record
-    is the authoritative source — obj.is_minable is intentionally not used
-    here so that trees are correctly recognised as destroyable.
+    The KB record is the sole authority. Unknown entities (no record or
+    placeholder) are conservatively treated as not destroyable until the
+    KB learns the prototype via ensure_entity().
 
     Returns False when:
-    - KB returns None or a placeholder: unknown entity — conservative,
-      assume not destroyable until prototype is learned.
+    - KB returns None or a placeholder: prototype not yet learned.
     - record.minable=False: entity requires special handling (Phase 7),
       e.g. cliffs require cliff explosives via UseItemOnEntity.
     """
-    record = kb.ensure_entity(obj.name)
+    record = kb.get_entity(obj.name)
     if record is None or record.is_placeholder:
-        return False   # unknown — conservative
+        return False   # unknown entity — conservative
     return record.minable

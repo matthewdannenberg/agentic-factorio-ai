@@ -156,6 +156,66 @@ class _WQ:
     def set_natural_objects(self, objs: list) -> None:
         self._natural_objects = list(objs)
 
+    # Properties needed by build_full_namespace / RewardEvaluator
+    @property
+    def charted_tiles(self) -> int:
+        return 0
+
+    @property
+    def charted_area_km2(self) -> float:
+        return 0.0
+
+    @property
+    def logistics(self):
+        return MagicMock()
+
+    @property
+    def power(self):
+        return MagicMock()
+
+    @property
+    def threat(self):
+        return MagicMock()
+
+    @property
+    def research(self):
+        return MagicMock()
+
+    def tech_unlocked(self, tech: str) -> bool:
+        return False
+
+    def resources_of_type(self, resource_type: str) -> list:
+        return []
+
+    def inserters_taking_from(self, *a, **kw): return []
+    def inserters_delivering_to(self, *a, **kw): return []
+    def inserters_taking_from_type(self, *a): return []
+    def inserters_delivering_to_type(self, *a): return []
+
+    def entities(self):
+        from world.observable.query import EntityQuery
+        return EntityQuery([], self)
+
+    def entities_by_name(self, name: str) -> list:
+        return []
+
+    def entities_by_status(self, status) -> list:
+        return []
+
+    def in_bbox(self, x_min, y_min, x_max, y_max):
+        from world.observable.query import BBoxQuery
+        return BBoxQuery(self, x_min, y_min, x_max, y_max)
+
+    def natural_objects_in_bbox(self, x_min, y_min, x_max, y_max):
+        return [o for o in self._natural_objects
+                if x_min <= o.position.x <= x_max and y_min <= o.position.y <= y_max]
+
+    def section_staleness(self, section: str, tick: int):
+        return 0
+
+    def _tile_dims(self, name: str):
+        return 1, 1
+
 
 _WW = MagicMock()
 
@@ -699,16 +759,18 @@ class TestMiningAgentHarvest(unittest.TestCase):
         self.assertEqual(agent._current_target.entity_id, 7)
 
     def test_harvest_skips_non_minable(self):
-        """Non-minable natural objects are filtered out by _build_harvest_targets."""
+        """Non-minable natural objects are filtered out by _build_harvest_targets.
+        can_destroy() is KB-authoritative — use a KB that returns minable=False."""
         agent = _make_agent()
         task = self._harvest_task(entity_types=["cliff"])
         cliff = self._make_natural_obj(name="cliff", entity_id=3,
                                         is_minable=False)
+        kb_cliff = _make_kb(minable=False)   # KB says cliff is not minable
         bb = _make_bb()
         wq = _WQ(natural_objects=[cliff])
-        agent.activate(task, bb, wq, _KB)
-        agent.tick(task, bb, wq, _WW, 1, _KB)   # StopMining
-        agent.tick(task, bb, wq, _WW, 2, _KB)
+        agent.activate(task, bb, wq, kb_cliff)
+        agent.tick(task, bb, wq, _WW, 1, kb_cliff)   # StopMining
+        agent.tick(task, bb, wq, _WW, 2, kb_cliff)
         self.assertIsNone(agent._current_target)
 
     def test_harvest_teardown_returns_stop_mining(self):

@@ -663,11 +663,11 @@ class MiningAgent(AgentProtocol):
         for obj in wq.natural_objects:
             if obj.name not in type_set:
                 continue
-            # Use KB minable flag rather than obj.is_minable (which checks
-            # unit_number != 0 and is False for trees in Factorio 2.x).
-            # can_destroy also uses KB, so just check KB directly.
-            rec = kb.get_entity(obj.name) if kb else None
-            if rec is None or rec.is_placeholder or not rec.minable:
+            # can_destroy() checks KB.minable authoritatively when a record
+            # exists, falling back to obj.is_minable for unknown entities.
+            # This handles both trees (entity_id=0, KB record has minable=True)
+            # and cliffs (minable=False in KB or obj.is_minable=False).
+            if not can_destroy(obj, kb):
                 continue
             targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position, name=obj.name))
         player_pos = wq.player_position()

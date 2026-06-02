@@ -31,7 +31,7 @@ Test organisation
 15. _tick_task — success condition fires, failure condition fires,
     STUCK from agent observe, agent ticked when running
 16. drain_patches — empty initially, drained from agent after tick
-17. Module-level helpers — _dist, _item_in_nearby_chest, _nearest_frontier,
+17. Module-level helpers — _dist, _item_in_nearby_chest,
     _undestroyable_in_bbox, _bbox_is_clear, _bbox_empty_condition,
     _intersects_major_factory, _intersects_logistics
 
@@ -60,8 +60,7 @@ from execution.coordinator.coordinator import (
     _TASK_TIMEOUT_TICKS,
 )
 from execution.blackboard import Blackboard, EntryCategory, EntryScope
-from world import Position, NaturalObject
-from world.observable.state import ChunkCoord
+from world import Position, NaturalObject, ChunkCoord
 
 
 # ===========================================================================
@@ -149,6 +148,63 @@ class _WQ:
 
     def tech_unlocked(self, tech: str) -> bool:
         return tech in self._tech_unlocked
+
+    # Properties added for build_full_namespace / RewardEvaluator compatibility
+    @property
+    def charted_tiles(self) -> int:
+        return self._charted * 1024
+
+    @property
+    def charted_area_km2(self) -> float:
+        return self._charted * 1024 / 1_000_000
+
+    @property
+    def logistics(self):
+        return MagicMock()
+
+    @property
+    def power(self):
+        return MagicMock()
+
+    @property
+    def threat(self):
+        return MagicMock()
+
+    def inserters_taking_from(self, *a, **kw): return []
+    def inserters_delivering_to(self, *a, **kw): return []
+    def inserters_taking_from_type(self, *a): return []
+    def inserters_delivering_to_type(self, *a): return []
+
+    def entities(self):
+        from world.observable.query import EntityQuery
+        return EntityQuery([], self)
+
+    def entities_by_name(self, name: str) -> list:
+        return []
+
+    def entities_by_status(self, status) -> list:
+        return []
+
+    def entity_by_id(self, eid: int):
+        return None
+
+    def _tile_dims(self, name: str):
+        return 1, 1
+
+    def in_bbox(self, x_min, y_min, x_max, y_max):
+        from world.observable.query import BBoxQuery
+        return BBoxQuery(self, x_min, y_min, x_max, y_max)
+
+    def natural_objects_in_bbox(self, x_min, y_min, x_max, y_max):
+        return [o for o in self._natural_objects
+                if x_min <= o.position.x <= x_max and y_min <= o.position.y <= y_max]
+
+    def section_staleness(self, section: str, tick: int):
+        return 0
+
+    @property
+    def research(self):
+        return MagicMock()
 
 
 _WW = MagicMock()
