@@ -165,48 +165,28 @@ class RewardEvaluator:
         )
 
     def _build_namespace(self, wq: "WorldQuery", tick: int, elapsed_ticks: int = 0, start_wq: "WorldQuery" = None) -> dict:
-        from planning.evaluation.condition_namespace import build_core_namespace, safe_builtins
-
-        if self._tracker is not None:
-            production_rate = self._tracker.rate
-        else:
-            def production_rate(item: str) -> float:  # type: ignore[misc]
-                log.warning(
-                    "production_rate(%r) called but no ProductionTracker is "
-                    "attached to this RewardEvaluator — returning 0.0. "
-                    "Pass tracker= when constructing RewardEvaluator in the "
-                    "main loop. See CONDITION_SCOPE.md.", item
-                )
-                return 0.0
-
-        def staleness(section: str) -> Optional[int]:
-            return wq.section_staleness(section, tick)
-
-        # Start with the shared core (inventory, charted_chunks, tick,
-        # elapsed_ticks, new, wq, state, research, entities, builtins...).
-        # start_tick is back-computed from elapsed_ticks.
+        from planning.evaluation.condition_namespace import build_full_namespace
         start_tick = tick - elapsed_ticks
-        ns = build_core_namespace(wq, tick, start_tick, start_wq)
-        ns["__builtins__"] = safe_builtins()
+        return build_full_namespace(wq, tick, start_tick, start_wq, self._tracker)
 
-        # RewardEvaluator extras — richer world-state access not needed in
-        # subtask conditions but available for complex goal conditions.
-        ns.update({
-            # Production rates — PROXIMAL (scan radius + tracker window)
-            "production_rate": production_rate,
-            # Staleness guard — META
-            "staleness": staleness,
-            # Logistics sub-objects — PROXIMAL
-            "logistics": wq.logistics,
-            "power":     wq.power,
-            "threat":    wq.threat,
-            # Connectivity queries — PROXIMAL
-            "inserters_from":      wq.inserters_taking_from,
-            "inserters_to":        wq.inserters_delivering_to,
-            "inserters_from_type": wq.inserters_taking_from_type,
-            "inserters_to_type":   wq.inserters_delivering_to_type,
-        })
-        return ns
+    def eval_condition(
+        self,
+        condition: str,
+        wq: "WorldQuery",
+        tick: int,
+    ) -> bool:
+        """
+        Evaluate a single condition string against the current world state.
+
+        Lightweight entry point for the coordinator's task condition checks,
+        which don't have a goal-activation snapshot or start_tick. Uses the
+        full namespace (including bbox, logistics, etc.) so task conditions
+        have access to the same vocabulary as goal conditions.
+
+        All exceptions are caught and return False, identical to _eval_bool.
+        """
+        ns = self._build_namespace(wq, tick, 0, None)
+        return self._eval_bool(condition, ns, "task_condition")
 
     def _eval_bool(self, expression: str, namespace: dict, label: str) -> bool:
         if not expression or not expression.strip():

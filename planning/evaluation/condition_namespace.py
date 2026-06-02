@@ -33,7 +33,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Names that must never appear in eval() namespaces.
+from world import BBoxQuery  # noqa: F401 (re-export)
+
 BLOCKED_NAMES = frozenset({
     "os", "sys", "subprocess", "importlib", "builtins",
     "open", "exec", "compile", "__import__",
@@ -112,6 +113,10 @@ class _DeltaView:
         start_wq = object.__getattribute__(self, '_start_wq')
         return max(0, len(wq.resources_of_type(resource_type))
                       - len(start_wq.resources_of_type(resource_type)))
+
+# ---------------------------------------------------------------------------
+# WorldQuery
+# ---------------------------------------------------------------------------
 
 
 def build_core_namespace(
@@ -198,6 +203,22 @@ def build_core_namespace(
         "entities_by_status": wq.entities_by_status,
 
         # ----------------------------------------------------------------
+        # Spatial queries — PROXIMAL (scan radius only)
+        # ----------------------------------------------------------------
+        # bbox(x_min, y_min, x_max, y_max) -> BBoxQuery
+        # Use for clear_region conditions and region-based success checks:
+        #   bbox(-16,-16,16,16).is_clear
+        #   bbox(-16,-16,16,16).natural_count == 0
+        #
+        # The bbox() function is the bridge between condition strings and
+        # WorldQuery.natural_objects_in_bbox(). condition_parser extracts the
+        # coordinates to pass as coordinator params; the evaluator resolves
+        # bbox() as a callable at eval() time.
+        "bbox": lambda x_min, y_min, x_max, y_max: BBoxQuery(
+            wq, float(x_min), float(y_min), float(x_max), float(y_max)
+        ),
+
+        # ----------------------------------------------------------------
         # Safe builtins subset
         # ----------------------------------------------------------------
         "True":  True,
@@ -219,6 +240,69 @@ def build_core_namespace(
         "range": range,
         "round": round,
     }
+
+
+def build_full_namespace(
+    wq: "WorldQuery",
+    tick: int,
+    start_tick: int = 0,
+    start_wq: Optional["WorldQuery"] = None,
+    tracker=None,
+) -> dict:
+    """
+    Build the complete namespace for RewardEvaluator conditions.
+
+    Includes everything from build_core_namespace plus the richer
+    world-state access that goal conditions may use: production_rate,
+    staleness, logistics, power, threat, and inserter queries.
+
+    This is the single authoritative source for all eval() namespaces.
+    The coordinator's task condition evaluator uses build_core_namespace
+    (no tracker, no logistics); the RewardEvaluator uses this function.
+
+    Parameters
+    ----------
+    wq          : WorldQuery for the current world state.
+    tick        : Current game tick.
+    start_tick  : Game tick when the current goal was activated.
+    start_wq    : Snapshot at goal activation for delta conditions.
+    tracker     : Optional ProductionTrackerProtocol for production_rate().
+                  When None, production_rate() always returns 0.0.
+    """
+    ns = build_core_namespace(wq, tick, start_tick, start_wq)
+    ns["__builtins__"] = safe_builtins()
+
+    if tracker is not None:
+        production_rate = tracker.rate
+    else:
+        import logging as _logging
+        _prl = _logging.getLogger(__name__)
+        def production_rate(item: str) -> float:  # type: ignore[misc]
+            _prl.warning(
+                "production_rate(%r) called but no ProductionTracker attached "
+                "— returning 0.0. See CONDITION_SCOPE.md.", item
+            )
+            return 0.0
+
+    def staleness(section: str):
+        return wq.section_staleness(section, tick)
+
+    ns.update({
+        # Production rates — PROXIMAL (scan radius + tracker window)
+        "production_rate": production_rate,
+        # Staleness guard — META
+        "staleness": staleness,
+        # Logistics sub-objects — PROXIMAL
+        "logistics": wq.logistics,
+        "power":     wq.power,
+        "threat":    wq.threat,
+        # Connectivity queries — PROXIMAL
+        "inserters_from":      wq.inserters_taking_from,
+        "inserters_to":        wq.inserters_delivering_to,
+        "inserters_from_type": wq.inserters_taking_from_type,
+        "inserters_to_type":   wq.inserters_delivering_to_type,
+    })
+    return ns
 
 
 def safe_builtins() -> dict:

@@ -27,7 +27,7 @@ through WorldQuery and write through WorldWriter only.
 
 # --- Observable state: read / write interfaces ------------------------------
 
-from world.observable.query import WorldQuery, ChunkMapQuery
+from world.observable.query import WorldQuery, ChunkMapQuery, BBoxQuery
 from world.observable.writer import WorldWriter
 from world.observable.production_tracker import ProductionTracker, ProductionTrackerProtocol, ProductionSummary
 
@@ -121,6 +121,7 @@ __all__ = [
     # Observable — interfaces
     "WorldQuery",
     "ChunkMapQuery",
+    "BBoxQuery",
     "WorldWriter",
     "ProductionTracker",
     "ProductionTrackerProtocol",

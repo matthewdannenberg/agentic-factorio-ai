@@ -350,5 +350,210 @@ class TestEvalIntegration(unittest.TestCase):
         self.assertTrue(_eval("new.inventory('iron-ore') == 0", wq))
 
 
+
+# ===========================================================================
+# TestNaturalObjectsInBbox
+# ===========================================================================
+
+class TestNaturalObjectsInBboxMethod(unittest.TestCase):
+    def _obj(self, x, y):
+        from unittest.mock import MagicMock
+        o = MagicMock()
+        o.position = Position(x=float(x), y=float(y))
+        return o
+
+    def _wq(self, objects):
+        ws = WorldState()
+        ws.natural_objects = objects
+        ws._rebuild_entity_indices()
+        return WorldQuery(ws)
+
+    def test_empty(self):
+        self.assertEqual(self._wq([]).natural_objects_in_bbox(-16,-16,16,16), [])
+
+    def test_inside_included(self):
+        self.assertEqual(len(self._wq([self._obj(0,0)]).natural_objects_in_bbox(-16,-16,16,16)), 1)
+
+    def test_outside_excluded(self):
+        self.assertEqual(self._wq([self._obj(100,100)]).natural_objects_in_bbox(-16,-16,16,16), [])
+
+    def test_boundary_inclusive(self):
+        for x, y in [(-16,-16),(16,16)]:
+            self.assertEqual(len(self._wq([self._obj(x,y)]).natural_objects_in_bbox(-16,-16,16,16)), 1)
+
+    def test_mixed(self):
+        wq = self._wq([self._obj(0,0), self._obj(5,5), self._obj(100,0)])
+        self.assertEqual(len(wq.natural_objects_in_bbox(-16,-16,16,16)), 2)
+
+
+# ===========================================================================
+# TestBBoxQueryInNamespace
+# ===========================================================================
+
+class TestBBoxQueryInNamespace(unittest.TestCase):
+    def _obj(self, x, y):
+        from unittest.mock import MagicMock
+        o = MagicMock()
+        o.position = Position(x=float(x), y=float(y))
+        return o
+
+    def _wq(self, objects):
+        ws = WorldState()
+        ws.natural_objects = objects
+        ws._rebuild_entity_indices()
+        return WorldQuery(ws)
+
+    def test_is_clear_empty(self):
+        self.assertTrue(_eval("bbox(-16,-16,16,16).is_clear", self._wq([])))
+
+    def test_is_clear_false_with_object(self):
+        self.assertFalse(_eval("bbox(-16,-16,16,16).is_clear", self._wq([self._obj(0,0)])))
+
+    def test_natural_count_zero(self):
+        self.assertTrue(_eval("bbox(-16,-16,16,16).natural_count == 0", self._wq([])))
+
+    def test_natural_count_correct(self):
+        wq = self._wq([self._obj(0,0), self._obj(5,5)])
+        self.assertTrue(_eval("bbox(-16,-16,16,16).natural_count == 2", wq))
+
+    def test_outside_not_counted(self):
+        wq = self._wq([self._obj(0,0), self._obj(100,100)])
+        self.assertTrue(_eval("bbox(-16,-16,16,16).natural_count == 1", wq))
+
+    def test_bbox_callable_in_namespace(self):
+        ns = _ns(self._wq([]))
+        self.assertIn("bbox", ns)
+        self.assertTrue(callable(ns["bbox"]))
+
+    def test_different_bbox_sizes(self):
+        wq = self._wq([self._obj(10,10)])
+        self.assertFalse(_eval("bbox(0,0,16,16).is_clear", wq))
+        self.assertTrue(_eval("bbox(0,0,8,8).is_clear", wq))
+
+    def test_natural_objects_len(self):
+        wq = self._wq([self._obj(5,5)])
+        self.assertTrue(_eval("len(bbox(-16,-16,16,16).natural_objects) == 1", wq))
+
+
+
+
+# ===========================================================================
+# TestEntityQueryBbox
+# ===========================================================================
+
+class TestEntityQueryBbox(unittest.TestCase):
+    def _entity(self, eid, x, y, force="player", proto="container"):
+        from unittest.mock import MagicMock
+        from world import EntityStatus
+        e = MagicMock(spec=False)
+        e.entity_id = eid
+        e.name = "iron-chest"
+        e.position = Position(x=float(x), y=float(y))
+        e.force = force
+        e.prototype_type = proto
+        e.status = EntityStatus.WORKING
+        e.recipe = None
+        return e
+
+    def _wq(self, entities):
+        ws = WorldState(entities=entities)
+        ws._rebuild_entity_indices()
+        return WorldQuery(ws)
+
+    def test_with_bbox_includes_inside(self):
+        wq = self._wq([self._entity(1, 0, 0)])
+        self.assertEqual(wq.entities().with_bbox(-16,-16,16,16).count(), 1)
+
+    def test_with_bbox_excludes_outside(self):
+        wq = self._wq([self._entity(1, 100, 100)])
+        self.assertEqual(wq.entities().with_bbox(-16,-16,16,16).count(), 0)
+
+    def test_with_force_filters(self):
+        wq = self._wq([self._entity(1, 0, 0, force="player"),
+                       self._entity(2, 1, 1, force="enemy")])
+        self.assertEqual(wq.entities().with_force("player").count(), 1)
+
+    def test_with_prototype_type(self):
+        wq = self._wq([self._entity(1, 0, 0, proto="transport-belt"),
+                       self._entity(2, 5, 5, proto="container")])
+        self.assertEqual(wq.entities().with_prototype_type("transport-belt").count(), 1)
+
+    def test_nearest_to(self):
+        wq = self._wq([self._entity(1, 1, 1), self._entity(2, 50, 50)])
+        result = wq.entities().nearest_to(Position(0.0, 0.0))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.entity_id, 1)
+
+    def test_nearest_to_empty(self):
+        self.assertIsNone(self._wq([]).entities().nearest_to(Position(0.0, 0.0)))
+
+    def test_chain_bbox_and_force(self):
+        wq = self._wq([self._entity(1, 0, 0, force="player"),
+                       self._entity(2, 50, 50, force="player"),
+                       self._entity(3, 5, 5, force="enemy")])
+        result = wq.entities().with_bbox(-16,-16,16,16).with_force("player").get()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].entity_id, 1)
+
+
+class TestBBoxQueryEntities(unittest.TestCase):
+    def _entity(self, eid, x, y, force="player"):
+        from unittest.mock import MagicMock
+        from world import EntityStatus
+        e = MagicMock(spec=False)
+        e.entity_id = eid
+        e.name = "iron-chest"
+        e.position = Position(x=float(x), y=float(y))
+        e.force = force
+        e.prototype_type = "container"
+        e.status = EntityStatus.WORKING
+        e.recipe = None
+        return e
+
+    def _wq(self, entities=None, naturals=None):
+        from unittest.mock import MagicMock
+        ws = WorldState(entities=entities or [])
+        ws.natural_objects = naturals or []
+        ws._rebuild_entity_indices()
+        return WorldQuery(ws)
+
+    def _nat(self, x, y):
+        from unittest.mock import MagicMock
+        o = MagicMock()
+        o.position = Position(x=float(x), y=float(y))
+        return o
+
+    def test_entity_count_zero(self):
+        self.assertEqual(self._wq().in_bbox(-16,-16,16,16).entity_count, 0)
+
+    def test_entity_count_correct(self):
+        self.assertEqual(self._wq([self._entity(1, 0, 0)]).in_bbox(-16,-16,16,16).entity_count, 1)
+
+    def test_has_player_entities_false(self):
+        self.assertFalse(self._wq().in_bbox(-16,-16,16,16).has_player_entities)
+
+    def test_has_player_entities_true(self):
+        self.assertTrue(self._wq([self._entity(1, 0, 0)]).in_bbox(-16,-16,16,16).has_player_entities)
+
+    def test_is_buildable_empty(self):
+        self.assertTrue(self._wq().in_bbox(-16,-16,16,16).is_buildable)
+
+    def test_is_buildable_false_with_natural(self):
+        self.assertFalse(self._wq(naturals=[self._nat(0, 0)]).in_bbox(-16,-16,16,16).is_buildable)
+
+    def test_is_buildable_false_with_entity(self):
+        self.assertFalse(self._wq([self._entity(1, 0, 0)]).in_bbox(-16,-16,16,16).is_buildable)
+
+    def test_in_bbox_returns_bboxquery(self):
+        from planning.evaluation.condition_namespace import BBoxQuery
+        self.assertIsInstance(self._wq().in_bbox(-16,-16,16,16), BBoxQuery)
+
+    def test_entities_method_chains(self):
+        wq = self._wq([self._entity(1, 0, 0, force="player"),
+                       self._entity(2, 5, 5, force="enemy")])
+        result = wq.in_bbox(-16,-16,16,16).entities().with_force("player").count()
+        self.assertEqual(result, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

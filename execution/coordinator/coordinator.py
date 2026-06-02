@@ -226,6 +226,8 @@ class RuleBasedCoordinator:
         self._active_task: Optional["Task"] = None
         self._active_agent: Optional["AgentProtocol"] = None
         self._pending_patches: list[SelfModelPatch] = []
+        from planning import RewardEvaluator as _RE
+        self._evaluator = _RE()
         # Set when the top-level goal fails internally (frame.failed on the
         # only remaining frame). Prevents subsequent ticks from returning COMPLETE
         # (empty stack) before the loop's stuck-retry mechanism fails the goal.
@@ -1455,22 +1457,15 @@ class RuleBasedCoordinator:
         return TaskOutcome.RUNNING, actions
 
     def _eval(self, condition: str, wq: "WorldQuery", tick: int) -> bool:
-        """Evaluate a condition string against the current WorldQuery."""
+        """
+        Evaluate a condition string against the current WorldQuery.
+
+        Delegates to RewardEvaluator.eval_condition so that task and goal
+        conditions share the same namespace vocabulary.
+        """
         if not condition:
             return False
-        # Fast-path for literal booleans — avoids needing a full namespace.
-        # Used in tests and for simple coordinator-derived conditions.
-        if condition.strip() == "True":
-            return True
-        if condition.strip() == "False":
-            return False
-        try:
-            from planning import build_core_namespace
-            ns = build_core_namespace(wq, tick, 0, None)
-            return bool(eval(condition, {"__builtins__": {}}, ns))  # noqa: S307
-        except Exception as exc:
-            log.debug("Condition eval failed (%r): %s", condition, exc)
-            return False
+        return self._evaluator.eval_condition(condition, wq, tick)
 
 
 # ---------------------------------------------------------------------------

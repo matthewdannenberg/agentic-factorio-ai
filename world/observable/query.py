@@ -150,6 +150,81 @@ class EntityQuery:
         self._working = [e for e in self._working if fn(e)]
         return self
 
+    def with_bbox(
+        self,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> "EntityQuery":
+        """
+        Keep only entities whose footprint overlaps the given bbox.
+
+        Entity footprint: [px - w/2, px + w/2] × [py - h/2, py + h/2],
+        where px,py is the entity centre and w,h are prototype tile dimensions
+        resolved from the KB (falls back to 1×1 if KB unavailable).
+        Two boxes overlap when they share any area; touching edges count.
+
+        Chains naturally with other filters:
+            wq.entities().with_bbox(-16,-16,16,16).with_force("player").count()
+            wq.entities().with_prototype_type("transport-belt").with_bbox(0,0,32,32).get()
+        """
+        result = []
+        for e in self._working:
+            w, h = self._wq._tile_dims(e.name)
+            ex_min = e.position.x - w / 2.0
+            ex_max = e.position.x + w / 2.0
+            ey_min = e.position.y - h / 2.0
+            ey_max = e.position.y + h / 2.0
+            if ex_max >= x_min and ex_min <= x_max and ey_max >= y_min and ey_min <= y_max:
+                result.append(e)
+        self._working = result
+        return self
+
+    def with_force(self, force: str) -> "EntityQuery":
+        """
+        Keep only entities belonging to the given force ("player", "enemy", etc.).
+
+        Placed factory entities are always player-force in vanilla Factorio.
+        Use with_force("enemy") to find biter structures in scan radius.
+        """
+        self._working = [
+            e for e in self._working
+            if getattr(e, "force", "player") == force
+        ]
+        return self
+
+    def with_prototype_type(self, proto_type: str) -> "EntityQuery":
+        """
+        Keep only entities whose Factorio prototype type matches.
+
+        Common types: "assembling-machine", "container", "transport-belt",
+        "inserter", "pipe", "electric-pole", "mining-drill", "furnace".
+
+        Useful for construction checks — "are there any belts in this region?":
+            wq.entities().with_prototype_type("transport-belt").with_bbox(...).count()
+        """
+        self._working = [
+            e for e in self._working
+            if getattr(e, "prototype_type", "") == proto_type
+        ]
+        return self
+
+    def nearest_to(self, position: "Position") -> Optional["EntityState"]:
+        """
+        Return the entity in the working set closest to position, or None.
+
+        Useful for routing tasks: "nearest chest to my current position",
+        "nearest electric pole to the planned building site".
+        """
+        if not self._working:
+            return None
+        return min(
+            self._working,
+            key=lambda e: (e.position.x - position.x) ** 2
+                        + (e.position.y - position.y) ** 2,
+        )
+
     # ------------------------------------------------------------------
     # Terminal operations
     # ------------------------------------------------------------------
@@ -267,9 +342,113 @@ class ChunkMapQuery:
         )
 
 
+
 # ---------------------------------------------------------------------------
-# WorldQuery
+# BBoxQuery — spatial slice of WorldQuery for bbox-based condition expressions
 # ---------------------------------------------------------------------------
+
+class BBoxQuery:
+    """
+    Result of calling bbox(x_min, y_min, x_max, y_max) in a condition string.
+
+    Wraps a WorldQuery slice to the given bounding box, providing properties
+    that make clear_region conditions readable:
+
+        bbox(-16,-16,16,16).is_clear
+        bbox(-16,-16,16,16).natural_count == 0
+        len(bbox(-16,-16,16,16).natural_objects) == 0
+
+    PROXIMAL — only objects currently in the player's scan radius are visible.
+    An empty result may mean the region is clear OR that the player is too
+    far away. Use staleness('natural_objects') to guard if needed.
+    """
+
+    def __init__(
+        self,
+        wq: "WorldQuery",
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> None:
+        self._wq   = wq
+        self._x_min = x_min
+        self._y_min = y_min
+        self._x_max = x_max
+        self._y_max = y_max
+
+    @property
+    def natural_objects(self) -> list:
+        """Natural objects (trees, rocks, cliffs) within the bbox."""
+        return self._wq.natural_objects_in_bbox(
+            self._x_min, self._y_min, self._x_max, self._y_max
+        )
+
+    @property
+    def natural_count(self) -> int:
+        """Number of natural objects within the bbox."""
+        return len(self.natural_objects)
+
+    @property
+    def is_clear(self) -> bool:
+        """True if no natural objects remain within the bbox."""
+        return self.natural_count == 0
+
+    # ------------------------------------------------------------------
+    # Placed entity queries (construction planning)
+    # ------------------------------------------------------------------
+
+    def entities(self) -> "EntityQuery":
+        """
+        EntityQuery builder pre-filtered to entities overlapping this bbox.
+
+        Supports the full chain: .with_name(), .with_force(),
+        .with_prototype_type(), .with_recipe(), .with_status(), etc.
+
+        Use for construction pre-checks:
+            bbox(-16,-16,16,16).entities().count()
+            bbox(0,0,32,32).entities().with_force("player").count()
+            bbox(0,0,32,32).entities().with_prototype_type("transport-belt").get()
+
+        PROXIMAL — only entities in the current scan radius are visible.
+        """
+        return self._wq.entities().with_bbox(
+            self._x_min, self._y_min, self._x_max, self._y_max
+        )
+
+    @property
+    def entity_count(self) -> int:
+        """Number of placed entities (any force) overlapping this bbox."""
+        return self.entities().count()
+
+    @property
+    def has_player_entities(self) -> bool:
+        """True if any player-force entity overlaps this bbox."""
+        return self.entities().with_force("player").count() > 0
+
+    @property
+    def is_buildable(self) -> bool:
+        """
+        True if the bbox contains no natural objects AND no player entities.
+
+        A quick pre-check for whether construction can proceed without
+        clearing or logistics rerouting. Does not check tile types (water,
+        cliffs) — combine with wq.is_buildable(tx, ty) for full validation.
+
+        PROXIMAL — limited to current scan radius.
+        """
+        return self.is_clear and not self.has_player_entities
+
+    def __repr__(self) -> str:
+        return (
+            f"BBoxQuery({self._x_min},{self._y_min},{self._x_max},{self._y_max})"
+            f" natural={self.natural_count} entities={self.entity_count}"
+        )
+
+
+# Names that must never appear in eval() namespaces.
+
+
 
 class WorldQuery:
     """
@@ -488,6 +667,63 @@ class WorldQuery:
         (some cliff variants); treat as position-only.
         """
         return self._state.natural_objects
+
+    def in_bbox(
+        self,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> "BBoxQuery":
+        """
+        Return a BBoxQuery for the given region, from condition_namespace.
+
+        Provides unified spatial queries over both natural objects and placed
+        entities, with full filtering chain support:
+
+            wq.in_bbox(-16,-16,16,16).is_clear
+            wq.in_bbox(-16,-16,16,16).natural_count
+            wq.in_bbox(0,0,32,32).entities().with_force("player").count()
+            wq.in_bbox(0,0,32,32).has_player_entities
+            wq.in_bbox(0,0,32,32).is_buildable
+
+        This is the programmatic equivalent of the bbox() condition-namespace
+        function. Use wq.in_bbox() in Python code; use bbox() in condition
+        strings evaluated by RewardEvaluator.
+
+        PROXIMAL — scan radius limited for both natural objects and entities.
+        """
+        return BBoxQuery(self, float(x_min), float(y_min), float(x_max), float(y_max))
+
+    def natural_objects_in_bbox(
+        self,
+        x_min: float,
+        y_min: float,
+        x_max: float,
+        y_max: float,
+    ) -> list:
+        """
+        Natural objects whose position falls within the given bounding box
+        (inclusive on all edges).
+
+        PROXIMAL — only objects within the current scan radius are visible.
+        An empty result either means the region is clear or the player is
+        too far away to observe it.
+
+        Parameters use the same x_min/y_min/x_max/y_max convention as the
+        bbox() condition-namespace function and condition_parser:
+            x increases east, y increases south (Factorio tile coordinates).
+
+        Returns
+        -------
+        list[NaturalObject]
+        """
+        result = []
+        for obj in self._state.natural_objects:
+            pos = obj.position
+            if x_min <= pos.x <= x_max and y_min <= pos.y <= y_max:
+                result.append(obj)
+        return result
 
     # ------------------------------------------------------------------
     # Crafting queue

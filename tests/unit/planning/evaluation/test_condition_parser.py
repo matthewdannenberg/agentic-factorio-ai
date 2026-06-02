@@ -154,15 +154,45 @@ class TestProductionParams(unittest.TestCase):
         self.assertEqual(p, {})
 
 
+class TestClearRegionParams(unittest.TestCase):
+
+    def test_basic_bbox(self):
+        p = params_from_condition("clear_region", "bbox(-16,-16,16,16)")
+        self.assertEqual(p["bbox"]["x_min"], -16.0)
+        self.assertEqual(p["bbox"]["y_max"],  16.0)
+
+    def test_bbox_with_is_clear_suffix(self):
+        p = params_from_condition("clear_region", "bbox(-16,-16,16,16).is_clear")
+        self.assertEqual(p["bbox"]["x_min"], -16.0)
+        self.assertEqual(p["bbox"]["x_max"],  16.0)
+
+    def test_bbox_with_natural_count_suffix(self):
+        p = params_from_condition("clear_region", "bbox(-8.5,-8.5,8.5,8.5).natural_count == 0")
+        self.assertAlmostEqual(p["bbox"]["x_min"], -8.5)
+        self.assertAlmostEqual(p["bbox"]["x_max"],  8.5)
+
+    def test_bbox_with_spaces(self):
+        p = params_from_condition("clear_region", "bbox(-8.5, -8.5, 8.5, 8.5)")
+        self.assertAlmostEqual(p["bbox"]["y_min"], -8.5)
+
+    def test_bbox_prep_region(self):
+        p = params_from_condition("prep_region", "bbox(0,0,32,32)")
+        self.assertEqual(p["bbox"]["x_min"], 0.0)
+        self.assertEqual(p["bbox"]["x_max"], 32.0)
+
+    def test_no_bbox_returns_empty(self):
+        p = params_from_condition("clear_region", "elapsed_ticks > 10800")
+        self.assertEqual(p, {})
+
+    def test_bbox_not_matched_for_collection(self):
+        p = params_from_condition("collection", "bbox(-16,-16,16,16)")
+        self.assertEqual(p, {})
+
+
 class TestUnknownGoalType(unittest.TestCase):
 
     def test_unknown_type_returns_empty(self):
         p = params_from_condition("totally_unknown_type", "new.inventory('iron-ore') >= 5")
-        self.assertEqual(p, {})
-
-    def test_clear_region_returns_empty(self):
-        # clear_region params (bbox) cannot be extracted from condition strings
-        p = params_from_condition("clear_region", "elapsed_ticks > 10800")
         self.assertEqual(p, {})
 
     def test_noop_returns_empty(self):

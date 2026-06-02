@@ -172,6 +172,28 @@ _PATTERNS: list[tuple[frozenset[str] | str, re.Pattern, Any]] = [
         ),
         _production_rate,
     ),
+
+    # --- clear_region / prep_region ---
+    # bbox(X_MIN, Y_MIN, X_MAX, Y_MAX)
+    # Also matches bbox(...).is_clear and bbox(...).natural_count == 0 —
+    # the suffix is ignored by the parser (handled at eval() by BBoxQuery).
+    (
+        frozenset({"clear_region", "prep_region"}),
+        re.compile(
+            r"bbox[(]\s*(?P<x_min>-?[\d.]+)\s*,"
+            r"\s*(?P<y_min>-?[\d.]+)\s*,"
+            r"\s*(?P<x_max>-?[\d.]+)\s*,"
+            r"\s*(?P<y_max>-?[\d.]+)\s*[)]"
+        ),
+        lambda m: {
+            "bbox": {
+                "x_min": float(m.group("x_min")),
+                "y_min": float(m.group("y_min")),
+                "x_max": float(m.group("x_max")),
+                "y_max": float(m.group("y_max")),
+            }
+        },
+    ),
 ]
 
 
