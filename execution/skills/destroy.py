@@ -86,6 +86,7 @@ class DestroySkill(SkillProtocol):
         self._status: SkillStatus = SkillStatus.IDLE
         self._entity_id: Optional[int] = None
         self._position: Optional["Position"] = None
+        self._target_name: Optional[str] = None   # entity name for entity_id=0 targets
         self._issued_at: int = 0
         self._reissue_count: int = 0
 
@@ -93,26 +94,33 @@ class DestroySkill(SkillProtocol):
     # SkillProtocol
     # ------------------------------------------------------------------
 
-    def start(self, entity_id: int, position: Optional["Position"] = None) -> None:
+    def start(
+        self,
+        entity_id: int,
+        position: Optional["Position"] = None,
+        target_name: Optional[str] = None,
+    ) -> None:
         """
         Initialise for a destruction job.
 
         Parameters
         ----------
-        entity_id : Id of the entity to destroy. In Factorio 2.x, natural
-                    objects like trees have no unit_number and use entity_id=0.
-                    For entity_id=0, position must be supplied.
-        position  : Tile position of the target. Required when entity_id=0
-                    (trees, rocks without unit_number). Used both to detect
-                    "entity gone" and to issue MineEntity(entity_id=0) so
-                    the Lua mod finds the nearest minable entity at that spot.
+        entity_id   : Id of the entity to destroy. In Factorio 2.x, natural
+                      objects like trees have no unit_number and use entity_id=0.
+                      For entity_id=0, position must be supplied.
+        position    : Tile position of the target. Required when entity_id=0.
+        target_name : Entity prototype name (e.g. "tree-08"). Required when
+                      entity_id=0 so that is_target_present() can distinguish
+                      the original tree from a stump or other entity that may
+                      appear at the same position after the tree is felled.
         """
         self._entity_id     = entity_id
         self._position      = position
+        self._target_name   = target_name
         self._issued_at     = 0
         self._reissue_count = 0
         self._status        = SkillStatus.RUNNING
-        log.debug("DestroySkill started: entity_id=%d", entity_id)
+        log.debug("DestroySkill started: entity_id=%d name=%s", entity_id, target_name)
 
     def is_target_present(self, wq: "WorldQuery") -> bool:
         """
@@ -130,8 +138,13 @@ class DestroySkill(SkillProtocol):
             return False
         if self._entity_id == 0 and self._position is not None:
             pos = self._position
+            # Match by name AND position: a stump or different entity at the
+            # same spot must not count as "still present". If target_name is
+            # unknown, fall back to proximity-only (conservative).
             return any(
-                abs(o.position.x - pos.x) < 2 and abs(o.position.y - pos.y) < 2
+                abs(o.position.x - pos.x) < 2
+                and abs(o.position.y - pos.y) < 2
+                and (self._target_name is None or o.name == self._target_name)
                 for o in wq.natural_objects
             )
         return wq.entity_by_id(self._entity_id) is not None
@@ -208,6 +221,7 @@ class DestroySkill(SkillProtocol):
         self._status        = SkillStatus.IDLE
         self._entity_id     = None
         self._position      = None
+        self._target_name   = None
         self._issued_at     = 0
         self._reissue_count = 0
 

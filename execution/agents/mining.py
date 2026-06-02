@@ -90,6 +90,7 @@ class _TaskKind(Enum):
 class _ClearTarget:
     entity_id: int
     position: Position
+    name: str = ""   # entity prototype name; used by DestroySkill for entity_id=0
 
 
 class _GatherPhase(Enum):
@@ -492,7 +493,8 @@ class MiningAgent(AgentProtocol):
             self._nav_skill.reset()
             self._destroy_skill.reset()
             self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position)
+                                      position=self._current_target.position,
+                                      target_name=self._current_target.name)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: targeting entity %d",
@@ -562,7 +564,8 @@ class MiningAgent(AgentProtocol):
             # Skill started at target selection — IDLE here is unexpected.
             # Restart defensively rather than stalling.
             self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position)
+                                      position=self._current_target.position,
+                                      target_name=self._current_target.name)
 
         if d_status == SkillStatus.SUCCEEDED:
             # Entity gone — advance handled at top of _tick_clear next tick.
@@ -632,7 +635,8 @@ class MiningAgent(AgentProtocol):
             self._nav_skill.reset()
             self._destroy_skill.reset()
             self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position)
+                                      position=self._current_target.position,
+                                      target_name=self._current_target.name)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: harvesting entity %d",
@@ -665,7 +669,7 @@ class MiningAgent(AgentProtocol):
             rec = kb.get_entity(obj.name) if kb else None
             if rec is None or rec.is_placeholder or not rec.minable:
                 continue
-            targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position))
+            targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position, name=obj.name))
         player_pos = wq.player_position()
         targets.sort(
             key=lambda t: math.hypot(
