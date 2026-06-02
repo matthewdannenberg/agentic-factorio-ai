@@ -62,7 +62,7 @@ from typing import Optional, TYPE_CHECKING
 
 from execution.agents.base import AgentProtocol
 from execution.blackboard import EntryCategory, EntryScope
-from execution.predicates import is_reachable, can_destroy
+from execution.predicates import can_destroy
 from execution.skills.base import SkillStatus
 from execution.skills.navigate import NavigateSkill
 from execution.skills.mine import MineSkill
@@ -491,6 +491,8 @@ class MiningAgent(AgentProtocol):
             self._current_target = self._clear_targets.pop(0)
             self._nav_skill.reset()
             self._destroy_skill.reset()
+            self._destroy_skill.start(entity_id=self._current_target.entity_id,
+                                      position=self._current_target.position)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: targeting entity %d",
@@ -515,10 +517,11 @@ class MiningAgent(AgentProtocol):
         target = self._current_target
 
         # Already reachable — skip navigation.
-        if is_reachable(target.entity_id, wq):
+        # DestroySkill.is_target_reachable() encapsulates entity_id=0 handling:
+        # returns False for trees (no unit_number), True when in reach otherwise.
+        if self._destroy_skill.is_target_reachable(wq):
             self._nav_skill.reset()
             self._clear_phase = _ClearPhase.DESTROY
-            self._destroy_skill.start(entity_id=target.entity_id)
             return self._clear_destroy(task, blackboard, wq, ww, tick)
 
         nav_status = self._nav_skill.status()
@@ -526,11 +529,11 @@ class MiningAgent(AgentProtocol):
         if nav_status == SkillStatus.IDLE:
             self._nav_skill.start(target_position=target.position)
         elif nav_status == SkillStatus.SUCCEEDED:
-            # Arrived — switch to DESTROY regardless of is_reachable
-            # (entity may be slightly off-centre from its tile position).
+            # Arrived — switch to DESTROY.
+            # For entity_id=0 targets (trees) this is the only trigger
+            # since is_target_reachable() always returns False for them.
             self._nav_skill.reset()
             self._clear_phase = _ClearPhase.DESTROY
-            self._destroy_skill.start(entity_id=target.entity_id)
             return self._clear_destroy(task, blackboard, wq, ww, tick)
         elif nav_status == SkillStatus.STUCK:
             log.warning(
@@ -556,8 +559,10 @@ class MiningAgent(AgentProtocol):
         d_status = self._destroy_skill.status()
 
         if d_status == SkillStatus.IDLE:
-            # Shouldn't normally happen — start defensively.
-            self._destroy_skill.start(entity_id=self._current_target.entity_id)
+            # Skill started at target selection — IDLE here is unexpected.
+            # Restart defensively rather than stalling.
+            self._destroy_skill.start(entity_id=self._current_target.entity_id,
+                                      position=self._current_target.position)
 
         if d_status == SkillStatus.SUCCEEDED:
             # Entity gone — advance handled at top of _tick_clear next tick.
@@ -597,8 +602,13 @@ class MiningAgent(AgentProtocol):
         success_condition fires externally (evaluated by the coordinator).
         """
         # Advance if current target was destroyed or gone from scan.
+        # Natural objects live in wq.natural_objects, NOT wq.state.entities,
+        # so entity_by_id() always returns None for trees. Check the natural
+        # objects list directly by entity_id instead.
         if self._current_target is not None:
-            if wq.entity_by_id(self._current_target.entity_id) is None:
+            # DestroySkill.is_target_present() owns the entity_id=0 vs
+            # entity_id>0 detection — no entity_id logic needed here.
+            if not self._destroy_skill.is_target_present(wq):
                 log.debug(
                     "MiningAgent: harvest target %d gone — advancing",
                     self._current_target.entity_id,
@@ -621,6 +631,8 @@ class MiningAgent(AgentProtocol):
             self._current_target = self._clear_targets.pop(0)
             self._nav_skill.reset()
             self._destroy_skill.reset()
+            self._destroy_skill.start(entity_id=self._current_target.entity_id,
+                                      position=self._current_target.position)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: harvesting entity %d",
@@ -647,7 +659,11 @@ class MiningAgent(AgentProtocol):
         for obj in wq.natural_objects:
             if obj.name not in type_set:
                 continue
-            if not obj.is_minable or not can_destroy(obj, kb):
+            # Use KB minable flag rather than obj.is_minable (which checks
+            # unit_number != 0 and is False for trees in Factorio 2.x).
+            # can_destroy also uses KB, so just check KB directly.
+            rec = kb.get_entity(obj.name) if kb else None
+            if rec is None or rec.is_placeholder or not rec.minable:
                 continue
             targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position))
         player_pos = wq.player_position()

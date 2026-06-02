@@ -329,6 +329,7 @@ def _execute_goals(
         self_model=sm,
         evaluator=evaluator,
         cfg=cfg,
+        kb=kb,
     )
 
     stats = loop.run()

@@ -548,6 +548,13 @@ class RuleBasedCoordinator:
             # find the nearest matching natural object and mine it in a loop.
             if self._kb:
                 harvestable = self._kb.entities_that_produce(item)
+                log.info(
+                    "Collection Path B: item=%r, natural_objects in scan=%r, "
+                    "entities_that_produce=%r",
+                    item,
+                    [o.name for o in wq.natural_objects][:10],
+                    [e.name for e in harvestable][:5],
+                )
                 if harvestable:
                     entity_types = [e.name for e in harvestable]
                     gather_target = wq.inventory_count(item) + count
@@ -1415,9 +1422,17 @@ class RuleBasedCoordinator:
             return TaskOutcome.SUCCEEDED, []
 
         # Evaluate success condition.
-        if task.success_condition and self._eval(task.success_condition, wq, tick):
-            log.info("Task complete: %s", task.description)
-            return TaskOutcome.SUCCEEDED, []
+        if task.success_condition:
+            result = self._eval(task.success_condition, wq, tick)
+            log.debug(
+                "Task condition check: %r => %s (wood=%s)",
+                task.success_condition,
+                result,
+                wq.inventory_count("wood") if hasattr(wq, "inventory_count") else "?",
+            )
+            if result:
+                log.info("Task complete: %s", task.description)
+                return TaskOutcome.SUCCEEDED, []
 
         # Evaluate failure condition.
         if task.failure_condition and self._eval(task.failure_condition, wq, tick):

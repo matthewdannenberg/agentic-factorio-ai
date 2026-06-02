@@ -378,8 +378,21 @@ local function tick_mining(event)
             position = mining_target.position, radius = 1.0,
         })
         local target = nil
-        for _, e in ipairs(candidates) do
-            if e.unit_number == mining_target.entity_id then target = e; break end
+        if mining_target.entity_id == 0 then
+            -- Trees in Factorio 2.x have no unit_number. Match by proximity
+            -- and minability rather than unit_number.
+            for _, e in ipairs(candidates) do
+                if e.valid and e.minable and e.type ~= "resource"
+                        and e.type ~= "character" then
+                    target = e; break
+                end
+            end
+        else
+            for _, e in ipairs(candidates) do
+                if e.unit_number == mining_target.entity_id then
+                    target = e; break
+                end
+            end
         end
 
         if not target or not target.valid then
@@ -388,8 +401,8 @@ local function tick_mining(event)
         end
 
         -- Entity exists — re-apply mining_state this tick.
-        player.update_selected_entity(mining_target.position)
-        player.mining_state = {mining=true, position=mining_target.position}
+        player.update_selected_entity(target.position)
+        player.mining_state = {mining=true, position=target.position}
     end
 end
 
@@ -1694,12 +1707,38 @@ function fa.mine_entity(entity_id)
     local reach   = (player.character and player.character.reach_distance) or 6
 
     local target = nil
-    local candidates = surface.find_entities_filtered({
-        position = player.position,
-        radius   = reach + 2,
-    })
-    for _, e in ipairs(candidates) do
-        if e.unit_number == entity_id then target = e; break end
+
+    if entity_id == 0 then
+        -- entity_id=0 means the entity has no unit_number (e.g. trees in
+        -- Factorio 2.x). Find the nearest minable entity within reach that
+        -- is not a resource patch — the agent will be standing next to it
+        -- after navigation, so radius=3 is sufficient.
+        local candidates = surface.find_entities_filtered({
+            position = player.position,
+            radius   = reach + 2,
+        })
+        local best_dist = math.huge
+        for _, e in ipairs(candidates) do
+            if e.valid and e.minable and e.type ~= "resource"
+                    and e.type ~= "character" then
+                local d = math.sqrt(
+                    (player.position.x - e.position.x)^2 +
+                    (player.position.y - e.position.y)^2
+                )
+                if d < best_dist then
+                    best_dist = d
+                    target = e
+                end
+            end
+        end
+    else
+        local candidates = surface.find_entities_filtered({
+            position = player.position,
+            radius   = reach + 2,
+        })
+        for _, e in ipairs(candidates) do
+            if e.unit_number == entity_id then target = e; break end
+        end
     end
     if not target or not target.valid then return err_response("entity_not_found") end
 

@@ -94,3 +94,4 @@ def test_collect_new_iron_then_new_copper(run_goals):
         f"Expected 2 goals completed, got {stats.goals_completed} "
         f"(failed={stats.goals_failed})"
     )
+    assert wq.inventory_count("iron-ore") >= 10

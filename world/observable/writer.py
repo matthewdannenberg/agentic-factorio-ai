@@ -131,6 +131,10 @@ class WorldWriter:
             live.entities = snapshot.entities
             live.observed_at["entities"] = snapshot.observed_at["entities"]
 
+        if _is_fresh("natural_objects"):
+            live.natural_objects = snapshot.natural_objects
+            live.observed_at["natural_objects"] = snapshot.observed_at["natural_objects"]
+
         if _is_fresh("resource_map"):
             live.resource_map = snapshot.resource_map
             live.observed_at["resource_map"] = snapshot.observed_at["resource_map"]

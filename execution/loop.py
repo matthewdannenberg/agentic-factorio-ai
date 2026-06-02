@@ -45,13 +45,14 @@ from typing import Optional, TYPE_CHECKING
 import config
 from execution.coordinator.coordinator import CoordinatorStatus
 from planning import Goal, GoalStatus
-from planning import RewardEvaluator, params_from_condition
+from planning import RewardEvaluator
 from world.observable.state import WorldState
 from world import WorldQuery
 from world import WorldWriter
 
 if TYPE_CHECKING:
     from memory.behavioral import BehavioralMemoryProtocol
+    from world.knowledge.base import KnowledgeBase
     from execution.coordinator.coordinator import RuleBasedCoordinator
     from world import SelfModel
     from bridge import ActionExecutor
@@ -135,6 +136,7 @@ class FactorioLoop:
         self_model: "SelfModel",
         evaluator: Optional[RewardEvaluator] = None,
         cfg: Optional[LoopConfig] = None,
+        kb: Optional["KnowledgeBase"] = None,
     ) -> None:
         self._client       = client
         self._parser       = parser
@@ -146,6 +148,7 @@ class FactorioLoop:
         self._sm           = self_model
         self._evaluator    = evaluator or RewardEvaluator()
         self._cfg          = cfg or LoopConfig()
+        self._kb           = kb
 
         # Live world state — single shared instance mutated by WorldWriter.
         self._state  = WorldState()
@@ -302,9 +305,17 @@ class FactorioLoop:
 
         # 7. Handle coordinator status.
         if coord_status == CoordinatorStatus.COMPLETE:
-            # The coordinator finished the goal internally (e.g. clear_region
-            # with empty success_condition). Treat as goal complete.
-            self._on_goal_complete(goal, 0.0, tick)
+            # The coordinator finished the goal internally. Only treat this as
+            # goal completion when the goal has no evaluator success_condition —
+            # if there is one, the RewardEvaluator is the authoritative signal
+            # and coordinator COMPLETE is a normal internal state transition
+            # (e.g. collection pushing tasks, acquire routing sub-goals) that
+            # must not prematurely close the goal.
+            goal_has_evaluator = bool(
+                getattr(goal, "success_condition", "") or ""
+            )
+            if not goal_has_evaluator:
+                self._on_goal_complete(goal, 0.0, tick)
         elif coord_status == CoordinatorStatus.STUCK:
             self._on_stuck(goal, None, tick)
 
@@ -336,11 +347,27 @@ class FactorioLoop:
     def _poll_world(self) -> None:
         """Poll Factorio for a world state snapshot and integrate it."""
         raw = self._poller.poll()
-        if raw:
-            snapshot = self._parser.parse(raw, self._state.tick)
-            # integrate_snapshot accumulates newly_charted_chunks into
-            # ExplorationState.charted_chunk_coords automatically.
-            self._ww.integrate_snapshot(snapshot)
+        if not raw:
+            return
+        snapshot = self._parser.parse(raw, self._state.tick)
+        # integrate_snapshot accumulates newly_charted_chunks into
+        # ExplorationState.charted_chunk_coords automatically.
+        self._ww.integrate_snapshot(snapshot)
+        # Warm the KB from everything visible in this scan so that
+        # entities_that_produce() is populated before collection goals fire.
+        # This is what lets harvest_natural goals find tree entity types.
+        # Runs every poll so new types are learned as the agent explores.
+        if self._kb is not None:
+            for obj in self._wq.natural_objects:
+                try:
+                    self._kb.ensure_entity(obj.name)
+                except Exception:
+                    pass
+            for entity in self._wq.state.entities:
+                try:
+                    self._kb.ensure_entity(entity.name)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Goal lifecycle
@@ -376,7 +403,7 @@ class FactorioLoop:
         # attribute (Phase 11 LLM layer), getattr picks it up automatically.
         goal_type = getattr(goal, "type", getattr(goal, "goal_type", "noop"))
         goal_params = (getattr(goal, "params", None) or
-                       params_from_condition(
+                       self._extract_coordinator_params(
                            goal_type,
                            getattr(goal, "success_condition", "") or "",
                        ))
@@ -464,6 +491,18 @@ class FactorioLoop:
         except Exception:
             log.exception("FactorioLoop: failed to record outcome to behavioral memory")
 
+    def _extract_coordinator_params(
+        self, goal_type: str, success_condition: str
+    ) -> dict:
+        """
+        Derive coordinator handler params from goal_type and success_condition.
+
+        Delegates to planning.evaluation.condition_parser.params_from_condition,
+        which is the single authoritative source for this extraction logic.
+        See that module for the full pattern table and extension guide.
+        """
+        from planning.evaluation.condition_parser import params_from_condition
+        return params_from_condition(goal_type, success_condition)
     def _build_context(self) -> dict:
         """
         Build a lightweight world-state summary for the GoalSource.

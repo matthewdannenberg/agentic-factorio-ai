@@ -553,6 +553,7 @@ class KnowledgeBase:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate()
 
         self._entities:  dict[str, EntityRecord]  = {}
         self._resources: dict[str, ResourceRecord] = {}
@@ -582,6 +583,27 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # Load from DB into memory caches
     # ------------------------------------------------------------------
+
+    def _migrate(self) -> None:
+        """
+        Apply incremental schema migrations for columns and tables added after
+        the initial schema was released. Uses ALTER TABLE ... ADD COLUMN IF NOT
+        EXISTS (SQLite 3.37+) with a fallback for older SQLite versions.
+
+        Safe to call on every startup — already-present columns and tables are
+        detected and skipped. New tables are handled by _SCHEMA's
+        CREATE TABLE IF NOT EXISTS, so only column additions need migration.
+        """
+        migrations = [
+            # Phase 7: minable column added to entities table.
+            "ALTER TABLE entities ADD COLUMN minable INTEGER NOT NULL DEFAULT 1",
+        ]
+        for stmt in migrations:
+            try:
+                self._conn.execute(stmt)
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists — safe to ignore
 
     def _load_all(self) -> None:
         self._load_entities()

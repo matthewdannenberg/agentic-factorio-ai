@@ -110,24 +110,18 @@ def can_destroy(obj: "NaturalObject", kb: "KnowledgeBase") -> bool:
     fa.get_entity_prototype. This works correctly for any total-conversion
     mod — nothing is hardcoded about entity names.
 
-    How mineable_properties.minable maps to destroyability (from live testing):
-      minable=True  — MineEntity works: trees, rocks, machines, chests all
-                      have minable=True. Trees have a mining_trigger but it
-                      fires cosmetic particle effects only — MineEntity still
-                      completes normally.
-      minable=False — MineEntity does NOT work: cliffs in vanilla have
-                      minable=False and require cliff explosives via a
-                      UseItemOnEntity action (Phase 7, not yet implemented).
+    Note: obj.is_minable checks entity_id != 0, but in Factorio 2.x trees
+    have no unit_number (entity_id=0) yet are still minable. The KB record
+    is the authoritative source — obj.is_minable is intentionally not used
+    here so that trees are correctly recognised as destroyable.
 
     Returns False when:
-    - entity_id=0: NaturalObject.is_minable is False (some cliff variants).
     - KB returns None or a placeholder: unknown entity — conservative,
       assume not destroyable until prototype is learned.
-    - record.minable=False: entity requires special handling (Phase 7).
+    - record.minable=False: entity requires special handling (Phase 7),
+      e.g. cliffs require cliff explosives via UseItemOnEntity.
     """
-    if not obj.is_minable:
-        return False
-    record = kb.get_entity(obj.name)
+    record = kb.ensure_entity(obj.name)
     if record is None or record.is_placeholder:
         return False   # unknown — conservative
     return record.minable

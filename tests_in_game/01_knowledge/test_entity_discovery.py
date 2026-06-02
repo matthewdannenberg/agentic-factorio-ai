@@ -370,3 +370,232 @@ class TestCrossDomainQueries:
         assert chain == set(), (
             f"Expected empty set for unknown item; got {chain!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Harvest pipeline tests — mining_products and entities_that_produce
+# ---------------------------------------------------------------------------
+
+class TestMiningProducts:
+    """
+    Verifies that entity prototypes include the mining_products field
+    introduced for the harvest_natural pipeline (Phase 7).
+
+    mining_products populates kb.entities_that_produce(item), used by the
+    coordinator to find harvestable sources for items like wood that are not
+    resource patches. If any of these tests fail, harvest_natural goals STUCK.
+    """
+
+    def test_tree_entity_has_mining_products(self, run_goal, knowledge_base):
+        """
+        After ensure_entity on a tree, mining_products must contain 'wood'.
+        This is the single most important prerequisite for harvest_natural goals.
+        """
+        run_goal(_WARM_KB_GOAL)
+        tree_names = [
+            "tree-01", "tree-02", "tree-04", "tree-06",
+            "tree-01-red", "tree-02-red",
+        ]
+        learned = None
+        for name in tree_names:
+            record = knowledge_base.ensure_entity(name)
+            if not record.is_placeholder:
+                learned = record
+                break
+        if learned is None:
+            pytest.skip(
+                "No common tree entity names found in KB after ensure_entity. "
+                "Map may use modded tree names."
+            )
+        assert learned.mining_products, (
+            f"{learned.name}.mining_products is empty after ensure_entity. "
+            "Check that control.lua fa.get_entity_prototype() returns "
+            "mining_products from mineable_properties.products."
+        )
+        assert "wood" in learned.mining_products, (
+            f"{learned.name}.mining_products = {learned.mining_products!r}; "
+            "expected 'wood' to be present."
+        )
+        assert learned.mining_products["wood"] > 0, (
+            f"{learned.name}.mining_products['wood'] must be positive."
+        )
+
+    def test_tree_minable_is_true(self, run_goal, knowledge_base):
+        """
+        Trees must have minable=True — this is the filter gate in
+        entities_that_produce. Non-minable entities are excluded by the SQL.
+        """
+        run_goal(_WARM_KB_GOAL)
+        tree_names = ["tree-01", "tree-02", "tree-04", "tree-06"]
+        for name in tree_names:
+            record = knowledge_base.ensure_entity(name)
+            if record.is_placeholder:
+                continue
+            assert record.minable is True, (
+                f"{name}.minable = {record.minable}; "
+                "trees must be minable=True for entities_that_produce to find them."
+            )
+            return
+        pytest.skip("No tree entities learned — map may use modded names")
+
+    def test_entities_that_produce_wood_non_empty(self, run_goal, knowledge_base):
+        """
+        After the KB warm-up (which runs ensure_entity for all natural objects
+        in scan radius), entities_that_produce('wood') must return at least one
+        entity. This is the direct prerequisite for harvest_natural goals.
+        If this fails, the coordinator will always STUCK on wood collection.
+        """
+        run_goal(_WARM_KB_GOAL)
+        results = knowledge_base.entities_that_produce("wood")
+        assert len(results) > 0, (
+            "entities_that_produce('wood') returned [] after KB warm-up. "
+            "Possible causes: no trees in scan radius during warm-up; "
+            "control.lua not returning mining_products; "
+            "entity_mining_products table missing (check _migrate()); "
+            "or loop not passing kb= to FactorioLoop (check conftest.py)."
+        )
+        for rec in results:
+            assert rec.minable is True, (
+                f"entities_that_produce('wood') returned {rec.name} "
+                f"with minable={rec.minable}; all results must be minable."
+            )
+            assert "wood" in rec.mining_products, (
+                f"entities_that_produce('wood') returned {rec.name} but "
+                f"mining_products has no 'wood' key: {rec.mining_products!r}"
+            )
+
+    def test_entities_that_produce_returns_list(self, run_goal, knowledge_base):
+        """
+        entities_that_produce must always return a list, never raise.
+        Covers the case where the entity_mining_products table is missing
+        (the query has a try/except that should return [] not raise).
+        """
+        run_goal(_WARM_KB_GOAL)
+        result = knowledge_base.entities_that_produce("iron-ore")
+        assert isinstance(result, list), (
+            "entities_that_produce must return a list, not raise"
+        )
+        result2 = knowledge_base.entities_that_produce("not-a-real-item-xyz")
+        assert isinstance(result2, list)
+        assert result2 == []
+
+    def test_non_harvestable_entity_no_wood_in_products(
+        self, run_goal, knowledge_base
+    ):
+        """
+        Entities that don't drop wood (e.g. steam-engine) must not appear
+        in entities_that_produce('wood'). Verifies the DB join is correct.
+        """
+        run_goal(_WARM_KB_GOAL)
+        record = knowledge_base.ensure_entity("steam-engine")
+        if record.is_placeholder:
+            pytest.skip("steam-engine not learned")
+        assert "wood" not in record.mining_products, (
+            f"steam-engine.mining_products contains 'wood': "
+            f"{record.mining_products!r}"
+        )
+
+    def test_mining_products_populated_by_loop_kb_warmup(
+        self, run_goals, knowledge_base
+    ):
+        """
+        The loop's _poll_world KB warm-up (added to FactorioLoop when kb= is
+        passed) calls ensure_entity for every natural_object in scan radius.
+        After a warm-up goal run, entities_that_produce('wood') must be
+        non-empty — this confirms the full pipeline from loop to KB to query.
+        """
+        run_goals([_WARM_KB_GOAL])
+        results = knowledge_base.entities_that_produce("wood")
+        assert len(results) > 0, (
+            "KB warm-up ran but entities_that_produce('wood') is still empty. "
+            "Check that FactorioLoop receives kb= in conftest _execute_goals, "
+            "that _poll_world calls kb.ensure_entity for natural_objects, "
+            "and that ensure_entity persists mining_products to the DB."
+        )
+    def test_entities_that_produce_wood_full_record_details(
+        self, run_goals, knowledge_base
+    ):
+        """
+        Forensic test: dumps the full KB contents for wood harvesting so we can
+        see exactly what was learned. Always passes — purely diagnostic.
+        """
+        import sys
+        run_goals([_WARM_KB_GOAL])
+
+        results = knowledge_base.entities_that_produce("wood")
+        sys.stderr.write(
+            "\n=== entities_that_produce('wood') => {} results ===\n".format(
+                len(results))
+        )
+        for rec in results:
+            sys.stderr.write(
+                "  name={!r} minable={} proto_type={!r} "
+                "is_placeholder={} mining_products={!r}\n".format(
+                    rec.name, rec.minable, rec.proto_type,
+                    rec.is_placeholder, rec.mining_products)
+            )
+
+        try:
+            rows = knowledge_base._conn.execute(
+                "SELECT entity_name, item_name, amount "
+                "FROM entity_mining_products "
+                "ORDER BY entity_name, item_name"
+            ).fetchall()
+            sys.stderr.write(
+                "\n=== entity_mining_products table ({} rows) ===\n".format(
+                    len(rows))
+            )
+            for row in rows[:30]:
+                sys.stderr.write(
+                    "  {!r} -> {!r} x{}\n".format(row[0], row[1], row[2])
+                )
+        except Exception as exc:
+            sys.stderr.write(
+                "\n=== entity_mining_products ERROR: {} ===\n".format(exc)
+            )
+
+        try:
+            minable_rows = knowledge_base._conn.execute(
+                "SELECT name, proto_type, minable, is_placeholder "
+                "FROM entities WHERE minable=1 AND is_placeholder=0 "
+                "ORDER BY proto_type, name LIMIT 30"
+            ).fetchall()
+            sys.stderr.write(
+                "\n=== minable non-placeholder entities ({} shown) ===\n".format(
+                    len(minable_rows))
+            )
+            for row in minable_rows:
+                sys.stderr.write(
+                    "  {!r} type={!r}\n".format(row[0], row[1])
+                )
+        except Exception as exc:
+            sys.stderr.write(
+                "\n=== entities query ERROR: {} ===\n".format(exc)
+            )
+
+        tree_like = {
+            name: rec
+            for name, rec in knowledge_base._entities.items()
+            if not rec.is_placeholder
+            and rec.proto_type in ("tree", "simple-entity")
+        }
+        sys.stderr.write(
+            "\n=== in-memory tree/simple-entity records ({}) ===\n".format(
+                len(tree_like))
+        )
+        for name, rec in list(tree_like.items())[:20]:
+            sys.stderr.write(
+                "  {!r}: minable={} mining_products={!r}\n".format(
+                    name, rec.minable, rec.mining_products)
+            )
+
+        try:
+            sys.stderr.write(
+                "\n=== KB summary: {} ===\n".format(knowledge_base.summary())
+            )
+        except Exception as exc:
+            sys.stderr.write(
+                "\n=== summary error: {} ===\n".format(exc)
+            )
+
+        assert True

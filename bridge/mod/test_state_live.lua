@@ -673,4 +673,98 @@ TS.suite("tile_map", {
     end,
 })
 
+    -- ============================================================
+-- Suite: natural_objects_diagnostic
+-- Shows exactly what entities exist near the player so we can
+-- understand why _natural_objects_table returns empty for trees.
+-- ============================================================
+
+TS.suite("natural_objects_diagnostic", {
+
+    show_all_entities_near_player = function(t)
+        -- Dump every entity within radius 32, showing name, type, force.
+        -- This tells us definitively what's there and how to filter for it.
+        local player = get_player()
+        t.ok(player and player.valid, "need valid player")
+        local found = player.surface.find_entities_filtered({
+            position = player.position,
+            radius   = 32,
+        })
+        local count = 0
+        local type_counts = {}
+        local force_counts = {}
+        for _, entity in ipairs(found) do
+            count = count + 1
+            local t_name = entity.type or "nil"
+            local f_name = entity.force and entity.force.name or "nil"
+            type_counts[t_name] = (type_counts[t_name] or 0) + 1
+            force_counts[f_name] = (force_counts[f_name] or 0) + 1
+            if count <= 10 then
+                game.print("  entity: name=" .. tostring(entity.name)
+                    .. " type=" .. tostring(entity.type)
+                    .. " force=" .. tostring(f_name)
+                    .. " unit_number=" .. tostring(entity.unit_number))
+            end
+        end
+        game.print("Total entities in radius 32: " .. count)
+        for k, v in pairs(type_counts) do
+            game.print("  type=" .. k .. " count=" .. v)
+        end
+        for k, v in pairs(force_counts) do
+            game.print("  force=" .. k .. " count=" .. v)
+        end
+        t.ok(true, "diagnostic complete — check rcon output above")
+    end,
+
+    natural_objects_table_direct = function(t)
+        -- Call _natural_objects_table directly and show what it returns.
+        local player = get_player()
+        t.ok(player and player.valid, "need valid player")
+        local result = fa._natural_objects_table(player, 32)
+        game.print("_natural_objects_table returned " .. #result .. " entries")
+        for i, obj in ipairs(result) do
+            if i <= 10 then
+                game.print("  " .. i .. ": name=" .. tostring(obj.name)
+                    .. " type=" .. tostring(obj.prototype_type)
+                    .. " force=" .. tostring(obj.force))
+            end
+        end
+        -- Also show what find_entities_filtered with force="neutral" returns
+        local neutral_found = player.surface.find_entities_filtered({
+            position = player.position,
+            radius   = 32,
+            force    = "neutral",
+        })
+        game.print("find_entities_filtered force=neutral: " .. #neutral_found .. " entries")
+        -- And without force filter
+        local all_found = player.surface.find_entities_filtered({
+            position = player.position,
+            radius   = 32,
+        })
+        game.print("find_entities_filtered no filter: " .. #all_found .. " entries")
+        t.ok(true, "diagnostic complete")
+    end,
+
+    check_tree_force_assignment = function(t)
+        -- Find any tree within radius 64 and show its force.
+        -- This confirms whether trees are neutral force or something else.
+        local player = get_player()
+        t.ok(player and player.valid, "need valid player")
+        local found = player.surface.find_entities_filtered({
+            position = player.position,
+            radius   = 64,
+            type     = "tree",
+        })
+        game.print("Trees within radius 64: " .. #found)
+        for i, tree in ipairs(found) do
+            if i <= 5 then
+                game.print("  tree: name=" .. tostring(tree.name)
+                    .. " force=" .. tostring(tree.force and tree.force.name or "nil")
+                    .. " unit_number=" .. tostring(tree.unit_number))
+            end
+        end
+        t.ok(true, "diagnostic complete")
+    end,
+})
+
 return TS

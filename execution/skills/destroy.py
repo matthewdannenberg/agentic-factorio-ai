@@ -44,10 +44,12 @@ import logging
 from typing import Optional, TYPE_CHECKING
 
 from execution.skills.base import SkillProtocol, SkillStatus
+from execution.predicates import is_reachable
 from bridge import Action, MineEntity
 
 if TYPE_CHECKING:
     from world import WorldQuery, WorldWriter
+    from world import Position
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ class DestroySkill(SkillProtocol):
     def __init__(self) -> None:
         self._status: SkillStatus = SkillStatus.IDLE
         self._entity_id: Optional[int] = None
+        self._position: Optional["Position"] = None
         self._issued_at: int = 0
         self._reissue_count: int = 0
 
@@ -90,21 +93,67 @@ class DestroySkill(SkillProtocol):
     # SkillProtocol
     # ------------------------------------------------------------------
 
-    def start(self, entity_id: int) -> None:
+    def start(self, entity_id: int, position: Optional["Position"] = None) -> None:
         """
         Initialise for a destruction job.
 
         Parameters
         ----------
-        entity_id : Id of the entity to destroy. Must be present in wq on
-                    the first tick, or the skill immediately reports SUCCEEDED
-                    (already destroyed — treat as done, advance the loop).
+        entity_id : Id of the entity to destroy. In Factorio 2.x, natural
+                    objects like trees have no unit_number and use entity_id=0.
+                    For entity_id=0, position must be supplied.
+        position  : Tile position of the target. Required when entity_id=0
+                    (trees, rocks without unit_number). Used both to detect
+                    "entity gone" and to issue MineEntity(entity_id=0) so
+                    the Lua mod finds the nearest minable entity at that spot.
         """
         self._entity_id     = entity_id
+        self._position      = position
         self._issued_at     = 0
         self._reissue_count = 0
         self._status        = SkillStatus.RUNNING
         log.debug("DestroySkill started: entity_id=%d", entity_id)
+
+    def is_target_present(self, wq: "WorldQuery") -> bool:
+        """
+        True if the target entity is still present in the world scan.
+
+        For entity_id=0 (natural objects without unit_number, e.g. trees in
+        Factorio 2.x): checks wq.natural_objects by proximity to _position.
+        For normal entities: checks wq.entity_by_id.
+
+        Used by the agent's navigation phase to decide when to stop navigating
+        and switch to destruction, and by the harvest loop to detect target
+        removal between DestroySkill cycles.
+        """
+        if self._entity_id is None:
+            return False
+        if self._entity_id == 0 and self._position is not None:
+            pos = self._position
+            return any(
+                abs(o.position.x - pos.x) < 2 and abs(o.position.y - pos.y) < 2
+                for o in wq.natural_objects
+            )
+        return wq.entity_by_id(self._entity_id) is not None
+
+    def is_target_reachable(self, wq: "WorldQuery") -> bool:
+        """
+        True if the target is close enough to mine without further navigation.
+
+        For entity_id=0 (trees): always returns False — there is no unit_number
+        to look up in player.reachable, so the agent must navigate to the target
+        position and rely on nav SUCCEEDED as the trigger to start destroying.
+
+        For normal entities: delegates to is_reachable(), which checks the
+        Factorio engine's actual reach list populated by the bridge.
+
+        Used by _clear_navigate so it doesn't need to know about entity_id=0.
+        """
+        if self._entity_id is None:
+            return False
+        if self._entity_id == 0:
+            return False   # no unit_number — navigate to position, not entity
+        return is_reachable(self._entity_id, wq)
 
     def tick(
         self,
@@ -115,10 +164,9 @@ class DestroySkill(SkillProtocol):
         if self._status != SkillStatus.RUNNING:
             return []
 
-        entity_present = wq.entity_by_id(self._entity_id) is not None
+        entity_present = self.is_target_present(wq)
 
-        # Entity already gone — succeeded (either we destroyed it or it was
-        # already absent when we started).
+        # Entity already gone — succeeded.
         if not entity_present:
             log.debug(
                 "DestroySkill: entity %d gone — SUCCEEDED", self._entity_id
@@ -159,6 +207,7 @@ class DestroySkill(SkillProtocol):
     def reset(self) -> None:
         self._status        = SkillStatus.IDLE
         self._entity_id     = None
+        self._position      = None
         self._issued_at     = 0
         self._reissue_count = 0
 
