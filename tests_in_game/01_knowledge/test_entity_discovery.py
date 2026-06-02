@@ -1,11 +1,11 @@
 """
-tests_in_game/01_world/test_entity_discovery.py
+tests_in_game/01_knowledge/test_entity_discovery.py
 
 Verifies that the KnowledgeBase correctly learns entity, resource, and item
 prototypes from Factorio, and that cross-domain queries work correctly once
 the data is populated.
 
-Runs in 01_world/ (after 01_knowledge recipe/tech tests) so the KB
+Runs in 01_knowledge/ (after 01_knowledge recipe/tech tests) so the KB
 connection is already warm. Each test calls ensure_*() directly — no
 in-game actions are required beyond the warm-up goal that establishes the
 RCON link.
