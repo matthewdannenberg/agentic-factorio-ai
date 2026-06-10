@@ -353,6 +353,10 @@ class FactorioLoop:
         # integrate_snapshot accumulates newly_charted_chunks into
         # ExplorationState.charted_chunk_coords automatically.
         self._ww.integrate_snapshot(snapshot)
+        if len(self._wq.natural_objects) > 0:
+            log.debug("_poll_world: natural_objects=%d", len(self._wq.natural_objects))
+        else:
+            log.warning("_poll_world: natural_objects=0 (scan radius may be too small or area cleared)")
         # Warm the KB from everything visible in this scan so that
         # entities_that_produce() is populated before collection goals fire.
         # This is what lets harvest_natural goals find tree entity types.

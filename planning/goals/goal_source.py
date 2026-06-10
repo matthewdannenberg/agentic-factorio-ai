@@ -26,12 +26,12 @@ directly. The loop will not change — only the injected implementation differs.
 Stuck handling
 --------------
 GoalQueue.handle_stuck() logs the StuckContext and returns [] (no seed
-subtasks). This means the coordinator stays stuck until the subtask's
+tasks). This means the coordinator stays stuck until the task's
 failure_condition fires and the goal is marked failed. The loop then requests
 the next goal from the queue and continues.
 
 A real LLM implementation would inspect the StuckContext, decompose the
-failure, and return seed subtasks for the coordinator to resume with.
+failure, and return seed tasks for the coordinator to resume with.
 """
 
 from __future__ import annotations
@@ -43,9 +43,8 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from planning.goals.goal import Goal, GoalStatus, Priority, make_goal
-
 if TYPE_CHECKING:
-    from planning.tasks.task import Task as Subtask  # renamed from Subtask
+    from planning.tasks.task import Task
     from execution.protocol import StuckContext  # execution/ layer, Phase 4
 
 log = logging.getLogger(__name__)
@@ -158,11 +157,11 @@ class GoalSource:
         """
         raise NotImplementedError
 
-    def handle_stuck(self, stuck_context: "StuckContext") -> list["Subtask"]:
+    def handle_stuck(self, stuck_context: "StuckContext") -> list["Task"]:
         """
         Called when the execution network reports STUCK.
 
-        Returns a list of seed Subtasks for the coordinator to resume with,
+        Returns a list of seed Tasks for the coordinator to resume with,
         or [] to let the goal fail naturally (timeout → mark failed → next
         goal). GoalQueue always returns [].
 
@@ -256,13 +255,13 @@ class GoalQueue(GoalSource):
         )
         return goal
 
-    def handle_stuck(self, stuck_context: "StuckContext") -> list["Subtask"]:
+    def handle_stuck(self, stuck_context: "StuckContext") -> list["Task"]:
         """
-        Log the stuck context and return no seed subtasks.
+        Log the stuck context and return no seed tasks.
 
         The goal will eventually fail via its failure_condition and the loop
         will request the next goal. A real LLM would decompose the failure
-        and return seed subtasks here.
+        and return seed tasks here.
         """
         log.warning(
             "GoalQueue.handle_stuck: goal %s stuck at %s — no decomposition "

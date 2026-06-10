@@ -7,9 +7,9 @@ Architecture
 ------------
 The coordinator maintains two stacks:
 
-  _goal_stack   : list[GoalFrame]
+  _stack        : list[PlanningItem]
       A stack of pending goals in descending priority (top = active).
-      Each GoalFrame carries the Goal object, a step counter, and any
+      Each Goal carries a step counter and context dict for handler state.
       derived context (patch position, bbox, etc.) needed across ticks.
       When the top goal completes, it is popped and the parent resumes.
 
@@ -22,7 +22,7 @@ Tick loop
 ---------
 Each tick:
   1. If a Task is active, evaluate its success/failure and tick the agent.
-  2. If no Task is active, look at the top GoalFrame and call its handler.
+  2. If top is a Goal, run its handler (may push Tasks or sub-Goals).
   3. The handler either pushes a new Task (ledger), pushes a sub-goal
      (goal_stack), or determines the current goal is complete/failed.
 
@@ -60,7 +60,7 @@ the coordinator has genuinely run out of options.
 Rules
 -----
 - No LLM calls. No RCON. Pure coordination logic.
-- Goal handlers must not call each other directly — push to _goal_stack.
+- Goal handlers must not call each other directly — use _push_goal().
 - Tasks are the only thing sent to agents. Goals are coordinator-internal.
 - EntryScope.TASK (not GOAL) for task-scoped blackboard entries.
 """
@@ -78,7 +78,8 @@ from execution.skills.base import SkillStatus
 from world import Position
 from world.model.patch import SelfModelPatch
 
-from planning import Task
+from planning import Task, Goal
+from planning.planning_item import PlanningItem, ItemStatus
 
 if TYPE_CHECKING:
     from execution.agents.base import AgentProtocol
@@ -103,61 +104,28 @@ GOAL_BYPRODUCT    = "byproduct"
 GOAL_RESEARCH     = "research"
 GOAL_NOOP         = "noop"
 
+# Goal types that bypass the handler machinery and push a Task directly.
+# Keyed by goal_type string; value is (agent_hint, task_type).
+# Lives here because this is execution-layer routing knowledge.
+TASK_GOAL_TYPES: dict[str, tuple[str, str]] = {
+    "navigate": ("navigation", "navigate_to"),
+}
+
 # ---------------------------------------------------------------------------
 # Task timeout constants
 # ---------------------------------------------------------------------------
 
 _TASK_TIMEOUT_TICKS     = 18_000   # 5 min — general tasks
-_NAV_TASK_TIMEOUT_TICKS =  1_800   # 30 s  — navigation only
 
 
 # ---------------------------------------------------------------------------
-# GoalFrame — one entry on the goal stack
-# ---------------------------------------------------------------------------
-
-@dataclass
-class GoalFrame:
-    """
-    A goal and all coordinator-derived context needed to resume it.
-
-    Pushed onto _goal_stack. The top frame is the currently active goal.
-    When a sub-goal is pushed, the parent frame is suspended until the
-    sub-goal's frame is popped.
-
-    Fields
-    ------
-    goal_type   : Goal type string (GOAL_* constant).
-    params      : Arbitrary dict of goal parameters (item name, count, bbox,
-                  rate, etc.). Populated at push time; read by the handler.
-    step        : Which step of the handler's decision tree we are on.
-                  Incremented each time the handler advances.
-    completed   : True when the goal has been achieved. The coordinator pops
-                  the frame on the next tick.
-    failed      : True when the goal cannot be achieved. The coordinator
-                  escalates on the next tick.
-    context     : Mutable dict for handler-specific state that must persist
-                  across ticks (e.g. which resource patch was chosen, which
-                  part of a region has been cleared).
-    """
-    goal_type: str
-    params: dict = field(default_factory=dict)
-    step: int = 0
-    completed: bool = False
-    failed: bool = False
-    context: dict = field(default_factory=dict)
-    evaluator_condition: str = ""   # goal success_condition; non-empty means
-                                    # the RewardEvaluator owns completion —
-                                    # coordinator must not set frame.completed
-
-
-# ---------------------------------------------------------------------------
-# TaskResult — what a task handler returns
+# TaskOutcome — what _tick_task returns each cycle
 # ---------------------------------------------------------------------------
 
 class TaskOutcome(Enum):
     RUNNING   = auto()   # task is active, continue ticking
-    SUCCEEDED = auto()   # task complete — advance goal step
-    FAILED    = auto()   # task failed — escalate or skip
+    SUCCEEDED = auto()   # task complete — pop task, continue goal
+    FAILED    = auto()   # task failed — propagate failure
     STUCK     = auto()   # agent reported stuck — escalate goal
 
 
@@ -222,15 +190,14 @@ class RuleBasedCoordinator:
         self._kb        = kb
         self._bb        = blackboard or Blackboard()
 
-        self._goal_stack: list[GoalFrame] = []
-        self._active_task: Optional["Task"] = None
+        # Unified planning stack: list[PlanningItem], top = _stack[-1].
+        # May contain Goals (handled by coordinator) and Tasks (routed to agents).
+        # Replaces the previous _goal_stack + _active_task split.
+        self._stack: list[PlanningItem] = []
         self._active_agent: Optional["AgentProtocol"] = None
         self._pending_patches: list[SelfModelPatch] = []
-        from planning import RewardEvaluator as _RE
+        from planning.evaluation.reward_evaluator import RewardEvaluator as _RE
         self._evaluator = _RE()
-        # Set when the top-level goal fails internally (frame.failed on the
-        # only remaining frame). Prevents subsequent ticks from returning COMPLETE
-        # (empty stack) before the loop's stuck-retry mechanism fails the goal.
         self._top_level_failed: bool = False
 
     # ------------------------------------------------------------------
@@ -251,7 +218,8 @@ class RuleBasedCoordinator:
         teardown_actions: list = []
         if self._active_agent is not None:
             teardown_actions = self._active_agent.teardown() or []
-        self._active_task = None
+        if self._stack and isinstance(self._stack[-1], Task):
+            self._stack.pop()
         self._active_agent = None
         self._bb.clear_scope(EntryScope.TASK)
         return teardown_actions
@@ -266,7 +234,7 @@ class RuleBasedCoordinator:
         """
         Begin a new top-level goal.
 
-        Clears all internal state and pushes a single GoalFrame for the
+        Clears all internal state and pushes a single Goal for the
         given goal type. The first tick will call the appropriate handler.
 
         Parameters
@@ -277,18 +245,21 @@ class RuleBasedCoordinator:
             so would bypass the evaluator and could fire on stale absolute
             inventory counts rather than the delta the condition requires.
         """
-        self._goal_stack.clear()
-        self._active_task = None
+        self._stack.clear()
         self._active_agent = None
         self._pending_patches.clear()
         self._top_level_failed = False
         self._bb.clear_all()
 
-        self._goal_stack.append(GoalFrame(
-            goal_type=goal_type,
-            params=params,
-            evaluator_condition=success_condition,
-        ))
+        g = Goal(
+            description=success_condition or goal_type,
+            success_condition=success_condition or "",
+            failure_condition="",
+            status=ItemStatus.ACTIVE,
+        )
+        g.goal_type = goal_type
+        g.params    = params or {}
+        self._stack.append(g)
         log.info(
             "Coordinator reset: goal_type=%s params=%s", goal_type, params
         )
@@ -302,20 +273,31 @@ class RuleBasedCoordinator:
         """
         One coordination cycle. Returns (status, actions).
 
-        If a task is active, ticks the owning agent and evaluates
-        task success/failure. Otherwise, runs the top goal handler.
+        The unified stack (_stack: list[PlanningItem]) holds both Goals and
+        Tasks. The top is always the current unit of work:
+          - Task on top: tick its agent, evaluate success/failure.
+          - Goal on top: run its handler, which may push Tasks or sub-Goals.
+
+        Stack discipline:
+          - _push_task() / _push_goal() push onto _stack.
+          - When a Task resolves, pop it; the Goal that spawned it resumes
+            (its step is incremented).
+          - When a Goal's handler calls _complete_frame(), mark it COMPLETE;
+            it is popped on the next iteration and its parent's step advances.
+          - Failures propagate upward: a failed Task/Goal marks its parent
+            failed, which propagates until the root Goal fails → STUCK.
         """
-        if not self._goal_stack:
+        if not self._stack:
             if self._top_level_failed:
                 return CoordinatorStatus.STUCK, []
             return CoordinatorStatus.COMPLETE, []
 
-        # --- Tick active task ---
+        # --- If top is a Task, tick it ---
         teardown_actions: list = []
-        if self._active_task is not None:
+        top = self._stack[-1]
+        if isinstance(top, Task):
             outcome, actions = self._tick_task(wq, ww, tick)
 
-            # Drain patches from the agent.
             if self._active_agent is not None:
                 self._pending_patches.extend(
                     self._active_agent.pending_patches()
@@ -324,74 +306,73 @@ class RuleBasedCoordinator:
             if outcome == TaskOutcome.RUNNING:
                 return CoordinatorStatus.PROGRESSING, actions
 
-            # Task resolved — give the agent a chance to issue cleanup actions
-            # (e.g. StopMining, StopMovement), then clear the active task slot.
+            # Task resolved — teardown, pop it.
             if self._active_agent is not None:
                 teardown_actions = self._active_agent.teardown() or []
-            self._active_task = None
             self._active_agent = None
             self._bb.clear_scope(EntryScope.TASK)
+            self._stack.pop()   # remove the Task
 
-            # Return teardown actions immediately if the task just resolved,
-            # so they are dispatched this tick before the goal handler runs.
             if teardown_actions:
                 actions = teardown_actions
 
-            if outcome == TaskOutcome.SUCCEEDED:
-                top = self._goal_stack[-1]
-                top.step += 1
-                log.debug(
-                    "Task succeeded — goal %s advancing to step %d",
-                    top.goal_type, top.step,
-                )
-            elif outcome in (TaskOutcome.FAILED, TaskOutcome.STUCK):
-                top = self._goal_stack[-1]
-                top.failed = True
-                log.warning(
-                    "Task %s on goal %s — marking goal failed",
-                    outcome.name, top.goal_type,
-                )
+            if not self._stack:
+                return CoordinatorStatus.COMPLETE, actions
 
-        # --- Check for completed / failed goals and propagate upward ---
-        while self._goal_stack:
-            top = self._goal_stack[-1]
-            if top.completed:
-                self._goal_stack.pop()
-                if self._goal_stack:
-                    # Parent resumes — advance its step.
-                    self._goal_stack[-1].step += 1
+            parent = self._stack[-1]
+            if outcome == TaskOutcome.SUCCEEDED:
+                if isinstance(parent, Goal):
+                    parent.step += 1
                     log.debug(
-                        "Sub-goal %s completed — parent %s advancing to step %d",
-                        top.goal_type,
-                        self._goal_stack[-1].goal_type,
-                        self._goal_stack[-1].step,
+                        "Task succeeded — goal %s advancing to step %d",
+                        parent.goal_type, parent.step,
+                    )
+            elif outcome in (TaskOutcome.FAILED, TaskOutcome.STUCK):
+                if isinstance(parent, Goal):
+                    parent.status = ItemStatus.FAILED
+                    log.warning(
+                        "Task %s — marking parent goal %s failed",
+                        outcome.name, parent.goal_type,
+                    )
+
+        # --- Propagate completed / failed Goals upward ---
+        while self._stack:
+            top = self._stack[-1]
+            if not isinstance(top, Goal):
+                break   # Task on top — handled above
+            if top.status == ItemStatus.COMPLETE:
+                self._stack.pop()
+                if self._stack and isinstance(self._stack[-1], Goal):
+                    self._stack[-1].step += 1
+                    log.debug(
+                        "Sub-goal %s completed — parent advancing to step %d",
+                        top.goal_type, self._stack[-1].step,
                     )
                 continue
-            if top.failed:
-                self._goal_stack.pop()
-                if self._goal_stack:
-                    # Parent sub-goal failed — mark parent failed too.
-                    self._goal_stack[-1].failed = True
+            if top.status == ItemStatus.FAILED:
+                self._stack.pop()
+                if self._stack and isinstance(self._stack[-1], Goal):
+                    self._stack[-1].status = ItemStatus.FAILED
                     log.warning(
                         "Sub-goal %s failed — propagating to parent %s",
-                        top.goal_type,
-                        self._goal_stack[-1].goal_type,
+                        top.goal_type, self._stack[-1].goal_type,
                     )
                 else:
-                    # Top-level goal failed — set flag so subsequent ticks
-                    # continue returning STUCK until the loop resets us.
                     self._top_level_failed = True
                     return CoordinatorStatus.STUCK, []
                 continue
             break
 
-        if not self._goal_stack:
+        if not self._stack:
             if self._top_level_failed:
                 return CoordinatorStatus.STUCK, []
             return CoordinatorStatus.COMPLETE, []
 
-        # --- Run top goal handler ---
-        return self._dispatch_goal(self._goal_stack[-1], wq, tick)
+        # --- Run top Goal handler ---
+        top = self._stack[-1]
+        if isinstance(top, Goal):
+            return self._dispatch_goal(top, wq, tick)
+        return CoordinatorStatus.WAITING, []
 
     def drain_patches(self) -> list[SelfModelPatch]:
         """Return and clear accumulated self-model patches."""
@@ -405,7 +386,7 @@ class RuleBasedCoordinator:
 
     def _dispatch_goal(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -425,6 +406,8 @@ class RuleBasedCoordinator:
         }.get(frame.goal_type)
 
         if handler is None:
+            if frame.goal_type in TASK_GOAL_TYPES:
+                return self._dispatch_as_task(frame, wq, tick)
             log.warning(
                 "No handler for goal type %r — returning STUCK", frame.goal_type
             )
@@ -443,7 +426,7 @@ class RuleBasedCoordinator:
     # Frame completion helper
     # ------------------------------------------------------------------
 
-    def _complete_frame(self, frame: "GoalFrame") -> None:
+    def _complete_frame(self, frame: "Goal") -> None:
         """
         Mark a goal frame as internally complete.
 
@@ -455,20 +438,50 @@ class RuleBasedCoordinator:
         genuine work was done.
 
         For sub-goals (pushed via _push_goal) and for goals without an
-        evaluator condition, this sets frame.completed = True normally.
+        evaluator condition, this sets _complete_frame(frame) normally.
         """
-        if frame.evaluator_condition:
-            # The evaluator owns top-level completion. Setting completed here
-            # would cause the coordinator to return COMPLETE prematurely on
-            # sub-goal pop. Log and proceed — the loop will ignore COMPLETE.
-            pass
-        frame.completed = True
+        frame.status = ItemStatus.COMPLETE
 
     # ── Collection ──────────────────────────────────────────────────────
 
+    def _handle_navigate(
+        self,
+        frame: "Goal",
+        wq: "WorldQuery",
+        ww: "WorldWriter",
+        tick: int,
+    ) -> None:
+        """
+        Navigate to a target position (x, y).
+
+        Params: {"x": float, "y": float}
+        Success: NavigationAgent reaches within 1.5 tiles of the target.
+
+        Used for scan-coverage passes before region-clearing goals: by
+        visiting each corner of a bbox, the agent ensures the full region
+        has been observed before bbox().is_clear is evaluated.
+        """
+        x = frame.params.get("x")
+        y = frame.params.get("y")
+        if x is None or y is None:
+            log.warning("Navigate goal missing 'x' or 'y' param — STUCK")
+            self._top_level_failed = True
+            return
+
+        from world import Position
+        target = Position(float(x), float(y))
+
+        if frame.step == 0:
+
+            frame.step = 1
+
+        elif frame.step == 1:
+            # Task resolved — goal complete.
+            self._complete_frame(frame)
+
     def _handle_collection(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -495,12 +508,12 @@ class RuleBasedCoordinator:
 
         if not item:
             log.warning("Collection goal missing 'item' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         if not count:
             log.warning("Collection goal missing or zero 'count' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         # "Already satisfied" early exit: only fire when there is no evaluator
@@ -510,7 +523,7 @@ class RuleBasedCoordinator:
         # this check and proceeding to push a gather task is correct; the task's
         # own absolute success_condition will fire immediately if the inventory
         # is genuinely sufficient after accounting for prior stock.
-        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
+        if wq.inventory_count(item) >= count and not frame.success_condition:
             log.info("Collection goal already satisfied: %dx %s", count, item)
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
@@ -583,7 +596,7 @@ class RuleBasedCoordinator:
                 "(explore to find resource or natural object first)",
                 item,
             )
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         # Step ≥ 1: check absolute count. When there is an evaluator condition
@@ -601,7 +614,7 @@ class RuleBasedCoordinator:
 
     def _handle_acquire(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -624,10 +637,10 @@ class RuleBasedCoordinator:
 
         if not item:
             log.warning("Acquire goal missing 'item' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
-        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
+        if wq.inventory_count(item) >= count and not frame.success_condition:
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
@@ -649,7 +662,7 @@ class RuleBasedCoordinator:
                     "implemented (Phase 8) — STUCK",
                     item,
                 )
-                frame.failed = True
+                frame.status = ItemStatus.FAILED
                 return CoordinatorStatus.STUCK, []
 
             # No resource patch and no recipe — STUCK.
@@ -694,7 +707,7 @@ class RuleBasedCoordinator:
                 "harvest_natural gap comment in _handle_acquire.)",
                 item,
             )
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         # Step ≥ 1: sub-goal (collection or production) completed.
@@ -708,7 +721,7 @@ class RuleBasedCoordinator:
 
     def _handle_crafting(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -733,10 +746,10 @@ class RuleBasedCoordinator:
 
         if not item:
             log.warning("Crafting goal missing 'item' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
-        if wq.inventory_count(item) >= count and not frame.evaluator_condition:
+        if wq.inventory_count(item) >= count and not frame.success_condition:
             self._complete_frame(frame)
             return CoordinatorStatus.PROGRESSING, []
 
@@ -785,7 +798,7 @@ class RuleBasedCoordinator:
 
     def _handle_explore(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -853,7 +866,7 @@ class RuleBasedCoordinator:
 
     def _handle_clear_region(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -876,7 +889,7 @@ class RuleBasedCoordinator:
 
         if bbox is None:
             log.warning("Clear region goal missing 'bbox' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
@@ -925,7 +938,7 @@ class RuleBasedCoordinator:
                     "in _handle_clear_region for the full fix path.)",
                     len(blocked),
                 )
-                frame.failed = True
+                frame.status = ItemStatus.FAILED
                 return CoordinatorStatus.STUCK, []
             frame.step = 1
 
@@ -953,7 +966,7 @@ class RuleBasedCoordinator:
 
     def _handle_prep_region(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -985,7 +998,7 @@ class RuleBasedCoordinator:
 
         if bbox is None:
             log.warning("Prep region goal missing 'bbox' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
@@ -994,7 +1007,7 @@ class RuleBasedCoordinator:
                     "Prep region: bbox intersects major factory infrastructure "
                     "— refusing to clear. Choose a different region."
                 )
-                frame.failed = True
+                frame.status = ItemStatus.FAILED
                 return CoordinatorStatus.STUCK, []
             frame.step = 1
 
@@ -1005,7 +1018,7 @@ class RuleBasedCoordinator:
                     "(cliffs without explosives). "
                     "Waiting for cliff-explosives tech or choose a new region."
                 )
-                frame.failed = True
+                frame.status = ItemStatus.FAILED
                 return CoordinatorStatus.STUCK, []
             frame.step = 2
 
@@ -1041,7 +1054,7 @@ class RuleBasedCoordinator:
 
     def _handle_construction(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1102,7 +1115,7 @@ class RuleBasedCoordinator:
 
     def _handle_production(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1146,14 +1159,14 @@ class RuleBasedCoordinator:
             "Returning STUCK.",
             item, rate_per_min,
         )
-        frame.failed = True
+        frame.status = ItemStatus.FAILED
         return CoordinatorStatus.STUCK, []
 
     # ── Logistics ─────────────────────────────────────────────────────────
 
     def _handle_logistics(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1178,14 +1191,14 @@ class RuleBasedCoordinator:
             "(Phase 9 — requires spatial-logistics agent). "
             "Returning STUCK."
         )
-        frame.failed = True
+        frame.status = ItemStatus.FAILED
         return CoordinatorStatus.STUCK, []
 
     # ── Byproduct ─────────────────────────────────────────────────────────
 
     def _handle_byproduct(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1214,14 +1227,14 @@ class RuleBasedCoordinator:
             "(Phase 8). Returning STUCK.",
             item,
         )
-        frame.failed = True
+        frame.status = ItemStatus.FAILED
         return CoordinatorStatus.STUCK, []
 
     # ── Research ──────────────────────────────────────────────────────────
 
     def _handle_research(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1260,7 +1273,7 @@ class RuleBasedCoordinator:
 
         if not tech:
             log.warning("Research goal missing 'tech' param — STUCK")
-            frame.failed = True
+            frame.status = ItemStatus.FAILED
             return CoordinatorStatus.STUCK, []
 
         if frame.step == 0:
@@ -1324,7 +1337,7 @@ class RuleBasedCoordinator:
 
     def _handle_noop(
         self,
-        frame: GoalFrame,
+        frame: "Goal",
         wq: "WorldQuery",
         tick: int,
     ) -> tuple[CoordinatorStatus, list]:
@@ -1341,6 +1354,36 @@ class RuleBasedCoordinator:
     # Task management
     # ------------------------------------------------------------------
 
+    def _dispatch_as_task(
+        self,
+        frame: "Goal",
+        wq: "WorldQuery",
+        tick: int,
+    ) -> tuple[CoordinatorStatus, list]:
+        """
+        Handle a goal_type that maps directly to a Task rather than a handler.
+
+        For goal types like "navigate" that express a concrete agent action.
+        The Goal frame acts as a thin wrapper — its step advances when the
+        Task resolves.
+        """
+        agent_hint, task_type = TASK_GOAL_TYPES[frame.goal_type]
+
+        if frame.step == 0:
+            self._push_task(
+                task_type         = task_type,
+                description       = frame.description,
+                agent_hint        = agent_hint,
+                tick              = tick,
+                success_condition = frame.success_condition,
+                params            = dict(frame.params),
+            )
+            frame.step = 1
+            return CoordinatorStatus.PROGRESSING, []
+
+        self._complete_frame(frame)
+        return CoordinatorStatus.PROGRESSING, []
+
     def _push_task(
         self,
         task_type: str,
@@ -1348,28 +1391,42 @@ class RuleBasedCoordinator:
         agent_hint: str,
         tick: int,
         success_condition: str = "",
-        **params,
+        failure_condition: str = "",
+        params: dict = None,
+        **extra,
     ) -> None:
         """
-        Create a task and set it as the active task.
+        Create a Task and push it onto the unified stack.
 
-        Uses Task from the project's task module. task_type is stored
-        as a dynamic attribute (Task has no task_type field natively).
-        All extra keyword arguments are also set as dynamic attributes so
-        agents can read them directly.
+        The Task sits on top of the Goal that created it. When the Task
+        resolves (succeeds or fails), tick() pops it and the Goal's step
+        advances.
+
+        task_type and all params are stored on Task.task_type / Task.params
+        so agents can read them via task.task_type and task.params[key].
+        Extra keyword arguments are merged into params for backward compat
+        with call sites that pass fields as kwargs.
         """
+        merged_params = dict(params or {})
+        merged_params.update(extra)
         task = Task(
             description       = description,
             success_condition = success_condition,
-            failure_condition = f"elapsed_ticks > {_TASK_TIMEOUT_TICKS}",
-            parent_goal_id    = "coordinator",
+            failure_condition = failure_condition or f"elapsed_ticks > {_TASK_TIMEOUT_TICKS}",
+            parent_id         = self._stack[-1].id if self._stack else None,
             created_at        = tick,
             derived_locally   = True,
+            agent_hint        = agent_hint,
+            task_type         = task_type,
+            params            = merged_params,
+            status            = ItemStatus.ACTIVE,
         )
-        task.task_type  = task_type
-        task.agent_hint = agent_hint
-        for k, v in params.items():
-            setattr(task, k, v)
+        # Backward compat: agents read task attributes directly (task.item,
+        # task.target_position, etc.). Mirror params dict onto task attributes
+        # so existing agent code continues to work without modification.
+        for k, v in merged_params.items():
+            if not hasattr(task, k):
+                setattr(task, k, v)
 
         # Select and activate the owning agent.
         agent = self._registry.agent_by_id(agent_hint)
@@ -1380,9 +1437,9 @@ class RuleBasedCoordinator:
             )
             return
 
-        self._active_task  = task
         self._active_agent = agent
-        agent.activate(task, self._bb, None, self._kb)  # wq not available here
+        agent.activate(task, self._bb, None, self._kb)
+        self._stack.append(task)
 
         self._bb.write(
             category   = EntryCategory.INTENTION,
@@ -1403,7 +1460,10 @@ class RuleBasedCoordinator:
 
     def _push_goal(self, goal_type: str, params: dict) -> None:
         """Push a sub-goal onto the goal stack."""
-        self._goal_stack.append(GoalFrame(goal_type=goal_type, params=params))
+        g = Goal(description=goal_type, success_condition="", failure_condition="", status=ItemStatus.ACTIVE)
+        g.goal_type = goal_type
+        g.params    = params
+        self._stack.append(g)
         log.debug("Sub-goal pushed: %s %s", goal_type, params)
 
     # ------------------------------------------------------------------
@@ -1416,8 +1476,8 @@ class RuleBasedCoordinator:
         ww: "WorldWriter",
         tick: int,
     ) -> tuple[TaskOutcome, list]:
-        """Tick the active task's agent and evaluate completion."""
-        task  = self._active_task
+        """Tick the top Task's agent and evaluate completion."""
+        task  = self._stack[-1] if self._stack and isinstance(self._stack[-1], Task) else None
         agent = self._active_agent
 
         if task is None or agent is None:

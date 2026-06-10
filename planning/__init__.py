@@ -20,6 +20,7 @@ Public surface
 All imports from planning/ go through this file.
 """
 
+from planning.planning_item import PlanningItem, ItemStatus
 # --- Goals ------------------------------------------------------------------
 from planning.goals.goal import Goal, GoalStatus, Priority, RewardSpec, make_goal
 from planning.goals.goal_tree import GoalTree
@@ -40,6 +41,7 @@ from planning.evaluation.condition_parser import params_from_condition
 from planning.evaluation.resource_allocator import ResourceAllocator
 
 __all__ = [
+    "PlanningItem","ItemStatus",
     # Goals
     "Goal", "GoalStatus", "Priority", "RewardSpec", "make_goal",
     "GoalTree",
