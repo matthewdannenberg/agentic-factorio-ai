@@ -644,7 +644,14 @@ class TestStateParserFullParse(unittest.TestCase):
 
 
 class TestStateParserTileMap(unittest.TestCase):
-    """Tests for tile_map section parsing in StateParser."""
+    """Tests for tile_map section parsing in StateParser.
+
+    StateParser._parse_tile_map produces a raw dict[(tx,ty), str] in the
+    snapshot WorldState. This is the bridge-internal format. WorldWriter
+    converts it to (tick, tile_type) tuples when integrating into the live
+    state. Tests here check the snapshot (raw string format); tests for the
+    live state format are in TestWorldWriterTileCoverage in test_state.py.
+    """
 
     def setUp(self):
         self.parser = StateParser()
@@ -710,20 +717,28 @@ class TestStateParserTileMap(unittest.TestCase):
         state = self.parser.parse(json.dumps({"tick": 100}), current_tick=100)
         self.assertEqual(state.tile_map, {})
 
-    def test_tile_map_accumulates_across_partial_parses(self):
-        """Successive parses union-merge tile_map entries."""
+    def test_tile_map_accumulates_across_snapshots_via_writer(self):
+        """After integrate_snapshot, live tile_map entries use (tick, type) tuples."""
+        from world.observable.state import WorldState
         from world.observable.writer import WorldWriter
-        state = self.parser.parse(
+        live = WorldState(tick=0)
+        ww = WorldWriter(live)
+        # scan_radius=0: writer falls back to tile_map section merge path.
+        snap1 = self.parser.parse(
             json.dumps({"tick": 100, "tile_map": [{"x": 0, "y": 0, "tile": "water"}]}),
             current_tick=100,
         )
-        snap = self.parser.parse(
+        snap2 = self.parser.parse(
             json.dumps({"tick": 101, "tile_map": [{"x": 1, "y": 0, "tile": "deepwater"}]}),
             current_tick=101,
         )
-        WorldWriter(state).integrate_snapshot(snap)
-        self.assertIn((0, 0), state.tile_map)
-        self.assertIn((1, 0), state.tile_map)
+        ww.integrate_snapshot(snap1)
+        ww.integrate_snapshot(snap2)
+        # Both keys present; values are (tick, type) tuples.
+        self.assertIn((0, 0), live.tile_map)
+        self.assertIn((1, 0), live.tile_map)
+        self.assertEqual(live.tile_map[(0, 0)], (100, "water"))
+        self.assertEqual(live.tile_map[(1, 0)], (101, "deepwater"))
 
     def test_tile_map_negative_coords_parsed(self):
         state = self._parse([{"x": -10, "y": -7, "tile": "water-green"}])

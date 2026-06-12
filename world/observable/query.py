@@ -830,45 +830,68 @@ class WorldQuery:
     # Tile map
     # ------------------------------------------------------------------
 
+    def _tile_entry(self, tile_x: int, tile_y: int) -> Optional[tuple[int, str]]:
+        """
+        Return the tile_map entry for (tile_x, tile_y), or None if absent.
+
+        Handles both the live-state format (int, str) tuples and the
+        snapshot/parser format where values may still be raw strings (before
+        WorldWriter converts them). Returns None for absent tiles.
+        """
+        raw = self._state.tile_map.get((tile_x, tile_y))
+        if raw is None:
+            return None
+        if isinstance(raw, tuple):
+            return raw
+        # Legacy/snapshot format: raw string → treat as (0, type_str).
+        return (0, str(raw))
+
     def tile_at(self, tile_x: int, tile_y: int) -> str:
         """
-        Return the tile type at (tile_x, tile_y), or "unknown" if not observed.
+        Return the tile type at (tile_x, tile_y).
 
-        Only non-default tiles (water, landfill, out-of-map) are stored;
-        "unknown" means the tile was never in a scan radius, while a specific
-        name means it was observed and was non-default. Default tiles
-        (grass, dirt, sand, etc.) are not stored — assume buildable/walkable
-        when tile_at returns "unknown".
+        Returns:
+          "unknown"  — tile has never been in scan range.
+          "default"  — tile was observed; default walkable type (grass, dirt, etc.).
+          "water" etc. — tile was observed; non-default type.
 
         NON-PROXIMAL: tile_map accumulates across all scans this session.
         """
-        return self._state.tile_map.get((tile_x, tile_y), "unknown")
+        entry = self._tile_entry(tile_x, tile_y)
+        if entry is None:
+            return "unknown"
+        return entry[1] if entry[1] else "default"
 
     def is_water(self, tile_x: int, tile_y: int) -> bool:
         """
         True if (tile_x, tile_y) is a water tile.
 
-        Returns False for "unknown" (unobserved tiles are assumed walkable).
+        Returns False for unobserved tiles (assumed walkable).
         Water tile names contain the substring "water" in Factorio 2.x:
         e.g. "water", "deepwater", "water-green", "water-shallow".
 
         NON-PROXIMAL.
         """
-        name = self._state.tile_map.get((tile_x, tile_y), "")
-        return "water" in name
+        entry = self._tile_entry(tile_x, tile_y)
+        if entry is None:
+            return False
+        return "water" in entry[1]
 
     def is_buildable(self, tile_x: int, tile_y: int) -> bool:
         """
         True if (tile_x, tile_y) appears buildable based on observed tile data.
 
         A tile is considered non-buildable if it is water or out-of-map.
-        Unobserved tiles ("unknown") are assumed buildable — the agent should
-        explore before placing structures in unknown territory.
+        Unobserved tiles are assumed buildable — the agent should explore
+        before placing structures in unknown territory.
 
         NON-PROXIMAL. Conservative: may return True for unobserved water.
         """
-        name = self._state.tile_map.get((tile_x, tile_y), "")
-        return "water" not in name and name != "out-of-map"
+        entry = self._tile_entry(tile_x, tile_y)
+        if entry is None:
+            return True
+        tile_type = entry[1]
+        return "water" not in tile_type and tile_type != "out-of-map"
 
     def water_tiles_in_radius(self, centre_x: float, centre_y: float, radius: float) -> list[tuple[int, int]]:
         """
@@ -885,10 +908,55 @@ class WorldQuery:
         for tx in range(cx - r, cx + r + 1):
             for ty in range(cy - r, cy + r + 1):
                 if (tx - centre_x) ** 2 + (ty - centre_y) ** 2 <= radius ** 2:
-                    name = self._state.tile_map.get((tx, ty), "")
-                    if "water" in name:
+                    entry = self._tile_entry(tx, ty)
+                    if entry is not None and "water" in entry[1]:
                         result.append((tx, ty))
         return result
+
+    def tile_observed_at(self, tile_x: int, tile_y: int) -> Optional[int]:
+        """
+        Tick when (tile_x, tile_y) was last within scan range, or None if never.
+
+        This is the primary staleness signal for spatial queries. An entity
+        at a position whose tile_observed_at equals the current tick was
+        confirmed present or absent this very poll.
+
+        Returns None when tile_map entries are in the raw snapshot format
+        (tick component is 0, indistinguishable from "never observed").
+        Use only on the live WorldState after integrate_snapshot().
+
+        NON-PROXIMAL — reads from the accumulated tile_map.
+        """
+        entry = self._tile_entry(tile_x, tile_y)
+        return entry[0] if entry is not None else None
+
+    def entity_last_observed(self, entity: EntityState) -> Optional[int]:
+        """
+        Tick when the tile(s) under this entity were last in scan range.
+
+        Returns the minimum last_observed_at across all tiles in the entity's
+        footprint — the most conservative answer: the entity's location is
+        only fully confirmed when every tile under it has been recently scanned.
+
+        Returns None if any tile under the entity has never been observed.
+
+        For 1×1 entities (the common case) this is simply tile_observed_at
+        at the entity's position. For larger entities, the KB tile dimensions
+        are used if available; otherwise 1×1 is assumed.
+
+        NON-PROXIMAL — derived from the accumulated tile_map.
+        """
+        w, h = self._tile_dims(entity.name)
+        cx, cy = int(entity.position.x), int(entity.position.y)
+        min_observed: Optional[int] = None
+        for dx in range(-(w // 2), (w // 2) + 1):
+            for dy in range(-(h // 2), (h // 2) + 1):
+                obs = self.tile_observed_at(cx + dx, cy + dy)
+                if obs is None:
+                    return None
+                if min_observed is None or obs < min_observed:
+                    min_observed = obs
+        return min_observed
 
     # ------------------------------------------------------------------
     # Research

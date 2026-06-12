@@ -978,45 +978,65 @@ class TestWorldWriterIntegrateSnapshot(unittest.TestCase):
 # ===========================================================================
 
 def _snap_placed(factorio_id: int, name: str, x: float, y: float,
-                 tick: int = 100) -> WorldState:
-    """Snapshot with one placed entity."""
+                 tick: int = 100, player_pos: Position = None) -> WorldState:
+    """Snapshot with one placed entity, optionally with a player section."""
     e = EntityState(entity_id=factorio_id, name=name, position=Position(x, y),
                     is_natural=False)
-    return WorldState(tick=tick, entities=[e], observed_at={"entities": tick})
+    snap = WorldState(tick=tick, entities=[e], observed_at={"entities": tick})
+    if player_pos is not None:
+        snap.player = PlayerState(position=player_pos, reach_distance=0.0)
+        snap.observed_at["player"] = tick
+    return snap
 
 
-def _snap_natural(name: str, x: float, y: float, tick: int = 100) -> WorldState:
+def _snap_natural(name: str, x: float, y: float, tick: int = 100,
+                  player_pos: Position = None) -> WorldState:
     """Snapshot with one natural object (entity_id=0 placeholder)."""
     e = EntityState(entity_id=0, name=name, position=Position(x, y),
                     is_natural=True, force="neutral")
-    return WorldState(tick=tick, natural_objects=[e],
+    snap = WorldState(tick=tick, natural_objects=[e],
                       observed_at={"natural_objects": tick})
+    if player_pos is not None:
+        snap.player = PlayerState(position=player_pos, reach_distance=0.0)
+        snap.observed_at["player"] = tick
+    return snap
+
+
+def _live_ww_with_radius(radius: int = 0) -> tuple[WorldState, WorldWriter]:
+    ws = WorldState(tick=0)
+    ww = WorldWriter(ws)
+    ww.set_scan_radius(radius)
+    return ws, ww
 
 
 class TestWorldWriterIdentityRegistry(unittest.TestCase):
 
     def _live_ww(self) -> tuple[WorldState, WorldWriter]:
-        ws = WorldState(tick=0)
-        ww = WorldWriter(ws)
-        return ws, ww
+        return _live_ww_with_radius(0)
 
     # --- placed entity sys_id assignment ---
 
     def test_placed_entity_gets_sys_id(self):
         ws, ww = self._live_ww()
         ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
-        # The entity in the live state should have a non-zero sys_id, not 42.
         self.assertEqual(len(ws.entities), 1)
         sys_id = ws.entities[0].entity_id
         self.assertGreater(sys_id, 0)
 
     def test_placed_entity_sys_id_stable_across_snapshots(self):
-        ws, ww = self._live_ww()
-        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=100))
+        # Use scan_radius=20 with player at origin so the entity at (5,5) is
+        # within scan range and the second snapshot updates rather than adds.
+        ws, ww = _live_ww_with_radius(20)
+        player = Position(0.0, 0.0)
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0,
+                                           tick=100, player_pos=player))
         sys_id_first = ws.entities[0].entity_id
-        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=200))
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0,
+                                           tick=200, player_pos=player))
         sys_id_second = ws.entities[0].entity_id
         self.assertEqual(sys_id_first, sys_id_second)
+        # With accumulation, re-observed entity updates in place — still one entity.
+        self.assertEqual(len(ws.entities), 1)
 
     def test_two_placed_entities_get_distinct_sys_ids(self):
         ws, ww = self._live_ww()
@@ -1048,22 +1068,29 @@ class TestWorldWriterIdentityRegistry(unittest.TestCase):
         self.assertGreater(sys_id, 0)
 
     def test_natural_object_sys_id_stable_by_proximity(self):
-        ws, ww = self._live_ww()
-        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0, tick=100))
+        ws, ww = _live_ww_with_radius(20)
+        player = Position(0.0, 0.0)
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0,
+                                             tick=100, player_pos=player))
         sys_id_first = ws.entities[0].entity_id
-        # Same name, position within epsilon — should get same sys_id.
-        ww.integrate_snapshot(_snap_natural("tree-01", 10.3, 10.3, tick=200))
+        # Same name, position within epsilon — updates in place, same sys_id.
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.3, 10.3,
+                                             tick=200, player_pos=player))
         sys_id_second = ws.entities[0].entity_id
         self.assertEqual(sys_id_first, sys_id_second)
+        self.assertEqual(len(ws.entities), 1)
 
     def test_natural_object_different_position_gets_new_sys_id(self):
+        # No scan_radius: neither entity is ever removed. Both accumulate.
         ws, ww = self._live_ww()
         ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0, tick=100))
         sys_id_first = ws.entities[0].entity_id
-        # Same name but far away — should get a new sys_id.
+        # Far away — different object, gets a new sys_id.
         ww.integrate_snapshot(_snap_natural("tree-01", 50.0, 50.0, tick=200))
-        sys_id_second = ws.entities[0].entity_id
-        self.assertNotEqual(sys_id_first, sys_id_second)
+        self.assertEqual(len(ws.entities), 2)
+        sys_ids = {e.entity_id for e in ws.entities}
+        self.assertIn(sys_id_first, sys_ids)
+        self.assertEqual(len(sys_ids), 2)  # two distinct sys_ids
 
     def test_natural_object_different_name_gets_new_sys_id(self):
         ws, ww = self._live_ww()
@@ -1071,8 +1098,10 @@ class TestWorldWriterIdentityRegistry(unittest.TestCase):
         sys_id_first = ws.entities[0].entity_id
         # Different name at same position — different object.
         ww.integrate_snapshot(_snap_natural("rock-huge", 10.0, 10.0, tick=200))
-        sys_id_second = ws.entities[0].entity_id
-        self.assertNotEqual(sys_id_first, sys_id_second)
+        self.assertEqual(len(ws.entities), 2)
+        sys_ids = {e.entity_id for e in ws.entities}
+        self.assertIn(sys_id_first, sys_ids)
+        self.assertEqual(len(sys_ids), 2)
 
     def test_factorio_id_for_natural_object_is_zero(self):
         ws, ww = self._live_ww()
@@ -1172,8 +1201,6 @@ class TestWorldWriterIdentityRegistry(unittest.TestCase):
         self.assertNotIn(sys_id, ws.player.reachable)
 
     def test_sentinel_reach_distance_zero_no_natural_reachable(self):
-        # reach_distance=0.0 is the sentinel meaning "not yet populated".
-        # No natural objects should be added to reachable.
         ws = WorldState(tick=0)
         ww = WorldWriter(ws)
         snap = WorldState(
@@ -1193,20 +1220,236 @@ class TestWorldWriterIdentityRegistry(unittest.TestCase):
     def test_reset_identity_registry(self):
         ws, ww = self._live_ww()
         ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
-        sys_id_before = ws.entities[0].entity_id
         ww.reset_identity_registry()
-        # After reset, same Factorio ID gets a fresh (likely different) sys_id.
+        # After reset, entity list cleared and counter restarted.
+        self.assertEqual(ws.entities, [])
         ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=200))
         sys_id_after = ws.entities[0].entity_id
-        # Counter restarted at 1, so the new sys_id is 1 again.
         self.assertEqual(sys_id_after, 1)
 
-    def test_reset_clears_factorio_id_for(self):
-        ws, ww = self._live_ww()
-        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
-        sys_id = ws.entities[0].entity_id
+    def test_reset_clears_tile_map(self):
+        ws, ww = _live_ww_with_radius(5)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reach_distance=0.0),
+            observed_at={"player": 100},
+        )
+        ww.integrate_snapshot(snap)
+        self.assertGreater(len(ws.tile_map), 0)
         ww.reset_identity_registry()
-        self.assertEqual(ww.factorio_id_for(sys_id), 0)
+        self.assertEqual(ws.tile_map, {})
+
+
+class TestWorldWriterEntityAccumulation(unittest.TestCase):
+    """Tests for entity accumulation, update-in-place, and confirmed-gone removal."""
+
+    def _snap_with_player(self, entities=None, naturals=None,
+                           player_pos=None, tick=100):
+        """Helper: snapshot with player section and optional entity/natural lists."""
+        px = player_pos or Position(0.0, 0.0)
+        snap = WorldState(
+            tick=tick,
+            player=PlayerState(position=px, reach_distance=0.0),
+            observed_at={"player": tick},
+        )
+        if entities:
+            snap.entities = entities
+            snap.observed_at["entities"] = tick
+        if naturals:
+            snap.natural_objects = naturals
+            snap.observed_at["natural_objects"] = tick
+        return snap
+
+    def test_entity_persists_outside_scan_range(self):
+        # Entity at (100, 0) is outside scan_radius=5. It is never removed.
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            entities=[EntityState(entity_id=1, name="iron-chest",
+                                  position=Position(100, 0), is_natural=False)],
+        )
+        ww.integrate_snapshot(snap1)
+        self.assertEqual(len(ws.entities), 1)
+
+        # Second snapshot with no entities, player still at origin.
+        snap2 = self._snap_with_player(tick=200)
+        ww.integrate_snapshot(snap2)
+        # Entity at (100, 0) outside scan — should persist.
+        self.assertEqual(len(ws.entities), 1)
+
+    def test_entity_removed_when_tile_scanned_and_absent(self):
+        # Entity at (2, 0) is inside scan_radius=5. Second snapshot omits it.
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            entities=[EntityState(entity_id=1, name="stone-furnace",
+                                  position=Position(2, 0), is_natural=False)],
+        )
+        ww.integrate_snapshot(snap1)
+        self.assertEqual(len(ws.entities), 1)
+
+        snap2 = self._snap_with_player(tick=200)
+        snap2.observed_at["entities"] = 200
+        ww.integrate_snapshot(snap2)
+        self.assertEqual(len(ws.entities), 0)
+
+    def test_entity_updated_in_place_on_re_observation(self):
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            entities=[EntityState(entity_id=7, name="assembling-machine-1",
+                                  position=Position(1, 0), is_natural=False,
+                                  status=EntityStatus.IDLE)],
+        )
+        ww.integrate_snapshot(snap1)
+        sys_id = ws.entities[0].entity_id
+
+        snap2 = self._snap_with_player(
+            entities=[EntityState(entity_id=7, name="assembling-machine-1",
+                                  position=Position(1, 0), is_natural=False,
+                                  status=EntityStatus.WORKING)],
+            tick=200,
+        )
+        ww.integrate_snapshot(snap2)
+        # Still one entity, same sys_id, status updated.
+        self.assertEqual(len(ws.entities), 1)
+        self.assertEqual(ws.entities[0].entity_id, sys_id)
+        self.assertEqual(ws.entities[0].status, EntityStatus.WORKING)
+
+    def test_natural_object_persists_outside_scan_range(self):
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            naturals=[EntityState(entity_id=0, name="tree-01",
+                                  position=Position(50, 0), is_natural=True,
+                                  force="neutral")],
+        )
+        ww.integrate_snapshot(snap1)
+        self.assertEqual(len(ws.entities), 1)
+
+        snap2 = self._snap_with_player(tick=200)
+        ww.integrate_snapshot(snap2)
+        self.assertEqual(len(ws.entities), 1)
+
+    def test_natural_object_removed_when_tile_scanned_and_absent(self):
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            naturals=[EntityState(entity_id=0, name="tree-01",
+                                  position=Position(2, 0), is_natural=True,
+                                  force="neutral")],
+        )
+        ww.integrate_snapshot(snap1)
+        self.assertEqual(len(ws.entities), 1)
+
+        snap2 = self._snap_with_player(tick=200)
+        snap2.observed_at["natural_objects"] = 200
+        ww.integrate_snapshot(snap2)
+        self.assertEqual(len(ws.entities), 0)
+
+    def test_mixed_accumulation_stale_and_fresh(self):
+        # Two entities: one inside scan range (removed if absent), one outside.
+        ws, ww = _live_ww_with_radius(5)
+        snap1 = self._snap_with_player(
+            entities=[
+                EntityState(entity_id=1, name="iron-chest",
+                            position=Position(2, 0), is_natural=False),
+                EntityState(entity_id=2, name="stone-furnace",
+                            position=Position(50, 0), is_natural=False),
+            ],
+        )
+        ww.integrate_snapshot(snap1)
+        self.assertEqual(len(ws.entities), 2)
+
+        # Second snapshot: entity 1 absent (tile scanned), entity 2 absent
+        # (tile not scanned — outside radius).
+        snap2 = self._snap_with_player(tick=200)
+        snap2.observed_at["entities"] = 200
+        ww.integrate_snapshot(snap2)
+        self.assertEqual(len(ws.entities), 1)
+        self.assertEqual(ws.entities[0].name, "stone-furnace")
+
+
+class TestWorldWriterTileCoverage(unittest.TestCase):
+    """Tests for tile coverage map updates via integrate_snapshot."""
+
+    def _snap_player_at(self, x, y, tick=100, tile_map_data=None):
+        snap = WorldState(
+            tick=tick,
+            player=PlayerState(position=Position(x, y), reach_distance=0.0),
+            observed_at={"player": tick},
+        )
+        if tile_map_data is not None:
+            # tile_map_data is dict[(tx,ty), str] — raw parser format.
+            snap.tile_map = tile_map_data
+            snap.observed_at["tile_map"] = tick
+        return snap
+
+    def test_tiles_in_radius_get_stamped(self):
+        ws, ww = _live_ww_with_radius(2)
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=100))
+        # Origin tile must be in tile_map.
+        self.assertIn((0, 0), ws.tile_map)
+        tick_val, tile_type = ws.tile_map[(0, 0)]
+        self.assertEqual(tick_val, 100)
+        self.assertEqual(tile_type, "")  # default tile
+
+    def test_non_default_tile_type_recorded(self):
+        ws, ww = _live_ww_with_radius(2)
+        ww.integrate_snapshot(self._snap_player_at(
+            0, 0, tick=100,
+            tile_map_data={(0, 0): "water"},
+        ))
+        self.assertEqual(ws.tile_map[(0, 0)], (100, "water"))
+
+    def test_tiles_outside_radius_not_added(self):
+        ws, ww = _live_ww_with_radius(2)
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=100))
+        # Tile at (10, 0) is outside radius=2.
+        self.assertNotIn((10, 0), ws.tile_map)
+
+    def test_non_default_type_preserved_on_re_observation(self):
+        # Water tile observed first; next poll doesn't report it but it's still
+        # in scan range — the type should be preserved.
+        ws, ww = _live_ww_with_radius(2)
+        ww.integrate_snapshot(self._snap_player_at(
+            0, 0, tick=100,
+            tile_map_data={(0, 0): "water"},
+        ))
+        self.assertEqual(ws.tile_map[(0, 0)][1], "water")
+
+        # Second poll: Lua doesn't report water at (0,0) but it's in range.
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=200))
+        tick_val, tile_type = ws.tile_map[(0, 0)]
+        self.assertEqual(tick_val, 200)
+        self.assertEqual(tile_type, "water")  # preserved
+
+    def test_tile_observed_at_updated_each_poll(self):
+        ws, ww = _live_ww_with_radius(2)
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=100))
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=200))
+        self.assertEqual(ws.tile_map[(0, 0)][0], 200)
+
+    def test_tile_map_grows_as_player_moves(self):
+        ws, ww = _live_ww_with_radius(1)
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=100))
+        count_after_first = len(ws.tile_map)
+        # Move player to (10, 0) — new tiles.
+        ww.integrate_snapshot(self._snap_player_at(10, 0, tick=200))
+        self.assertGreater(len(ws.tile_map), count_after_first)
+
+    def test_scan_radius_zero_no_tile_coverage(self):
+        # scan_radius=0: no tile coverage update, tile_map stays empty.
+        ws, ww = _live_ww_with_radius(0)
+        ww.integrate_snapshot(self._snap_player_at(0, 0, tick=100))
+        self.assertEqual(ws.tile_map, {})
+
+    def test_reset_clears_tile_map(self):
+        ws, ww = _live_ww_with_radius(5)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reach_distance=0.0),
+            observed_at={"player": 100},
+        )
+        ww.integrate_snapshot(snap)
+        self.assertGreater(len(ws.tile_map), 0)
+        ww.reset_identity_registry()
+        self.assertEqual(ws.tile_map, {})
 
 
 # ===========================================================================
@@ -1307,7 +1550,7 @@ class TestWorldStateExploration(unittest.TestCase):
 
 
 class TestWorldStateTileMap(unittest.TestCase):
-    """WorldState.tile_map accumulates non-default tile observations."""
+    """WorldState.tile_map stores (last_observed_at, tile_type) tuples."""
 
     def test_tile_map_defaults_empty(self):
         from world.observable.state import WorldState
@@ -1322,14 +1565,27 @@ class TestWorldStateTileMap(unittest.TestCase):
     def test_tile_map_mutable(self):
         from world.observable.state import WorldState
         ws = WorldState()
-        ws.tile_map[(0, 0)] = "water"
-        self.assertEqual(ws.tile_map[(0, 0)], "water")
+        ws.tile_map[(0, 0)] = (100, "water")
+        self.assertEqual(ws.tile_map[(0, 0)], (100, "water"))
 
     def test_tile_map_keys_are_tuples(self):
         from world.observable.state import WorldState
-        ws = WorldState(tile_map={(1, 2): "deepwater", (-1, 0): "water-green"})
+        ws = WorldState(tile_map={(1, 2): (50, "deepwater"), (-1, 0): (50, "water-green")})
         self.assertIn((1, 2), ws.tile_map)
-        self.assertEqual(ws.tile_map[(1, 2)], "deepwater")
+        self.assertEqual(ws.tile_map[(1, 2)], (50, "deepwater"))
+
+    def test_tile_map_default_tile_empty_string(self):
+        # Default walkable tiles are stored with empty string type.
+        from world.observable.state import WorldState
+        ws = WorldState(tile_map={(5, 5): (200, "")})
+        self.assertEqual(ws.tile_map[(5, 5)], (200, ""))
+
+    def test_tile_map_observed_at_preserved(self):
+        from world.observable.state import WorldState
+        ws = WorldState(tile_map={(3, 7): (1234, "water")})
+        tick, tile_type = ws.tile_map[(3, 7)]
+        self.assertEqual(tick, 1234)
+        self.assertEqual(tile_type, "water")
 
 
 class TestWorldQueryTileMap(unittest.TestCase):
@@ -1337,6 +1593,7 @@ class TestWorldQueryTileMap(unittest.TestCase):
 
     def _wq_with_tiles(self, tiles: dict) -> WorldQuery:
         from world.observable.state import WorldState
+        # tiles is dict[(tile_x, tile_y), (last_observed_at, tile_type)]
         ws = WorldState(tile_map=tiles)
         return WorldQuery(ws)
 
@@ -1344,24 +1601,34 @@ class TestWorldQueryTileMap(unittest.TestCase):
         wq = self._wq_with_tiles({})
         self.assertEqual(wq.tile_at(0, 0), "unknown")
 
-    def test_tile_at_known(self):
-        wq = self._wq_with_tiles({(3, 5): "water"})
+    def test_tile_at_known_non_default(self):
+        wq = self._wq_with_tiles({(3, 5): (100, "water")})
         self.assertEqual(wq.tile_at(3, 5), "water")
 
+    def test_tile_at_known_default(self):
+        # Observed default tile returns "default", not empty string.
+        wq = self._wq_with_tiles({(3, 5): (100, "")})
+        self.assertEqual(wq.tile_at(3, 5), "default")
+
     def test_is_water_true(self):
-        wq = self._wq_with_tiles({(0, 0): "water"})
+        wq = self._wq_with_tiles({(0, 0): (100, "water")})
         self.assertTrue(wq.is_water(0, 0))
 
     def test_is_water_deepwater(self):
-        wq = self._wq_with_tiles({(1, 1): "deepwater-green"})
+        wq = self._wq_with_tiles({(1, 1): (100, "deepwater-green")})
         self.assertTrue(wq.is_water(1, 1))
 
     def test_is_water_false_for_land(self):
-        wq = self._wq_with_tiles({(0, 0): "landfill"})
+        wq = self._wq_with_tiles({(0, 0): (100, "landfill")})
         self.assertFalse(wq.is_water(0, 0))
 
     def test_is_water_false_for_unknown(self):
         wq = self._wq_with_tiles({})
+        self.assertFalse(wq.is_water(0, 0))
+
+    def test_is_water_false_for_default_tile(self):
+        # Observed default tile is not water.
+        wq = self._wq_with_tiles({(0, 0): (100, "")})
         self.assertFalse(wq.is_water(0, 0))
 
     def test_is_buildable_unknown_assumed_buildable(self):
@@ -1369,20 +1636,28 @@ class TestWorldQueryTileMap(unittest.TestCase):
         wq = self._wq_with_tiles({})
         self.assertTrue(wq.is_buildable(0, 0))
 
+    def test_is_buildable_default_tile_is_buildable(self):
+        wq = self._wq_with_tiles({(0, 0): (100, "")})
+        self.assertTrue(wq.is_buildable(0, 0))
+
     def test_is_buildable_water_not_buildable(self):
-        wq = self._wq_with_tiles({(0, 0): "water"})
+        wq = self._wq_with_tiles({(0, 0): (100, "water")})
         self.assertFalse(wq.is_buildable(0, 0))
 
     def test_is_buildable_out_of_map_not_buildable(self):
-        wq = self._wq_with_tiles({(0, 0): "out-of-map"})
+        wq = self._wq_with_tiles({(0, 0): (100, "out-of-map")})
         self.assertFalse(wq.is_buildable(0, 0))
 
     def test_is_buildable_landfill_is_buildable(self):
-        wq = self._wq_with_tiles({(0, 0): "landfill"})
+        wq = self._wq_with_tiles({(0, 0): (100, "landfill")})
         self.assertTrue(wq.is_buildable(0, 0))
 
     def test_water_tiles_in_radius_finds_nearby(self):
-        wq = self._wq_with_tiles({(0, 0): "water", (3, 3): "water", (100, 100): "deepwater"})
+        wq = self._wq_with_tiles({
+            (0, 0): (100, "water"),
+            (3, 3): (100, "water"),
+            (100, 100): (100, "deepwater"),
+        })
         nearby = wq.water_tiles_in_radius(0.5, 0.5, 5.0)
         coords = set(nearby)
         self.assertIn((0, 0), coords)
@@ -1392,6 +1667,36 @@ class TestWorldQueryTileMap(unittest.TestCase):
     def test_water_tiles_in_radius_empty_when_no_water(self):
         wq = self._wq_with_tiles({})
         self.assertEqual(wq.water_tiles_in_radius(0, 0, 50), [])
+
+    def test_water_tiles_in_radius_skips_default_tiles(self):
+        # Default observed tiles should not appear in water results.
+        wq = self._wq_with_tiles({(0, 0): (100, ""), (1, 0): (100, "water")})
+        result = wq.water_tiles_in_radius(0, 0, 5)
+        self.assertNotIn((0, 0), result)
+        self.assertIn((1, 0), result)
+
+    def test_tile_observed_at_none_when_unobserved(self):
+        wq = self._wq_with_tiles({})
+        self.assertIsNone(wq.tile_observed_at(0, 0))
+
+    def test_tile_observed_at_returns_tick(self):
+        wq = self._wq_with_tiles({(5, 3): (750, "water")})
+        self.assertEqual(wq.tile_observed_at(5, 3), 750)
+
+    def test_tile_observed_at_default_tile(self):
+        wq = self._wq_with_tiles({(2, 2): (300, "")})
+        self.assertEqual(wq.tile_observed_at(2, 2), 300)
+
+    def test_entity_last_observed_returns_tile_tick(self):
+        # 1×1 entity — result is just tile_observed_at at its position.
+        e = EntityState(entity_id=1, name="iron-chest", position=Position(5.0, 5.0))
+        wq = self._wq_with_tiles({(5, 5): (400, "")})
+        self.assertEqual(wq.entity_last_observed(e), 400)
+
+    def test_entity_last_observed_none_when_tile_unobserved(self):
+        e = EntityState(entity_id=1, name="iron-chest", position=Position(5.0, 5.0))
+        wq = self._wq_with_tiles({})
+        self.assertIsNone(wq.entity_last_observed(e))
 
 
 class TestInserterState(unittest.TestCase):

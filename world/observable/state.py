@@ -459,11 +459,23 @@ class WorldState:
     natural_objects: list[EntityState] = field(default_factory=list)
     resource_map: list[ResourcePatch] = field(default_factory=list)
     ground_items: list[GroundItem] = field(default_factory=list)
-    # Tile type map: (tile_x, tile_y) → tile name, for non-default tiles in
-    # the current scan radius. Only water variants, landfill, and out-of-map
-    # tiles are included. Accumulated by WorldWriter across polls — entries
-    # are added but never removed (tiles rarely change type).
-    tile_map: dict = field(default_factory=dict)
+    # Scan coverage and tile type map.
+    # Key:   (tile_x, tile_y) integer tile coordinates.
+    # Value: (last_observed_at: int, tile_type: str)
+    #   last_observed_at — tick when this tile was last within scan radius.
+    #   tile_type        — "" for default walkable tiles (grass, dirt, sand);
+    #                      non-empty for non-default tiles ("water", "deepwater",
+    #                      "landfill", "out-of-map", etc.) as reported by Lua.
+    # Semantics:
+    #   Key absent           → tile has never been in scan range.
+    #   (tick, "")           → tile was observed; default type (walkable).
+    #   (tick, "water")      → tile was observed; non-default type.
+    # Entries are added and updated, never removed. Grows monotonically.
+    # NOTE: At LOCAL_SCAN_RADIUS=64 this covers ~12,800 tiles per poll. The
+    # computation is fast at that scale but grows quadratically with radius.
+    # If scan radius is substantially increased (e.g. to cover radar stations),
+    # this update strategy should be revisited.
+    tile_map: dict[tuple[int, int], tuple[int, str]] = field(default_factory=dict)
     research: ResearchState = field(default_factory=ResearchState)
     logistics: LogisticsState = field(default_factory=LogisticsState)
     threat: ThreatState = field(default_factory=ThreatState)

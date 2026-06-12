@@ -112,6 +112,21 @@ class WorldWriter:
         # Reverse map: sys_id → Factorio unit_number (0 for natural objects).
         # Exposed via factorio_id_for() so the bridge can dispatch actions.
         self._sys_to_factorio: dict[int, int] = {}
+        # Tile scan radius used for coverage map updates.
+        # Set once at startup via set_scan_radius(). Zero means no coverage
+        # update will occur (safe default; writer still functions for all
+        # other operations).
+        self._scan_radius: int = 0
+
+    def set_scan_radius(self, radius: int) -> None:
+        """
+        Set the tile scan radius used to compute scan coverage each poll.
+
+        Must be called once at startup with LOCAL_SCAN_RADIUS from config.
+        The main loop calls ww.set_scan_radius(LOCAL_SCAN_RADIUS) before
+        the first integrate_snapshot().
+        """
+        self._scan_radius = radius
 
     # ------------------------------------------------------------------
     # Section replacement — bridge / integrate_snapshot
@@ -121,22 +136,22 @@ class WorldWriter:
         """
         Merge a fresh StateParser snapshot into the live global WorldState.
 
-        For each section present in the snapshot (i.e. where observed_at
-        is set), the live state is updated only if the snapshot data is
-        at least as fresh as the current live data (tick-based guard).
+        Entities accumulate — they are never wholesale-replaced. Each poll:
+          - New entities are added and assigned stable sys_ids.
+          - Known entities that reappear are updated in place (status, recipe,
+            inventory, energy).
+          - Entities whose position tile was in the scan this poll but absent
+            from the snapshot are removed (confirmed gone).
+          - Entities outside the scan radius are left unchanged (stale, retained).
 
-        Entities and natural objects are unified into a single list. Each
-        entity is assigned a stable sys_id before entering the live state;
-        raw Factorio unit_numbers do not appear above this method.
-
-        The entity and inserter indices are rebuilt once at the end, after
-        all sections have been merged.
+        The tile_map is updated first each poll so that entity removal logic
+        has fresh coverage data.
 
         Parameters
         ----------
         snapshot : WorldState
-            A WorldState produced by StateParser.parse(). This object is
-            consumed by this call; callers should not reuse it.
+            A WorldState produced by StateParser.parse(). Consumed by this
+            call; callers should not reuse it.
         """
         live = self._state
         snap_tick = snapshot.tick
@@ -153,6 +168,7 @@ class WorldWriter:
             live_obs = live.observed_at.get(section, -1)
             return snap_obs >= live_obs
 
+        # --- Step 1: player section ---
         if _is_fresh("player"):
             # Carry accumulated charted_chunk_coords forward.
             accumulated = live.player.exploration.charted_chunk_coords
@@ -162,20 +178,42 @@ class WorldWriter:
             live.player.exploration.charted_chunk_coords = accumulated
             live.observed_at["player"] = snapshot.observed_at["player"]
 
-        # Unify placed entities and natural objects into one list, assigning
-        # sys_ids. Use the fresher of the two timestamps; in practice they
-        # arrive together and are equal.
+        # --- Step 2: tile coverage update ---
+        # Computes which tiles were in scan range this poll, updates tile_map,
+        # and produces scanned_tiles for use in entity removal below.
+        # Must run before entity merge.
+        scanned_tiles: set[tuple[int, int]] = set()
+        if self._scan_radius > 0:
+            # snapshot.tile_map holds raw dict[(x,y), str] from the parser.
+            snap_tile_types: dict = snapshot.tile_map
+            scanned_tiles = self._compute_scanned_tiles(
+                live.player.position, self._scan_radius
+            )
+            self._update_tile_coverage(scanned_tiles, snap_tile_types, snap_tick)
+            live.observed_at["tile_map"] = snap_tick
+        elif _is_fresh("tile_map"):
+            # scan_radius not configured: fall back to merging whatever the
+            # parser put in snapshot.tile_map as (tick, type) tuples.
+            for (tx, ty), raw_val in snapshot.tile_map.items():
+                tile_type = raw_val if isinstance(raw_val, str) else ""
+                existing = live.tile_map.get((tx, ty))
+                keep_type = tile_type or (existing[1] if existing else "")
+                live.tile_map[(tx, ty)] = (snap_tick, keep_type)
+            live.observed_at["tile_map"] = snap_tick
+
+        # --- Step 3: entity accumulation ---
         entities_fresh = _is_fresh("entities")
         naturals_fresh = _is_fresh("natural_objects")
 
         if entities_fresh or naturals_fresh:
-            unified: list[EntityState] = []
+            # Build incoming map: sys_id → EntityState for this poll.
+            incoming: dict[int, EntityState] = {}
 
             if entities_fresh:
                 for e in snapshot.entities:
                     sys_id = self._resolve_sys_id_placed(e.entity_id)
                     e.entity_id = sys_id
-                    unified.append(e)
+                    incoming[sys_id] = e
 
             if naturals_fresh:
                 for e in snapshot.natural_objects:
@@ -183,31 +221,51 @@ class WorldWriter:
                         e.name, e.position.x, e.position.y
                     )
                     e.entity_id = sys_id
-                    unified.append(e)
+                    incoming[sys_id] = e
 
-            live.entities = unified
-            # Use the fresher of the two observed_at values.
+            # Update known entities; collect confirmed-gone sys_ids.
+            to_remove: list[int] = []
+            for e in live.entities:
+                if e.entity_id in incoming:
+                    # Re-observed: update mutable fields in place.
+                    fresh = incoming.pop(e.entity_id)
+                    e.status = fresh.status
+                    e.recipe = fresh.recipe
+                    e.inventory = fresh.inventory
+                    e.energy = fresh.energy
+                else:
+                    # Absent — remove only if its tile was scanned this poll.
+                    tile = (int(e.position.x), int(e.position.y))
+                    if tile in scanned_tiles:
+                        to_remove.append(e.entity_id)
+                    # else: outside scan range — keep as stale
+
+            if to_remove:
+                remove_set = set(to_remove)
+                live.entities = [e for e in live.entities
+                                  if e.entity_id not in remove_set]
+
+            # Append genuinely new entities.
+            live.entities.extend(incoming.values())
+
             obs = max(
                 snapshot.observed_at.get("entities", -1),
                 snapshot.observed_at.get("natural_objects", -1),
             )
-            live.observed_at["entities"] = obs
+            if obs >= 0:
+                live.observed_at["entities"] = obs
 
-        # Translate player.reachable from Factorio unit_numbers to sys_ids,
-        # then add natural objects within reach_distance geometrically.
-        # This runs whenever either the player or the entity list was updated.
+        # --- Step 4: reachable set translation ---
         if _is_fresh("player") or entities_fresh or naturals_fresh:
             reach = live.player.reach_distance
             player_pos = live.player.position
             reachable_sys: set[int] = set()
 
-            # Placed entities: translate Factorio IDs → sys_ids.
             for factorio_id in snapshot.player.reachable:
                 sys_id = self._factorio_to_sys.get(factorio_id)
                 if sys_id is not None:
                     reachable_sys.add(sys_id)
 
-            # Natural objects: geometric reach check.
             if reach > 0.0:
                 for e in live.entities:
                     if e.is_natural:
@@ -218,6 +276,7 @@ class WorldWriter:
 
             live.player.reachable = list(reachable_sys)
 
+        # --- Remaining sections (unchanged behaviour) ---
         if _is_fresh("resource_map"):
             live.resource_map = snapshot.resource_map
             live.observed_at["resource_map"] = snapshot.observed_at["resource_map"]
@@ -256,11 +315,6 @@ class WorldWriter:
             live.threat = snapshot.threat
             live.observed_at["threat"] = snapshot.observed_at["threat"]
 
-        if _is_fresh("tile_map"):
-            live.tile_map.update(snapshot.tile_map)
-            live.observed_at["tile_map"] = snapshot.observed_at["tile_map"]
-
-        # Rebuild indices once after all sections are merged.
         self._rebuild_all_indices()
 
     # ------------------------------------------------------------------
@@ -401,16 +455,73 @@ class WorldWriter:
 
     def reset_identity_registry(self) -> None:
         """
-        Clear the entity identity registry and reset the sys_id counter.
+        Clear the entity identity registry, accumulated entities, and tile
+        coverage map. Reset the sys_id counter.
 
         Must be called at the start of each run. Factorio entity IDs are only
         stable within a session; carrying them across runs would cause
-        mis-identification.
+        mis-identification. Entity accumulation and tile coverage are also
+        run-scoped.
         """
         self._sys_id_counter = 1
         self._factorio_to_sys.clear()
         self._natural_registry.clear()
         self._sys_to_factorio.clear()
+        self._state.entities.clear()
+        self._state.tile_map.clear()
+
+    # ------------------------------------------------------------------
+    # Tile coverage helpers
+    # ------------------------------------------------------------------
+
+    def _compute_scanned_tiles(
+        self, player_pos: Position, radius: int
+    ) -> set[tuple[int, int]]:
+        """
+        Compute the set of integer tile coordinates within radius tiles of
+        player_pos using a circle test.
+
+        NOTE: At LOCAL_SCAN_RADIUS=64 this produces ~12,800 tiles per poll —
+        fast at that scale but grows quadratically with radius. If scan radius
+        is substantially increased (e.g. to cover radar stations), this strategy
+        should be revisited.
+        """
+        cx = int(player_pos.x)
+        cy = int(player_pos.y)
+        r2 = radius * radius
+        result: set[tuple[int, int]] = set()
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if dx * dx + dy * dy <= r2:
+                    result.add((cx + dx, cy + dy))
+        return result
+
+    def _update_tile_coverage(
+        self,
+        scanned_tiles: set[tuple[int, int]],
+        snap_tile_types: dict,
+        tick: int,
+    ) -> None:
+        """
+        Update tile_map for all tiles in scanned_tiles.
+
+        For each tile:
+        - If Lua reported a non-default type for it (snap_tile_types), store
+          that type.
+        - Otherwise preserve any previously observed non-default type (tiles
+          rarely change), and mark as observed at this tick with empty type
+          string for default walkable tiles.
+
+        snap_tile_types is the raw dict[(tile_x, tile_y), str] produced by
+        StateParser._parse_tile_map — it contains only non-default tiles.
+        """
+        live_tile_map = self._state.tile_map
+        for tile in scanned_tiles:
+            existing = live_tile_map.get(tile)
+            existing_type = existing[1] if existing is not None else ""
+            # Lua only reports non-default tiles; absence means default.
+            new_type = snap_tile_types.get(tile, existing_type)
+            live_tile_map[tile] = (tick, new_type)
 
     def factorio_id_for(self, sys_id: int) -> int:
         """
