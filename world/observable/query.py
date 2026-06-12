@@ -358,9 +358,11 @@ class BBoxQuery:
         bbox(-16,-16,16,16).natural_count == 0
         len(bbox(-16,-16,16,16).natural_objects) == 0
 
+    natural_objects returns EntityState entries with is_natural=True.
+
     PROXIMAL — only objects currently in the player's scan radius are visible.
     An empty result may mean the region is clear OR that the player is too
-    far away. Use staleness('natural_objects') to guard if needed.
+    far away. Use staleness('entities') to guard if needed.
     """
 
     def __init__(
@@ -378,8 +380,9 @@ class BBoxQuery:
         self._y_max = y_max
 
     @property
-    def natural_objects(self) -> list:
-        """Natural objects (trees, rocks, cliffs) within the bbox."""
+    def natural_objects(self) -> list[EntityState]:
+        """Natural objects (trees, rocks, cliffs) within the bbox.
+        Returns EntityState entries with is_natural=True."""
         return self._wq.natural_objects_in_bbox(
             self._x_min, self._y_min, self._x_max, self._y_max
         )
@@ -512,9 +515,19 @@ class WorldQuery:
         """Return all entities currently set to the given recipe."""
         return list(self._state._by_recipe.get(recipe, []))
 
-    def all_entities(self) -> list[EntityState]:
-        """Return all entities in the current scan radius."""
-        return list(self._state.entities)
+    def all_entities(self, include_natural: bool = True) -> list[EntityState]:
+        """
+        Return all entities in the current scan radius.
+
+        Parameters
+        ----------
+        include_natural : bool, default True
+            If False, only placed (non-natural) entities are returned.
+            If True (default), the full unified list is returned.
+        """
+        if include_natural:
+            return list(self._state.entities)
+        return [e for e in self._state.entities if not e.is_natural]
 
     # ------------------------------------------------------------------
     # Connectivity queries — inserters
@@ -653,20 +666,17 @@ class WorldQuery:
 
     # ------------------------------------------------------------------
     @property
-    def natural_objects(self) -> list:
+    def natural_objects(self) -> list[EntityState]:
         """
         Natural world objects in the current scan radius: trees, rocks,
         boulders, and cliffs. PROXIMAL — scan radius limited.
 
-        Each entry is a NaturalObject with entity_id, name, position,
-        force (always 'neutral'), and prototype_type ('tree',
-        'simple-entity', or 'cliff').
+        Each entry is an EntityState with is_natural=True. The entity_id is
+        a stable sys_id assigned by WorldWriter (not a raw Factorio unit_number).
 
         The MiningAgent uses this list for clear_region tasks.
-        entity_id=0 means the object cannot be targeted with MineEntity
-        (some cliff variants); treat as position-only.
         """
-        return self._state.natural_objects
+        return [e for e in self._state.entities if e.is_natural]
 
     def in_bbox(
         self,
@@ -701,10 +711,13 @@ class WorldQuery:
         y_min: float,
         x_max: float,
         y_max: float,
-    ) -> list:
+    ) -> list[EntityState]:
         """
         Natural objects whose position falls within the given bounding box
         (inclusive on all edges).
+
+        Returns EntityState entries with is_natural=True, filtered from the
+        unified entities list. Entity IDs are stable sys_ids.
 
         PROXIMAL — only objects within the current scan radius are visible.
         An empty result either means the region is clear or the player is
@@ -713,16 +726,14 @@ class WorldQuery:
         Parameters use the same x_min/y_min/x_max/y_max convention as the
         bbox() condition-namespace function and condition_parser:
             x increases east, y increases south (Factorio tile coordinates).
-
-        Returns
-        -------
-        list[NaturalObject]
         """
         result = []
-        for obj in self._state.natural_objects:
-            pos = obj.position
+        for e in self._state.entities:
+            if not e.is_natural:
+                continue
+            pos = e.position
             if x_min <= pos.x <= x_max and y_min <= pos.y <= y_max:
-                result.append(obj)
+                result.append(e)
         return result
 
     # ------------------------------------------------------------------

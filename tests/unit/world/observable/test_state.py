@@ -115,7 +115,74 @@ class TestPlayerState(unittest.TestCase):
         self.assertEqual(ps.inventory_size, 80)
         self.assertEqual(ps.inventory.count("coal"), 50)
 
+    def test_reach_distance_default_is_sentinel(self):
+        # Default of 0.0 is intentionally invalid — it signals that the
+        # bridge has not yet populated the field from Factorio.
+        ps = PlayerState()
+        self.assertEqual(ps.reach_distance, 0.0)
 
+    def test_reach_distance_set_explicitly(self):
+        ps = PlayerState(reach_distance=10.0)
+        self.assertAlmostEqual(ps.reach_distance, 10.0)
+
+    def test_reach_distance_independent_of_other_fields(self):
+        ps = PlayerState(
+            reach_distance=12.5,
+            health=75.0,
+            inventory_size=80,
+        )
+        self.assertAlmostEqual(ps.reach_distance, 12.5)
+        self.assertAlmostEqual(ps.health, 75.0)
+        self.assertEqual(ps.inventory_size, 80)
+
+
+
+
+class TestEntityStateIsNatural(unittest.TestCase):
+
+    def test_is_natural_defaults_false(self):
+        e = EntityState(entity_id=1, name="iron-chest", position=Position(0, 0))
+        self.assertFalse(e.is_natural)
+
+    def test_is_natural_set_true(self):
+        e = EntityState(entity_id=42, name="tree-01", position=Position(5, 5),
+                        is_natural=True)
+        self.assertTrue(e.is_natural)
+
+    def test_is_natural_false_for_placed_entity(self):
+        e = EntityState(entity_id=7, name="assembling-machine-1",
+                        position=Position(10, 10), is_natural=False)
+        self.assertFalse(e.is_natural)
+
+    def test_is_natural_does_not_affect_other_fields(self):
+        e = EntityState(entity_id=99, name="rock-huge", position=Position(3, 3),
+                        force="neutral", prototype_type="simple-entity",
+                        is_natural=True)
+        self.assertEqual(e.name, "rock-huge")
+        self.assertEqual(e.force, "neutral")
+        self.assertEqual(e.prototype_type, "simple-entity")
+        self.assertTrue(e.is_natural)
+
+    def test_natural_entity_in_index(self):
+        # is_natural=True entities are indexed by entity_id the same as any other.
+        natural = EntityState(entity_id=101, name="tree-01",
+                              position=Position(5, 5), is_natural=True)
+        ws = WorldState(entities=[natural])
+        self.assertIsNotNone(ws._by_id.get(101))
+        self.assertEqual(ws._by_name["tree-01"][0].entity_id, 101)
+
+    def test_mixed_natural_and_placed_in_same_list(self):
+        placed  = EntityState(entity_id=1, name="iron-chest",
+                              position=Position(0, 0), is_natural=False)
+        natural = EntityState(entity_id=2, name="tree-01",
+                              position=Position(5, 5), is_natural=True)
+        ws = WorldState(entities=[placed, natural])
+        self.assertEqual(len(ws.entities), 2)
+        naturals = [e for e in ws.entities if e.is_natural]
+        placed_list = [e for e in ws.entities if not e.is_natural]
+        self.assertEqual(len(naturals), 1)
+        self.assertEqual(len(placed_list), 1)
+        self.assertEqual(naturals[0].name, "tree-01")
 
 
 class TestCraftingQueueEntry(unittest.TestCase):
@@ -399,6 +466,26 @@ class TestWorldQueryEntityLookups(unittest.TestCase):
     def test_all_entities(self):
         self.assertEqual(len(_wq(self._ws()).all_entities()), 3)
 
+    def test_all_entities_include_natural_false(self):
+        # Mixed state: two placed, one natural.
+        ws = WorldState(entities=[
+            _entity(1, "assembling-machine-1", 5, 5),
+            _entity(2, "electric-furnace", 10, 10),
+            EntityState(entity_id=3, name="tree-01", position=Position(0, 0),
+                        is_natural=True, force="neutral"),
+        ])
+        placed = _wq(ws).all_entities(include_natural=False)
+        self.assertEqual(len(placed), 2)
+        self.assertTrue(all(not e.is_natural for e in placed))
+
+    def test_all_entities_default_includes_natural(self):
+        ws = WorldState(entities=[
+            _entity(1, "iron-chest", 0, 0),
+            EntityState(entity_id=2, name="rock-huge", position=Position(5, 5),
+                        is_natural=True, force="neutral"),
+        ])
+        self.assertEqual(len(_wq(ws).all_entities()), 2)
+
     def test_inventory_count(self):
         ws = WorldState(player=PlayerState(
             position=Position(0, 0),
@@ -494,6 +581,68 @@ class TestWorldQueryEntityLookups(unittest.TestCase):
     def test_state_passthrough(self):
         ws = WorldState(tick=1234)
         self.assertIs(_wq(ws).state, ws)
+
+
+class TestWorldQueryNaturalObjects(unittest.TestCase):
+    """Tests for natural_objects property and natural_objects_in_bbox."""
+
+    def _ws_mixed(self) -> WorldState:
+        return WorldState(entities=[
+            _entity(1, "iron-chest", 0.0, 0.0),
+            EntityState(entity_id=2, name="tree-01", position=Position(5.0, 5.0),
+                        is_natural=True, force="neutral"),
+            EntityState(entity_id=3, name="rock-huge", position=Position(10.0, 0.0),
+                        is_natural=True, force="neutral"),
+        ])
+
+    def test_natural_objects_returns_only_naturals(self):
+        wq = _wq(self._ws_mixed())
+        nats = wq.natural_objects
+        self.assertEqual(len(nats), 2)
+        self.assertTrue(all(e.is_natural for e in nats))
+
+    def test_natural_objects_empty_when_none(self):
+        ws = WorldState(entities=[_entity(1, "iron-chest", 0.0, 0.0)])
+        self.assertEqual(_wq(ws).natural_objects, [])
+
+    def test_natural_objects_all_natural_state(self):
+        ws = WorldState(entities=[
+            EntityState(entity_id=1, name="tree-01", position=Position(0, 0),
+                        is_natural=True, force="neutral"),
+            EntityState(entity_id=2, name="tree-02", position=Position(2, 0),
+                        is_natural=True, force="neutral"),
+        ])
+        self.assertEqual(len(_wq(ws).natural_objects), 2)
+
+    def test_natural_objects_in_bbox_basic(self):
+        wq = _wq(self._ws_mixed())
+        # Only tree-01 at (5, 5) is in this bbox.
+        result = wq.natural_objects_in_bbox(3.0, 3.0, 7.0, 7.0)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].name, "tree-01")
+
+    def test_natural_objects_in_bbox_excludes_placed(self):
+        wq = _wq(self._ws_mixed())
+        # iron-chest at (0, 0) is in this bbox but is not natural.
+        result = wq.natural_objects_in_bbox(-1.0, -1.0, 1.0, 1.0)
+        self.assertEqual(result, [])
+
+    def test_natural_objects_in_bbox_empty_region(self):
+        wq = _wq(self._ws_mixed())
+        result = wq.natural_objects_in_bbox(50.0, 50.0, 100.0, 100.0)
+        self.assertEqual(result, [])
+
+    def test_natural_objects_in_bbox_all_naturals(self):
+        wq = _wq(self._ws_mixed())
+        # bbox covers both natural objects.
+        result = wq.natural_objects_in_bbox(0.0, 0.0, 15.0, 10.0)
+        self.assertEqual(len(result), 2)
+
+    def test_natural_objects_in_bbox_returns_entity_states(self):
+        wq = _wq(self._ws_mixed())
+        result = wq.natural_objects_in_bbox(0.0, 0.0, 15.0, 10.0)
+        from world.observable.state import EntityState as ES
+        self.assertTrue(all(isinstance(e, ES) for e in result))
 
 
 class TestWorldQueryConnectivity(unittest.TestCase):
@@ -793,7 +942,9 @@ class TestWorldWriterIntegrateSnapshot(unittest.TestCase):
         snap = WorldState(tick=100, entities=[_entity(42, "iron-chest", 5, 5)],
                           observed_at={"entities": 100})
         ww.integrate_snapshot(snap)
-        self.assertIsNotNone(_wq(live).entity_by_id(42))
+        # The writer assigns a sys_id (not 42); look up by the assigned id.
+        sys_id = live.entities[0].entity_id
+        self.assertIsNotNone(_wq(live).entity_by_id(sys_id))
 
     def test_integrate_advances_tick(self):
         live = WorldState(tick=50)
@@ -818,6 +969,244 @@ class TestWorldWriterIntegrateSnapshot(unittest.TestCase):
                           observed_at={"destroyed_entities": 600})
         WorldWriter(live).integrate_snapshot(snap)
         self.assertEqual(len(live.destroyed_entities), 2)
+
+
+
+
+# ===========================================================================
+# WorldWriter identity registry tests
+# ===========================================================================
+
+def _snap_placed(factorio_id: int, name: str, x: float, y: float,
+                 tick: int = 100) -> WorldState:
+    """Snapshot with one placed entity."""
+    e = EntityState(entity_id=factorio_id, name=name, position=Position(x, y),
+                    is_natural=False)
+    return WorldState(tick=tick, entities=[e], observed_at={"entities": tick})
+
+
+def _snap_natural(name: str, x: float, y: float, tick: int = 100) -> WorldState:
+    """Snapshot with one natural object (entity_id=0 placeholder)."""
+    e = EntityState(entity_id=0, name=name, position=Position(x, y),
+                    is_natural=True, force="neutral")
+    return WorldState(tick=tick, natural_objects=[e],
+                      observed_at={"natural_objects": tick})
+
+
+class TestWorldWriterIdentityRegistry(unittest.TestCase):
+
+    def _live_ww(self) -> tuple[WorldState, WorldWriter]:
+        ws = WorldState(tick=0)
+        ww = WorldWriter(ws)
+        return ws, ww
+
+    # --- placed entity sys_id assignment ---
+
+    def test_placed_entity_gets_sys_id(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
+        # The entity in the live state should have a non-zero sys_id, not 42.
+        self.assertEqual(len(ws.entities), 1)
+        sys_id = ws.entities[0].entity_id
+        self.assertGreater(sys_id, 0)
+
+    def test_placed_entity_sys_id_stable_across_snapshots(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=100))
+        sys_id_first = ws.entities[0].entity_id
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=200))
+        sys_id_second = ws.entities[0].entity_id
+        self.assertEqual(sys_id_first, sys_id_second)
+
+    def test_two_placed_entities_get_distinct_sys_ids(self):
+        ws, ww = self._live_ww()
+        snap = WorldState(tick=100,
+                          entities=[
+                              EntityState(entity_id=10, name="iron-chest",
+                                          position=Position(0, 0), is_natural=False),
+                              EntityState(entity_id=11, name="iron-chest",
+                                          position=Position(5, 0), is_natural=False),
+                          ],
+                          observed_at={"entities": 100})
+        ww.integrate_snapshot(snap)
+        ids = [e.entity_id for e in ws.entities]
+        self.assertEqual(len(set(ids)), 2)
+
+    def test_factorio_id_for_placed_entity(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
+        sys_id = ws.entities[0].entity_id
+        self.assertEqual(ww.factorio_id_for(sys_id), 42)
+
+    # --- natural object sys_id assignment ---
+
+    def test_natural_object_gets_sys_id(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0))
+        self.assertEqual(len(ws.entities), 1)
+        sys_id = ws.entities[0].entity_id
+        self.assertGreater(sys_id, 0)
+
+    def test_natural_object_sys_id_stable_by_proximity(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0, tick=100))
+        sys_id_first = ws.entities[0].entity_id
+        # Same name, position within epsilon — should get same sys_id.
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.3, 10.3, tick=200))
+        sys_id_second = ws.entities[0].entity_id
+        self.assertEqual(sys_id_first, sys_id_second)
+
+    def test_natural_object_different_position_gets_new_sys_id(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0, tick=100))
+        sys_id_first = ws.entities[0].entity_id
+        # Same name but far away — should get a new sys_id.
+        ww.integrate_snapshot(_snap_natural("tree-01", 50.0, 50.0, tick=200))
+        sys_id_second = ws.entities[0].entity_id
+        self.assertNotEqual(sys_id_first, sys_id_second)
+
+    def test_natural_object_different_name_gets_new_sys_id(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0, tick=100))
+        sys_id_first = ws.entities[0].entity_id
+        # Different name at same position — different object.
+        ww.integrate_snapshot(_snap_natural("rock-huge", 10.0, 10.0, tick=200))
+        sys_id_second = ws.entities[0].entity_id
+        self.assertNotEqual(sys_id_first, sys_id_second)
+
+    def test_factorio_id_for_natural_object_is_zero(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_natural("tree-01", 10.0, 10.0))
+        sys_id = ws.entities[0].entity_id
+        self.assertEqual(ww.factorio_id_for(sys_id), 0)
+
+    def test_factorio_id_for_unknown_sys_id_is_zero(self):
+        _, ww = self._live_ww()
+        self.assertEqual(ww.factorio_id_for(99999), 0)
+
+    # --- unified entity list ---
+
+    def test_placed_and_natural_unified_in_entities(self):
+        ws, ww = self._live_ww()
+        snap = WorldState(
+            tick=100,
+            entities=[EntityState(entity_id=5, name="iron-chest",
+                                  position=Position(0, 0), is_natural=False)],
+            natural_objects=[EntityState(entity_id=0, name="tree-01",
+                                         position=Position(8, 0), is_natural=True,
+                                         force="neutral")],
+            observed_at={"entities": 100, "natural_objects": 100},
+        )
+        ww.integrate_snapshot(snap)
+        self.assertEqual(len(ws.entities), 2)
+        naturals = [e for e in ws.entities if e.is_natural]
+        placed = [e for e in ws.entities if not e.is_natural]
+        self.assertEqual(len(naturals), 1)
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(naturals[0].name, "tree-01")
+        self.assertEqual(placed[0].name, "iron-chest")
+
+    def test_placed_and_natural_have_distinct_sys_ids(self):
+        ws, ww = self._live_ww()
+        snap = WorldState(
+            tick=100,
+            entities=[EntityState(entity_id=5, name="iron-chest",
+                                  position=Position(0, 0), is_natural=False)],
+            natural_objects=[EntityState(entity_id=0, name="tree-01",
+                                         position=Position(8, 0), is_natural=True,
+                                         force="neutral")],
+            observed_at={"entities": 100, "natural_objects": 100},
+        )
+        ww.integrate_snapshot(snap)
+        ids = [e.entity_id for e in ws.entities]
+        self.assertEqual(len(set(ids)), 2)
+
+    # --- reachable set translation ---
+
+    def test_reachable_translated_to_sys_ids(self):
+        ws = WorldState(tick=0)
+        ww = WorldWriter(ws)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reachable=[42],
+                               reach_distance=10.0),
+            entities=[EntityState(entity_id=42, name="iron-chest",
+                                  position=Position(3, 0), is_natural=False)],
+            observed_at={"player": 100, "entities": 100},
+        )
+        ww.integrate_snapshot(snap)
+        sys_id = ws.entities[0].entity_id
+        self.assertIn(sys_id, ws.player.reachable)
+        self.assertNotIn(42, ws.player.reachable)
+
+    def test_natural_objects_in_reach_added_to_reachable(self):
+        ws = WorldState(tick=0)
+        ww = WorldWriter(ws)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reachable=[],
+                               reach_distance=10.0),
+            natural_objects=[EntityState(entity_id=0, name="tree-01",
+                                          position=Position(5, 0), is_natural=True,
+                                          force="neutral")],
+            observed_at={"player": 100, "natural_objects": 100},
+        )
+        ww.integrate_snapshot(snap)
+        sys_id = ws.entities[0].entity_id
+        self.assertIn(sys_id, ws.player.reachable)
+
+    def test_natural_object_out_of_reach_not_in_reachable(self):
+        ws = WorldState(tick=0)
+        ww = WorldWriter(ws)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reachable=[],
+                               reach_distance=10.0),
+            natural_objects=[EntityState(entity_id=0, name="tree-01",
+                                          position=Position(20, 0), is_natural=True,
+                                          force="neutral")],
+            observed_at={"player": 100, "natural_objects": 100},
+        )
+        ww.integrate_snapshot(snap)
+        sys_id = ws.entities[0].entity_id
+        self.assertNotIn(sys_id, ws.player.reachable)
+
+    def test_sentinel_reach_distance_zero_no_natural_reachable(self):
+        # reach_distance=0.0 is the sentinel meaning "not yet populated".
+        # No natural objects should be added to reachable.
+        ws = WorldState(tick=0)
+        ww = WorldWriter(ws)
+        snap = WorldState(
+            tick=100,
+            player=PlayerState(position=Position(0, 0), reachable=[],
+                               reach_distance=0.0),
+            natural_objects=[EntityState(entity_id=0, name="tree-01",
+                                          position=Position(1, 0), is_natural=True,
+                                          force="neutral")],
+            observed_at={"player": 100, "natural_objects": 100},
+        )
+        ww.integrate_snapshot(snap)
+        self.assertEqual(ws.player.reachable, [])
+
+    # --- reset ---
+
+    def test_reset_identity_registry(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
+        sys_id_before = ws.entities[0].entity_id
+        ww.reset_identity_registry()
+        # After reset, same Factorio ID gets a fresh (likely different) sys_id.
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0, tick=200))
+        sys_id_after = ws.entities[0].entity_id
+        # Counter restarted at 1, so the new sys_id is 1 again.
+        self.assertEqual(sys_id_after, 1)
+
+    def test_reset_clears_factorio_id_for(self):
+        ws, ww = self._live_ww()
+        ww.integrate_snapshot(_snap_placed(42, "stone-furnace", 5.0, 5.0))
+        sys_id = ws.entities[0].entity_id
+        ww.reset_identity_registry()
+        self.assertEqual(ww.factorio_id_for(sys_id), 0)
 
 
 # ===========================================================================

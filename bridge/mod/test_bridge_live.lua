@@ -185,13 +185,26 @@ T.suite("state_queries", {
         t.has_key(p.position, "x")
         t.has_key(p.position, "y")
         t.has_key(p, "health")
+        t.has_key(p, "reach_distance")
         t.has_key(p, "inventory")
         t.has_key(p, "inventory_size")
         t.has_key(p, "reachable")
         t.is_number(p.health)
+        t.is_number(p.reach_distance)
         t.is_table(p.inventory)
         t.is_number(p.inventory_size)
         t.is_table(p.reachable)
+    end,
+
+    player_reach_distance_is_positive = function(t)
+        -- reach_distance must be a positive number. A value of 0.0 indicates
+        -- the Lua-side population failed (0.0 is the intentional sentinel for
+        -- failure — see _player_table in control.lua).
+        local raw = fa.get_player()
+        local parsed = t.json_ok(raw)
+        local rd = parsed.player.reach_distance
+        t.is_number(rd, "reach_distance must be a number")
+        t.gt(rd, 0.0, "reach_distance must be > 0 (0.0 means population failed)")
     end,
 
     player_position_is_finite = function(t)

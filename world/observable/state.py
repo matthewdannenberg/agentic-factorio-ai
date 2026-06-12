@@ -96,7 +96,7 @@ class Inventory:
 
 
 # ---------------------------------------------------------------------------
-# Entities (placed buildings)
+# Entities (placed buildings and natural objects)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -113,41 +113,10 @@ class EntityState:
     # The Factorio prototype type string: "assembling-machine", "inserter",
     # "tree", "simple-entity", "cliff", "resource", etc.
     prototype_type: str = "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Natural objects
-# ---------------------------------------------------------------------------
-
-@dataclass
-class NaturalObject:
-    """
-    A natural world object in the scan radius: tree, rock/boulder, or cliff.
-
-    Natural objects lack unit_numbers in Factorio so they are excluded from
-    the main EntityState scan. They are returned by _natural_objects_table
-    and stored in WorldState.natural_objects.
-
-    Fields
-    ------
-    entity_id      : Factorio unit_number, or 0 if the entity type lacks one
-                     (some cliff variants). The Python layer treats entity_id=0
-                     as position-only (navigate to position, no MineEntity).
-    name           : Prototype name (e.g. "tree-01", "rock-huge", "cliff").
-    position       : Tile-space position.
-    force          : Always "neutral" for natural objects.
-    prototype_type : "tree", "simple-entity", or "cliff".
-    """
-    entity_id: int
-    name: str
-    position: Position
-    force: str = "neutral"
-    prototype_type: str = "tree"
-
-    @property
-    def is_minable(self) -> bool:
-        """True if this object can be targeted with MineEntity (has a unit_number)."""
-        return self.entity_id != 0
+    # True for natural world objects (trees, rocks, cliffs) — entities that
+    # lack a stable Factorio unit_number and are identified by name + position.
+    # False for all placed/player-built entities.
+    is_natural: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +382,11 @@ class CraftingQueueEntry:
 class PlayerState:
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
     health: float = 100.0
+    # reach_distance is sourced from player.character.reach_distance in the
+    # Lua mod. Default 0.0 is intentionally invalid — a value of 0.0 in live
+    # state means the field has never been populated from the bridge and
+    # indicates a parsing failure.
+    reach_distance: float = 0.0
     inventory: Inventory = field(default_factory=Inventory)
     inventory_size: int = 0   # total slot count of the character main inventory
     reachable: list[int] = field(default_factory=list)
@@ -454,6 +428,12 @@ class WorldState:
     "player", "entities", "natural_objects", "resource_map", "ground_items",
     "research", "logistics", "damaged_entities", "destroyed_entities", "threat"
 
+    Note: "natural_objects" is a bridge-internal transient section populated
+    by StateParser on snapshot WorldStates only. WorldWriter.integrate_snapshot()
+    consumes it and merges natural objects into the "entities" list as
+    EntityState entries with is_natural=True. The live WorldState does not
+    maintain a separate natural_objects observed_at entry after integration.
+
     Deferred sections
     -----------------
     trains: Railroad network state — train identity, schedule, cargo, current
@@ -471,7 +451,12 @@ class WorldState:
 
     player: PlayerState = field(default_factory=PlayerState)
     entities: list[EntityState] = field(default_factory=list)
-    natural_objects: list["NaturalObject"] = field(default_factory=list)
+    # Transient bridge-internal field: natural objects (trees, rocks, cliffs)
+    # from the current scan, as EntityState entries with is_natural=True and
+    # entity_id=0 (placeholder). Populated by StateParser, consumed and merged
+    # into entities by WorldWriter.integrate_snapshot(). Empty on the live
+    # WorldState after integration.
+    natural_objects: list[EntityState] = field(default_factory=list)
     resource_map: list[ResourcePatch] = field(default_factory=list)
     ground_items: list[GroundItem] = field(default_factory=list)
     # Tile type map: (tile_x, tile_y) → tile name, for non-default tiles in

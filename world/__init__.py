@@ -88,8 +88,6 @@ from world.observable.state import (
     # Threat
     BiterBase,
     ThreatState,
-    # Natural objects
-    NaturalObject,
     # Crafting queue
     CraftingQueueEntry,
     # Player
@@ -148,7 +146,6 @@ __all__ = [
     "Direction",
     "ChunkCoord",
     "CraftingQueueEntry",
-    "NaturalObject",
     "EntityState",
     "EntityStatus",
     "ResourcePatch",

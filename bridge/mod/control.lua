@@ -760,9 +760,18 @@ function fa._player_table(player, exploration_scan_radius)
         end
     end)
 
+    -- reach_distance is on the character entity in Factorio 2.x, not the player
+    -- object. Default 0.0 is intentionally invalid — if this value passes
+    -- through to WorldState unchanged it indicates a Lua-side population failure.
+    local reach_distance = 0.0
+    if player.character then
+        reach_distance = player.character.reach_distance or 0.0
+    end
+
     return {
         position             = {x = player.position.x, y = player.position.y},
         health               = player.character and player.character.health or 100.0,
+        reach_distance       = reach_distance,
         inventory            = inventory_to_list(inv),
         inventory_size       = inv and #inv or 0,
         reachable            = fa._reachable_ids(player),

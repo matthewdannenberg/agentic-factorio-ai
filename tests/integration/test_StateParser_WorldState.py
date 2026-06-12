@@ -535,6 +535,73 @@ class TestStateParserCraftingQueueRoundtrip(unittest.TestCase):
         self.assertEqual(state.player.crafting_queue[0].recipe, "coal")
         self.assertAlmostEqual(state.player.crafting_queue[0].progress, 0.1)
 
+class TestStateParserReachDistance(unittest.TestCase):
+    """
+    Verify that StateParser correctly parses reach_distance from bridge JSON
+    into PlayerState and exposes it via WorldQuery.
+    """
+
+    def setUp(self):
+        self.parser = StateParser()
+
+    def _parse_player(self, extra_player_fields: dict) -> WorldQuery:
+        player = {
+            "position": {"x": 0.0, "y": 0.0},
+            "health": 100.0,
+            "inventory": [],
+            "reachable": [],
+            "charted_chunks": 0,
+        }
+        player.update(extra_player_fields)
+        raw = json.dumps({"tick": 100, "player": player})
+        state = self.parser.parse(raw, current_tick=100)
+        return WorldQuery(state)
+
+    def test_reach_distance_parsed(self):
+        wq = self._parse_player({"reach_distance": 10.0})
+        self.assertAlmostEqual(wq.state.player.reach_distance, 10.0)
+
+    def test_reach_distance_absent_gives_sentinel(self):
+        # Missing field should produce the 0.0 sentinel, not raise.
+        wq = self._parse_player({})
+        self.assertAlmostEqual(wq.state.player.reach_distance, 0.0)
+
+    def test_reach_distance_non_default_value(self):
+        # A modded or tech-upgraded character may have a non-vanilla value.
+        wq = self._parse_player({"reach_distance": 15.5})
+        self.assertAlmostEqual(wq.state.player.reach_distance, 15.5)
+
+    def test_reach_distance_zero_preserved(self):
+        # Explicit 0.0 from the bridge (character not spawned) is preserved
+        # as the sentinel, not silently replaced with anything else.
+        wq = self._parse_player({"reach_distance": 0.0})
+        self.assertAlmostEqual(wq.state.player.reach_distance, 0.0)
+
+    def test_reach_distance_coexists_with_other_fields(self):
+        wq = self._parse_player({
+            "reach_distance": 12.0,
+            "health": 75.0,
+            "inventory": [{"item": "iron-ore", "count": 5}],
+            "inventory_size": 80,
+            "charted_chunks": 10,
+        })
+        self.assertAlmostEqual(wq.state.player.reach_distance, 12.0)
+        self.assertAlmostEqual(wq.state.player.health, 75.0)
+        self.assertEqual(wq.inventory_count("iron-ore"), 5)
+        self.assertEqual(wq.state.player.inventory_size, 80)
+        self.assertEqual(wq.charted_chunks, 10)
+
+    def test_reach_distance_accessible_directly_on_state(self):
+        """White-box: reach_distance is on state.player, not just wq."""
+        from world.observable.state import WorldState
+        raw = json.dumps({"tick": 200, "player": {
+            "position": {"x": 0, "y": 0}, "inventory": [],
+            "reach_distance": 10.0,
+        }})
+        state = self.parser.parse(raw, current_tick=200)
+        self.assertAlmostEqual(state.player.reach_distance, 10.0)
+
+
 class TestStateParserCharterChunkCoords(unittest.TestCase):
     """
     charted_chunk_coords is accumulated by WorldWriter.integrate_snapshot()

@@ -16,7 +16,11 @@ Expected top-level JSON structure from the Lua mod
 ---------------------------------------------------
 {
   "tick": 3600,
-  "player": { ... },
+  "player": {
+    ...
+    "reach_distance": 10.0,   // player.character.reach_distance; 0.0 if unavailable
+    ...
+  },
   "entities": [ ... ],
   "resource_map": [ ... ],
   "ground_items": [ ... ],
@@ -50,7 +54,6 @@ from world.observable.state import (
     ChunkCoord,
     CraftingQueueEntry,
     ExplorationState,
-    NaturalObject,
     GroundItem,
     Inventory,
     InventorySlot,
@@ -257,6 +260,9 @@ class StateParser:
             return PlayerState()
         pos = self._parse_position(d.get("position", {}))
         health = float(d.get("health", 100.0))
+        # reach_distance defaults to the sentinel 0.0 when absent — indicates
+        # the bridge has not yet populated the field (older mod or no character).
+        reach_distance = float(d.get("reach_distance", 0.0))
         inventory = self._parse_inventory(d.get("inventory", []))
         inventory_size = int(d.get("inventory_size", 0))
         reachable = [int(x) for x in d.get("reachable", [])]
@@ -284,6 +290,7 @@ class StateParser:
         return PlayerState(
             position=pos,
             health=health,
+            reach_distance=reach_distance,
             inventory=inventory,
             inventory_size=inventory_size,
             reachable=reachable,
@@ -330,13 +337,22 @@ class StateParser:
                     energy=energy,
                     force=force,
                     prototype_type=prototype_type,
+                    is_natural=False,
                 ))
             except (KeyError, ValueError, TypeError) as exc:
                 logger.debug("Skipping malformed entity: %s — %s", item, exc)
         return result
 
-    def _parse_natural_objects(self, lst: Any) -> "list[NaturalObject]":
-        """Parse the natural_objects section from the bridge payload."""
+    def _parse_natural_objects(self, lst: Any) -> list[EntityState]:
+        """
+        Parse the natural_objects section from the bridge payload.
+
+        BRIDGE-INTERNAL. Returns EntityState entries with is_natural=True for
+        direct consumption by WorldWriter.integrate_snapshot(), which appends
+        them to the unified entities list. The raw Factorio unit_number is not
+        included — identity for natural objects is managed by WorldWriter using
+        name + position matching.
+        """
         if not isinstance(lst, list):
             return []
         result = []
@@ -345,12 +361,13 @@ class StateParser:
                 continue
             try:
                 pos = self._parse_position(item.get("position", {}))
-                result.append(NaturalObject(
-                    entity_id=int(item.get("entity_id", 0)),
+                result.append(EntityState(
+                    entity_id=0,  # placeholder; WorldWriter assigns sys_id
                     name=str(item.get("name", "")),
                     position=pos,
                     force=str(item.get("force", "neutral")),
                     prototype_type=str(item.get("prototype_type", "tree")),
+                    is_natural=True,
                 ))
             except (KeyError, ValueError, TypeError) as exc:
                 logger.debug("Skipping malformed natural_object: %s — %s", item, exc)
