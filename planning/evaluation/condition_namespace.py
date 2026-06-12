@@ -33,7 +33,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-from world import BBoxQuery  # noqa: F401 (re-export)
+# ---------------------------------------------------------------------------
+# BBoxQuery re-exported from world.observable.query where it is defined.
+# Importing here makes it available to callers of build_core_namespace
+# without them needing to know where BBoxQuery lives.
+# ---------------------------------------------------------------------------
+from world.observable.query import BBoxQuery  # noqa: F401 (re-export)
 
 BLOCKED_NAMES = frozenset({
     "os", "sys", "subprocess", "importlib", "builtins",
@@ -201,6 +206,16 @@ def build_core_namespace(
         "entities":           wq.entities_by_name,
         "entity_by_id":       wq.entity_by_id,
         "entities_by_status": wq.entities_by_status,
+
+        # ----------------------------------------------------------------
+        # Navigation helpers
+        # ----------------------------------------------------------------
+        # navigate_to(x, y) — True when player is within 1.5 tiles of target.
+        # Used in task success_conditions for navigate goal type.
+        "navigate_to": lambda x, y: (
+            abs(wq.player_position().x - float(x)) < 1.5
+            and abs(wq.player_position().y - float(y)) < 1.5
+        ),
 
         # ----------------------------------------------------------------
         # Spatial queries — PROXIMAL (scan radius only)

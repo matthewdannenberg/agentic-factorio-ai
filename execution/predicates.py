@@ -36,7 +36,7 @@ from world import Position
 
 if TYPE_CHECKING:
     from world import WorldQuery, KnowledgeBase
-    from world import NaturalObject
+    from world import NaturalObject, Position
 
 
 def is_at(
@@ -99,6 +99,42 @@ def player_has_item(item: str, count: int, wq: "WorldQuery") -> bool:
     completion checks without importing WorldQuery directly in agents.
     """
     return wq.inventory_count(item) >= count
+
+def is_present(
+    entity_id: int,
+    position: "Position",
+    wq: "WorldQuery",
+    name: str = "",
+    natural_radius: float = 1.5,
+) -> bool:
+    """
+    True if the target entity currently exists in the world.
+
+    For entities with a real unit number (entity_id != 0): checks the entity
+    scan via wq.entity_by_id().
+
+    For natural objects (entity_id == 0, e.g. trees in Factorio 2.x): scans
+    wq.natural_objects by proximity — present if any object with the same name
+    exists within *natural_radius* tiles of *position*. Natural objects have
+    no unit number so entity_by_id cannot be used.
+
+    Used by DestroySkill to detect completion and by MiningAgent to detect
+    that a harvest target has been cleared.
+    """
+    if entity_id != 0:
+        return wq.entity_by_id(entity_id) is not None
+
+    # Natural object: proximity check
+    r2 = natural_radius * natural_radius
+    for obj in wq.natural_objects:
+        if name and obj.name != name:
+            continue
+        dx = obj.position.x - position.x
+        dy = obj.position.y - position.y
+        if dx * dx + dy * dy < r2:
+            return True
+    return False
+
 
 def can_destroy(obj: "NaturalObject", kb: "KnowledgeBase") -> bool:
     """

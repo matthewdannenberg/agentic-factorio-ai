@@ -1,5 +1,5 @@
 """
-tests_in_game/02_collection/test_collect_iron.py
+tests_in_game/03_collection/test_collect_iron.py
 
 Verifies the full collection pipeline: coordinator derives approach + gather
 subtasks, NavigationAgent walks to the patch, MiningAgent mines the ore.

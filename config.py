@@ -9,7 +9,7 @@ RCON_TIMEOUT_S = 5.0
 RCON_RECONNECT_ATTEMPTS = 5
 RCON_RECONNECT_BACKOFF_S = 1.0
 
-LOCAL_SCAN_RADIUS = 32       # tiles — used for entities, ground_items
+LOCAL_SCAN_RADIUS = 64       # tiles — used for entities, ground_items
 RESOURCE_SCAN_RADIUS = 128   # tiles — used for resource patches
 GROUND_ITEM_SCAN_RADIUS = 16 # tiles — used for ground_items
 EXPLORATION_SCAN_RADIUS = 6  # chunks — radius for nearby_uncharted_chunks scan

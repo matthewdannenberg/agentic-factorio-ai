@@ -110,6 +110,20 @@ def _tech(m: re.Match) -> dict:
 def _production_rate(m: re.Match) -> dict:
     return {"item": m.group("item"), "rate_per_min": float(m.group("rate"))}
 
+def _navigate_to_params(x: float, y: float) -> dict:
+    """
+    Build coordinator params for a navigate goal.
+    Constructs target_position as a Position object so NavigationAgent
+    can read task.target_position directly without the coordinator
+    needing to know the Position type.
+    """
+    from world import Position
+    return {
+        "x": x,
+        "y": y,
+        "target_position": Position(x, y),
+    }
+
 
 _ITEM_COUNT_TYPES = frozenset({"collection", "acquire", "crafting"})
 
@@ -171,6 +185,18 @@ _PATTERNS: list[tuple[frozenset[str] | str, re.Pattern, Any]] = [
             r"\s*>=\s*(?P<rate>[\d.]+)"
         ),
         _production_rate,
+    ),
+
+    # --- navigate ---
+    # navigate_to(X, Y)  e.g. navigate_to(98.0, -98.0)
+    (
+        frozenset({"navigate"}),
+        re.compile(
+            r"navigate_to[(]\s*(?P<x>-?[\d.]+)\s*,\s*(?P<y>-?[\d.]+)\s*[)]"
+        ),
+        lambda m: _navigate_to_params(
+            float(m.group("x")), float(m.group("y"))
+        ),
     ),
 
     # --- clear_region / prep_region ---

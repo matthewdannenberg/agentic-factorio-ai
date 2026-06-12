@@ -550,6 +550,7 @@ class RuleBasedCoordinator:
                     description = f"Gather {count}x {item}",
                     agent_hint  = "mining",
                     tick        = tick,
+                    wq          = wq,
                     resource_type     = item,
                     target_position   = nearest.position,
                     count             = count,
@@ -583,6 +584,7 @@ class RuleBasedCoordinator:
                         description = f"Harvest {count}x {item} from natural objects",
                         agent_hint  = "mining",
                         tick        = tick,
+                        wq          = wq,
                         item             = item,
                         entity_types     = entity_types,
                         count            = count,
@@ -778,6 +780,7 @@ class RuleBasedCoordinator:
                 description = f"Craft {count}x {item}",
                 agent_hint  = "crafting",
                 tick        = tick,
+                wq          = wq,
                 targets=[{"item": item, "recipe": recipe, "count": count}],
                 success_condition = (
                     f"crafting_queue_size > 0 or "
@@ -854,6 +857,7 @@ class RuleBasedCoordinator:
                 description       = description,
                 agent_hint        = "exploration",
                 tick              = tick,
+                wq                = wq,
                 success_condition = effective_cond,
             )
             frame.step = 1
@@ -948,6 +952,7 @@ class RuleBasedCoordinator:
                 description = f"Clear {clear_mode} in {bbox}",
                 agent_hint  = "mining",
                 tick        = tick,
+                wq          = wq,
                 bbox        = bbox,
                 clear_mode  = clear_mode,
                 success_condition = _bbox_empty_condition(bbox),
@@ -1321,6 +1326,7 @@ class RuleBasedCoordinator:
                 description = f"Queue technology: {tech}",
                 agent_hint  = "crafting",  # placeholder — needs a research agent
                 tick        = tick,
+                wq          = wq,
                 tech        = tech,
                 success_condition = f"tech_unlocked('{tech}')",
             )
@@ -1370,13 +1376,15 @@ class RuleBasedCoordinator:
         agent_hint, task_type = TASK_GOAL_TYPES[frame.goal_type]
 
         if frame.step == 0:
+            params = dict(frame.params)
             self._push_task(
                 task_type         = task_type,
                 description       = frame.description,
                 agent_hint        = agent_hint,
                 tick              = tick,
+                wq                = wq,
                 success_condition = frame.success_condition,
-                params            = dict(frame.params),
+                params            = params,
             )
             frame.step = 1
             return CoordinatorStatus.PROGRESSING, []
@@ -1393,6 +1401,7 @@ class RuleBasedCoordinator:
         success_condition: str = "",
         failure_condition: str = "",
         params: dict = None,
+        wq: "WorldQuery" = None,
         **extra,
     ) -> None:
         """
@@ -1438,7 +1447,7 @@ class RuleBasedCoordinator:
             return
 
         self._active_agent = agent
-        agent.activate(task, self._bb, None, self._kb)
+        agent.activate(task, self._bb, wq, self._kb)
         self._stack.append(task)
 
         self._bb.write(
@@ -1598,8 +1607,8 @@ def _undestroyable_in_bbox(bbox, wq: "WorldQuery", kb) -> list:
     result = []
     for obj in getattr(wq, "natural_objects", []):
         pos = obj.position
-        if (bbox.x_min <= pos.x <= bbox.x_max
-                and bbox.y_min <= pos.y <= bbox.y_max):
+        if (bbox['x_min'] <= pos.x <= bbox['x_max']
+                and bbox['y_min'] <= pos.y <= bbox['y_max']):
             if not can_destroy(obj, kb):
                 result.append(obj)
     return result
@@ -1609,22 +1618,26 @@ def _bbox_is_clear(bbox, wq: "WorldQuery") -> bool:
     """True if no natural objects remain in the bbox."""
     for obj in getattr(wq, "natural_objects", []):
         pos = obj.position
-        if (bbox.x_min <= pos.x <= bbox.x_max
-                and bbox.y_min <= pos.y <= bbox.y_max):
+        if (bbox['x_min'] <= pos.x <= bbox['x_max']
+                and bbox['y_min'] <= pos.y <= bbox['y_max']):
             return False
     return True
 
 
 def _bbox_empty_condition(bbox) -> str:
-    """Build a success condition string for a clear task."""
+    """
+    Build a success condition string for a clear_natural task.
+
+    Checks natural_objects_in_bbox() — the correct data source for trees,
+    rocks and cliffs. state.entities contains placed factory buildings, not
+    natural objects, so it would never correctly signal completion here.
+    """
     return (
-        f"staleness('entities') is not None and "
-        f"staleness('entities') < 300 and "
-        f"not any("
-        f"  {bbox.x_min} <= e.position.x <= {bbox.x_max} and "
-        f"  {bbox.y_min} <= e.position.y <= {bbox.y_max} "
-        f"  for e in state.entities"
-        f")"
+        f"staleness('natural_objects') is not None and "
+        f"staleness('natural_objects') < 300 and "
+        f"len(wq.natural_objects_in_bbox("
+        f"{bbox['x_min']}, {bbox['y_min']}, "
+        f"{bbox['x_max']}, {bbox['y_max']})) == 0"
     )
 
 
@@ -1643,8 +1656,8 @@ def _intersects_major_factory(bbox, wq: "WorldQuery") -> bool:
     }
     for entity in wq.state.entities:
         pos = entity.position
-        if (bbox.x_min <= pos.x <= bbox.x_max
-                and bbox.y_min <= pos.y <= bbox.y_max):
+        if (bbox['x_min'] <= pos.x <= bbox['x_max']
+                and bbox['y_min'] <= pos.y <= bbox['y_max']):
             if entity.prototype_type in MAJOR_TYPES:
                 return True
     return False

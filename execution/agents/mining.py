@@ -473,9 +473,11 @@ class MiningAgent(AgentProtocol):
                 log.info("MiningAgent: no targets in clear region — done")
                 return []
 
-        # Advance if current target was destroyed.
+        # Advance if the DestroySkill reports the target is gone.
+        # DestroySkill owns presence detection — including the entity_id=0
+        # case for natural objects — so the agent never inspects entity_id.
         if self._current_target is not None:
-            if wq.entity_by_id(self._current_target.entity_id) is None:
+            if self._destroy_skill.status() == SkillStatus.SUCCEEDED:
                 log.debug(
                     "MiningAgent: entity %d gone, advancing",
                     self._current_target.entity_id,
@@ -713,8 +715,8 @@ class MiningAgent(AgentProtocol):
             # wq.state.entities because they have no unit_number in Factorio.
             for obj in wq.natural_objects:
                 pos = obj.position
-                if not (bbox.x_min <= pos.x <= bbox.x_max
-                        and bbox.y_min <= pos.y <= bbox.y_max):
+                if not (bbox['x_min'] <= pos.x <= bbox['x_max']
+                        and bbox['y_min'] <= pos.y <= bbox['y_max']):
                     continue
                 if not obj.is_minable:
                     log.debug(
@@ -736,8 +738,8 @@ class MiningAgent(AgentProtocol):
             # clear_all — use both natural objects and player-built entities
             for obj in wq.natural_objects:
                 pos = obj.position
-                if not (bbox.x_min <= pos.x <= bbox.x_max
-                        and bbox.y_min <= pos.y <= bbox.y_max):
+                if not (bbox['x_min'] <= pos.x <= bbox['x_max']
+                        and bbox['y_min'] <= pos.y <= bbox['y_max']):
                     continue
                 if not obj.is_minable or not can_destroy(obj, kb):
                     blocked.append(obj.name)
@@ -745,7 +747,7 @@ class MiningAgent(AgentProtocol):
                 targets.append(_ClearTarget(entity_id=obj.entity_id, position=pos))
             for entity in wq.state.entities:
                 pos = entity.position
-                if bbox.x_min <= pos.x <= bbox.x_max and bbox.y_min <= pos.y <= bbox.y_max:
+                if bbox['x_min'] <= pos.x <= bbox['x_max'] and bbox['y_min'] <= pos.y <= bbox['y_max']:
                     targets.append(_ClearTarget(
                         entity_id=entity.entity_id, position=pos
                     ))
