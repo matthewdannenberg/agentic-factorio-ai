@@ -473,6 +473,62 @@ sum(g.count for g in state.ground_items if g.item == 'iron-plate') >= 20
 
 ---
 
+## Navigation
+
+### `navigate_to(x: float, y: float) -> bool`
+Scope: **PROXIMAL** (player position dependent)
+
+Returns True when the player is within 1.5 tiles of `(x, y)`. Used as the
+`success_condition` for `navigate` task-backed goals. Generated automatically
+by `condition_parser` from `GoalQueueEntry(goal_type="navigate", ...)`.
+
+```python
+# Success when player arrives at (95.0, 95.0)
+success_condition="navigate_to(95.0, 95.0)"
+
+# Used internally by _dispatch_as_task for TASK_GOAL_TYPES["navigate"]
+```
+
+Note: the staleness problem that affects other PROXIMAL conditions does not apply
+here — this condition is designed to fire precisely when the player has arrived.
+
+---
+
+## Bbox Query
+
+### `bbox(x_min, y_min, x_max, y_max) -> BBoxQuery`
+Scope: **PROXIMAL** — scan radius only
+
+Returns a `BBoxQuery` object. The primary use is `.is_clear`:
+
+### `bbox(...).is_clear -> bool`
+
+True when `wq.natural_objects_in_bbox(x_min, y_min, x_max, y_max)` returns an
+empty list — i.e. no natural objects (trees, rocks, etc.) remain in the region.
+
+**Important:** this is PROXIMAL. It only sees natural objects within the current
+scan radius. For a bbox larger than the scan radius, unobserved areas appear clear
+spuriously, causing the condition to fire before any clearing work has been done.
+
+**Correct usage pattern:**
+
+1. Issue `navigate` goals to each corner of the bbox first (ensuring full scan coverage).
+2. Then issue the `clear_region` goal with the bbox condition.
+
+Or guard with a staleness check:
+
+```python
+(
+    "staleness('natural_objects') is not None and "
+    "staleness('natural_objects') < 300 and "
+    "len(wq.natural_objects_in_bbox(-50,-50,50,50)) == 0"
+)
+```
+
+A scan coverage map (Phase 10) will provide a principled solution.
+
+---
+
 ## Staleness Guard
 
 ### `staleness(section: str) -> int | None`

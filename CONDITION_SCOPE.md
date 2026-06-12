@@ -83,6 +83,22 @@ Non-proximal namespace names:
 - `state.recent_losses` / `state.damaged_entities` — populated from the
   destruction event buffer, which is global (not scan-radius scoped)
 
+### NAVIGATE conditions
+
+`navigate_to(x, y)` — True when the player is within 1.5 tiles of `(x, y)`.
+Used as the `success_condition` for `navigate` task-backed goals. Scope: PROXIMAL
+(depends on player position), but used specifically as a completion trigger when
+the player has arrived — so the staleness issue does not apply in practice.
+
+```python
+# Navigate to a specific position
+success_condition="navigate_to(95.0, 95.0)"
+```
+
+This is generated automatically by `condition_parser` when `goal_type="navigate"`
+is used in a `GoalQueueEntry`. It is also the `success_condition` written by
+`_dispatch_as_task` for `TASK_GOAL_TYPES["navigate"]`.
+
 ### STRUCTURAL conditions
 
 **Phase 10+ only. Requires a populated self-model.**
@@ -177,6 +193,31 @@ When generating a `success_condition` or `failure_condition` string:
    charted_chunks >= 50 and len(resources_of_type('iron-ore')) >= 2
    ```
 
+7. **`bbox().is_clear` requires prior navigation for large bboxes.** `bbox(x_min,
+   y_min, x_max, y_max).is_clear` is PROXIMAL — it checks `wq.natural_objects_in_bbox()`
+   which only sees objects within the current scan radius. If the bbox is larger than
+   the scan radius, unobserved areas appear clear spuriously.
+
+   The correct pattern is to navigate to the corners of the bbox before issuing a
+   `clear_region` goal, ensuring the full region has been scanned:
+
+   ```python
+   # In test files: issue navigate goals to each corner first
+   # success_condition for each: navigate_to(x, y)
+   # Then issue clear_region goal:
+   success_condition="bbox(-50,-50,50,50).is_clear"
+   ```
+
+   A scan coverage map (Phase 10) will eventually provide a principled solution.
+   Until then, the staleness guard is also recommended:
+
+   ```python
+   # Guard so condition only fires when scan is fresh
+   "staleness('natural_objects') is not None and "
+   "staleness('natural_objects') < 300 and "
+   "len(wq.natural_objects_in_bbox(-50,-50,50,50)) == 0"
+   ```
+
    `charted_area_km2` is useful for human-readable goal descriptions:
    ```python
    charted_area_km2 >= 1.0   # explored at least 1 square kilometre
@@ -245,6 +286,8 @@ Always returns a non-negative integer if observed.
 | `has_infrastructure(type)` | **STRUCTURAL** | Self-model: any active node of type (Phase 10+) |
 | `connected(node_a, node_b)` | **STRUCTURAL** | Self-model: path exists between nodes (Phase 10+) |
 | `sm_staleness()` | META | Use to guard structural conditions (Phase 10+) |
+| `navigate_to(x, y)` | PROXIMAL | True when player within 1.5 tiles; used as navigate task success_condition |
+| `bbox(x,y,x,y).is_clear` | **PROXIMAL** | True when natural_objects_in_bbox is empty; requires prior navigation for large bboxes |
 | `wq` | — | WorldQuery object; composable builder; non-proximal methods safe anywhere |
 | `state` | — | Raw WorldState; backwards-compat escape hatch |
 
@@ -261,7 +304,7 @@ Always returns a non-negative integer if observed.
 - `llm/prompts/tactical.md` — condition-writing guidelines
 - `tests/integration/test_evaluator_capabilities.py` — EX and XC categories
 
-**Additional files to update when STRUCTURAL conditions are implemented (Phase 10):**
+**Additional files to update when STRUCTURAL conditions are implemented (Phase 7-10):**
 - `world/model/self_model.py` — self-model query interface exposed to evaluator
 - `REWARD_NAMESPACE.md` — new STRUCTURAL namespace entries
 - `OPEN_DECISIONS.md` — close out OD-6

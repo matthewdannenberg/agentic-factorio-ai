@@ -34,6 +34,15 @@ replaced without touching consumers. This governs the world state layer
 component boundary. Concrete implementations are injected at startup; swapping them
 requires substituting the injected object, not restructuring surrounding code.
 
+### Unified planning stack
+
+Goals and Tasks are both `PlanningItem` subclasses and live on a single unified
+stack (`coordinator._stack: list[PlanningItem]`). The top of the stack is always
+the current unit of work: if it is a `Task`, tick its agent; if it is a `Goal`,
+run its handler. This replaces the previous split between a goal stack and an
+active-task slot, and allows the failure pipeline (sub-goal failure, diagnosis,
+retry) to be expressed naturally as stack operations.
+
 ### Agents own tasks, not goals
 
 Goals are the coordinator's concern. The coordinator translates a Goal into a
@@ -44,9 +53,9 @@ change its decomposition strategy without touching agent implementations.
 
 ### Single active agent per task
 
-At any given time exactly one agent owns the active task. The coordinator selects
-the owning agent by matching `agent_hint` against each agent's `AGENT_ID`. Only
-that agent is ticked until the task resolves.
+At any given time exactly one agent owns the active task (the topmost Task on the
+stack). The coordinator selects the owning agent by matching `agent_hint` against
+each agent's `AGENT_ID`. Only that agent is ticked until the task resolves.
 
 ### Four timescales
 
@@ -73,19 +82,22 @@ that agent is ticked until the task resolves.
 ```
 factorio-agent/
 ├── bridge/          # RCON boundary — nothing outside speaks RCON or knows Lua
+│   └── mod/         # All Factorio mod files — must be added to Factorio as a local mod
 ├── world/
 │   ├── observable/  # WorldState (data), WorldQuery (read), WorldWriter (write)
 │   ├── knowledge/   # KnowledgeBase, TechTree, ProductionTracker
 │   └── model/       # SelfModel, FactoryGraph, ChunkGrid, types
-├── planning/        
-│   ├── goals/       # Goal, GoalTree, GoalSource
-│   ├── tasks/       # Task, TaskLedger
-│   └── evaluation/  # Reward_evaluator, condition_namespace
+├── planning/
+│   ├── planning_item.py  # PlanningItem base class, ItemStatus
+│   ├── goals/            # Goal, GoalTree, GoalSource, GoalQueueEntry
+│   ├── tasks/            # Task, TaskLedger, TaskRecord
+│   └── evaluation/       # RewardEvaluator, condition_namespace, condition_parser
 ├── execution/
 │   ├── agents/      # NavigationAgent, MiningAgent, ExplorationAgent, CraftingAgent
 │   ├── skills/      # NavigateSkill, MineSkill, DestroySkill, CraftSkill, ...
-│   ├── coordinator/ # RuleBasedCoordinator, GoalFrame, StubCoordinator
-│   ├── memory/      # SQLiteBehavioralMemory
+│   ├── coordinator/ # RuleBasedCoordinator, StubCoordinator
+│   ├── predicates.py    # Pure world-state observation predicates
+│   └── preconditions.py # Richer pre-action checks (KB + inventory)
 ├── examination/     # AuditReport, auditor stubs (grows in Phase 10)
 ├── memory/          # Cross-run behavioral memory (may gain more in future phases)
 ├── llm/             # GoalSource, GoalQueue (LLM client in Phase 11)
@@ -119,6 +131,10 @@ and mining driven by `on_tick` handlers. Key Factorio 2.x adaptations:
 - `request_path` collision mask: `{layers={object=true, water_tile=true}}` —
   `object` covers trees/walls/buildings; `water_tile` covers water
 - `movement_status` in `_player_table()`: `"idle"`, `"pathing"`, `"walking"`, `"unreachable"`
+- Natural objects (trees, rocks) have no unit number in Factorio 2.x, so their
+  `entity_id` is 0. This is an implementation detail of the bridge layer; code
+  above the bridge should use `predicates.is_present()` and
+  `predicates.is_reachable()` rather than inspecting `entity_id` directly.
 
 ---
 
@@ -131,22 +147,33 @@ index maintenance. `WorldQuery` is the sole read interface; `WorldWriter` is
 the sole write interface. External code never touches `WorldState` fields
 directly.
 
-Notable additions over the original design:
+Notable fields and additions:
 
 - `WorldState.natural_objects: list[NaturalObject]` — scanned from neutral-force,
   non-resource entities in the scan radius. Used by `MiningAgent` for obstacle
   clearing. Identified by `force="neutral"` and `prototype_type != "resource"`,
   not by name — no hardcoded entity names.
-- `NaturalObject.is_minable` — True when `entity_id != 0` (i.e. the object has
-  a unit number and can be targeted by `MineEntity`).
+- `NaturalObject.is_minable` — reflects whether the Lua mod returned a non-zero
+  entity_id. **Do not use this field as the sole authority for whether an object
+  can be cleared.** In Factorio 2.x trees have no unit number (entity_id=0) so
+  `is_minable` returns False even though they are perfectly minable. Use
+  `can_destroy(obj, kb)` from `execution/predicates.py` instead, which consults
+  the KnowledgeBase record.
 - `EntityState.force` and `EntityState.prototype_type` — populated from
-  the Lua prototype table, used for factory-intersection detection in the
-  coordinator.
-- `ExplorationState.nearby_uncharted_chunks: list[ChunkCoord]` — the bridge
-  returns adjacent uncharted chunks from the current scan, giving the exploration
-  agent a concrete frontier target without requiring full map iteration.
+  the Lua prototype table, used for factory-intersection detection in the coordinator.
+- `ExplorationState.nearby_uncharted_chunks: list[ChunkCoord]` — adjacent uncharted
+  chunks from the current scan, giving the exploration agent a concrete frontier
+  target without requiring full map iteration.
 - `CraftingQueueEntry` and `PlayerState.crafting_queue` — used by `CraftSkill`
   to confirm that a crafting order was accepted.
+- `PlayerState.reachable: set[int]` — entity IDs currently within game-engine
+  reach, as reported by the Lua mod. Used by `predicates.is_reachable()`.
+
+**Known gap (Phase 10):** WorldState has no scan-coverage map. There is no record
+of which sub-regions of a bbox have ever been within a scan radius, and no mechanism
+to generate navigation targets to fill coverage gaps. Any PROXIMAL query over a
+region larger than the scan radius is unreliable without prior navigation. A scan
+coverage layer should be added to WorldState in Phase 10.
 
 #### Knowledge layer (`world/knowledge/`)
 
@@ -165,149 +192,163 @@ technology-dependent minability changes.
 The factory self-model is a layered container. `SelfModel` owns the layers and
 routes `SelfModelPatch` objects to the appropriate one.
 
-**`FactoryGraph`** (`world/model/layers/factory_graph.py`) — the primary
-coordination data structure. A directed graph of `FactoryNode` objects
-representing logical factory components (production lines, resource sites,
-power grids, etc.) connected by `FactoryEdge` objects representing material
-flow. Nodes carry `node_type`, `process_type`, `status`, `bounding_box`,
-`design_capacity`, and `throughput`. Edges carry `item`, `rate`, and
-`transport` type.
+**`FactoryGraph`** (`world/model/layers/factory_graph.py`) — a directed graph of
+`FactoryNode` objects representing logical factory components (production lines,
+resource sites, power grids, etc.) connected by `FactoryEdge` objects representing
+material flow.
 
-**`ChunkGrid`** (`world/model/layers/chunk_grid.py`) — spatial index of
-explored terrain. Stub implementation pending fuller integration with the
-bridge's chunk scanning. Future note: geographically adjacent chunks should
-be connected by an edge in `ChunkGrid` only if it is possible to walk directly
-between them (ruling out ocean tiles). This adjacency model is not yet
-implemented; the current stub treats all charted chunks as reachable.
+**`ChunkGrid`** (`world/model/layers/chunk_grid.py`) — spatial index of explored
+terrain. Stub implementation pending fuller integration.
 
 **`SelfModelPatch`** — the mutation protocol. Agents never write to `SelfModel`
 directly; they emit `SelfModelPatch` objects via `pending_patches()`. The
 coordinator collects and applies them each tick via `SelfModel.apply(patch)`.
-This keeps agents fully decoupled from the self-model's internal structure.
 
 ---
 
 ### Planning (`planning/`)
 
-#### Goals and Tasks
+#### PlanningItem, Goal, and Task
 
-**`Goal`** — a coarse, long-horizon objective. Has `success_condition`,
-`failure_condition`, and optional `milestone_rewards` — all Python expression
-strings evaluated by `RewardEvaluator` against a `WorldQuery` namespace.
+**`PlanningItem`** (`planning/planning_item.py`) — base class for both `Goal` and
+`Task`. Carries: `id`, `description`, `success_condition`, `failure_condition`,
+`status` (unified `ItemStatus` enum), `created_at`, `resolved_at`, `parent_id`.
+All lifecycle transitions live here: `activate`, `suspend`, `complete`, `fail`,
+`escalate`. `parent_id` points to any `PlanningItem` — Goal or Task — supporting
+the failure pipeline.
 
-**`Task`** — a concrete work item derived by the coordinator and assigned to
-a single agent. Also carries condition strings, evaluated by the coordinator
-each tick. Tasks are coordinator-internal; the LLM and `GoalTree` never see them.
+**`Goal`** (`planning/goals/goal.py`) — a strategic or tactical planning objective.
+Adds `priority`, `reward_spec`, `step` (coordinator handler step counter), and
+`context` (handler carry-along state). `GoalStatus` is a backward-compatibility
+alias for `ItemStatus`. The `step` and `context` fields replace the former
+`GoalFrame` dataclass — they are now first-class fields on `Goal` itself.
 
-The distinction matters: goals express what we want, tasks express what we're
-doing right now to get there.
+**`Task`** (`planning/tasks/task.py`) — a concrete work item routed to a specific
+agent. Adds `agent_hint`, `task_type`, `params: dict`, and `derived_locally`.
+`TaskStatus` is a backward-compatibility alias for `ItemStatus`. The constructor
+accepts deprecated `parent_goal_id` and `parent_task_id` kwargs and resolves them
+to `parent_id` for backward compatibility with existing call sites.
 
-#### Condition namespace (`planning/condition_namespace.py`)
+**`GoalTree`** (`planning/goals/goal_tree.py`) — runtime manager for the goal
+hierarchy, including priority-based preemption and parent/child completion
+propagation. Currently not wired into the execution path; reserved for the Phase 11
+LLM layer.
 
-`build_core_namespace(wq, tick, start_tick, start_wq)` returns the `eval()`
-namespace for condition strings. Includes `inventory`, `charted_chunks`,
-`charted_tiles`, `charted_area_km2`, `tick`, `elapsed_ticks`, `new`, `wq`,
-`state`, `research`, `tech_unlocked`, `resources_of_type`, `entities`,
-`entity_by_id`, and safe builtins.
+**`TaskLedger`** (`planning/tasks/task_ledger.py`) — live stack + history log for
+task lifecycle. Populated when tasks pop off the unified coordinator stack.
 
-`_DeltaView` (exposed as `new`) wraps the current `WorldQuery` and a `start_wq`
-snapshot taken at goal activation:
+#### GoalQueueEntry and GoalQueue
 
-```python
-new.tick                    # ticks since goal activation (== elapsed_ticks)
-new.charted_chunks          # chunks charted this goal
-new.inventory('iron-ore')   # ore collected this goal
-```
+**`GoalQueueEntry`** (`planning/goals/goal_source.py`) — serialisable
+representation of a queued planning item. Has a `goal_type` field; `to_goal()`
+constructs a `Goal` for coordinator goal handlers.
 
-**Use `elapsed_ticks > N` (not `tick > N`) in conditions** — absolute tick
-values cause conditions to fire immediately if the game ran before the test.
+`condition_parser` extracts structured params (bbox coords, item names, navigate
+targets) from `success_condition` strings at goal activation time, populating
+`goal_params` passed to `coordinator.reset()`.
 
-#### RewardEvaluator (`planning/reward_evaluator.py`)
+#### Condition namespace and evaluator
 
-Evaluates goal `success_condition` and `failure_condition` strings. Adds to the
-core namespace: `production_rate`, `staleness`, `logistics`, `power`, `threat`,
-`inserters_from/to`.
+**`build_core_namespace(wq, tick, start_tick, start_wq)`** in
+`planning/evaluation/condition_namespace.py` returns the `eval()` namespace for
+all condition strings. Includes `inventory`, `charted_chunks`, `charted_area_km2`,
+`tick`, `elapsed_ticks`, `new` (delta view), `wq`, `state`, `research`,
+`tech_unlocked`, `resources_of_type`, `entities`, `entity_by_id`, `bbox`,
+`navigate_to`, and safe builtins.
+
+`navigate_to(x, y)` — True when player is within 1.5 tiles of (x, y). Used as
+the `success_condition` for navigate tasks.
+
+`bbox(x_min, y_min, x_max, y_max)` — returns a `BBoxQuery` with an `.is_clear`
+property (True when `wq.natural_objects_in_bbox(...)` is empty). PROXIMAL —
+must be staleness-guarded for goals larger than the scan radius.
+
+**`RewardEvaluator`** (`planning/evaluation/reward_evaluator.py`) — evaluates
+`success_condition` and `failure_condition` strings each tick via `eval()` against
+the condition namespace. Also evaluates task conditions via `eval_condition()`,
+called by the coordinator.
 
 ---
 
 ### Execution (`execution/`)
 
+#### Predicates and Preconditions
+
+**`execution/predicates.py`** — pure, cheap observation predicates over
+`WorldQuery` only. No KnowledgeBase. No side effects. Key predicates:
+
+- `is_at(target, wq, tolerance)` — True if player is within tolerance tiles of target.
+- `is_reachable(entity_id, wq)` — True if entity_id is in `wq.state.player.reachable`
+  (the actual game-engine reach set from the Lua mod, not a hardcoded distance).
+- `can_mine(entity_id, wq)` — True if entity is present in scan AND reachable.
+- `is_present(entity_id, position, wq, name, natural_radius)` — True if the target
+  still exists. For `entity_id != 0`: uses entity scan. For `entity_id == 0`
+  (natural objects without a unit number): proximity scan of `wq.natural_objects`.
+- `can_destroy(obj, kb)` — True if KB confirms the natural object is minable.
+  **This is the authoritative check for natural object clearability** — do not use
+  `NaturalObject.is_minable` directly.
+- `player_has_item(item, count, wq)` — True if player inventory has at least count.
+
+**`execution/preconditions.py`** — richer pre-action checks that may involve
+KnowledgeBase, inventory arithmetic, or recipe lookups. Called before committing
+to a task, not in tight tick loops.
+
 #### Skills (`execution/skills/`)
 
-Skills encode multi-step but well-determined sequences of primitive actions
-with built-in success/failure detection. They contain **no decision logic** —
-that belongs to agents and the coordinator.
+Skills encode multi-step, well-determined action sequences with built-in
+success/failure detection. They contain **no decision logic** — that belongs to
+agents and the coordinator. Skills delegate world-state questions to predicates.
 
-Each skill has a `status()` → `SkillStatus` (`IDLE`, `RUNNING`, `SUCCEEDED`,
-`STUCK`) and produces a list of `Action` objects from `tick(wq, ww, tick)`.
-Current skills: `NavigateSkill`, `MineSkill`, `DestroySkill`, `CraftSkill`.
+- `NavigateSkill` — walks the player to a target position or entity.
+- `MineSkill` — gathers resources from a resource patch.
+- `DestroySkill` — deconstructs a single entity. Uses `predicates.is_present()`
+  for target-gone detection (handles `entity_id=0` natural objects correctly) and
+  `predicates.is_reachable()` for reach checks. Exposes `is_target_present(wq)`
+  and `is_target_reachable(wq)` for agents.
+- `CraftSkill` — hand-crafts items.
 
 #### Agents (`execution/agents/`)
 
-Each agent holds references to the skills relevant to its task types. Agents
-read `WorldQuery` (observable world state) but do **not** have access to the
-`SelfModel`. Changes to the self-model are communicated upward via
-`SelfModelPatch` objects accumulated in `pending_patches()`.
+Agents read `WorldQuery` and call skills. They do not inspect Factorio
+implementation details directly (entity_id values, unit numbers, etc.) — those
+concerns belong in predicates.py and skills.
 
-The agent protocol:
-
-```python
-class AgentProtocol:
-    def activate(self, task: Task, blackboard: Blackboard,
-                 wq: WorldQuery, kb: KnowledgeBase) -> None: ...
-    def tick(self, task: Task, blackboard: Blackboard,
-             wq: WorldQuery, ww: WorldWriter, tick: int,
-             kb: KnowledgeBase) -> list[Action]: ...
-    def observe(self, task: Task, blackboard: Blackboard,
-                wq: WorldQuery, kb: KnowledgeBase) -> dict: ...
-    def progress(self, task: Task, blackboard: Blackboard,
-                 wq: WorldQuery, kb: KnowledgeBase) -> float: ...
-    def pending_patches(self) -> list[SelfModelPatch]: ...
-```
-
-Current agents:
-
-- **`NavigationAgent`** — walks the player to a target position or entity.
-  Uses `NavigateSkill`. Writes `navigation_stalled` observation on stall.
-- **`MiningAgent`** — gathers resources and clears regions. Uses `MineSkill`,
-  `DestroySkill`, `NavigateSkill`. Determines clearable objects via
-  `can_destroy()` (KB-driven, no name hardcoding). See the harvest gap comment
-  in `coordinator.py` for the wood/natural-object limitation.
-- **`ExplorationAgent`** — navigates to frontier positions and scans. Uses
-  `NavigateSkill`. Writes `exploration_needs_frontier` (GOAL-scoped) when the
-  local area is exhausted.
-- **`CraftingAgent`** — hand-crafts items. Uses `CraftSkill`.
+Current agents: `NavigationAgent`, `MiningAgent`, `ExplorationAgent`, `CraftingAgent`.
 
 #### Coordinator (`execution/coordinator/`)
 
-The coordinator has access to the `SelfModel` and the player inventory from
-`WorldQuery`. It does **not** make use of the rest of `WorldState` — entity
-scans, logistics, and power state are the concern of agents and skills.
+**Unified planning stack.** The coordinator maintains `_stack: list[PlanningItem]`
+(replaces the former `_goal_stack: list[GoalFrame]` + `_active_task` split). The
+top of the stack is the current unit of work:
 
-The coordinator's primary responsibility is translating Goals into Tasks via
-a hierarchical, depth-first, quasi-recursive state machine.
-
-**Goal stack** — a `list[GoalFrame]`, top = active. Each `GoalFrame` carries
-the goal type, params, a `step` counter, completed/failed flags, and a `context`
-dict for state that must persist across ticks within a handler.
+- **Task on top**: tick its agent, evaluate task success/failure, pop on resolution.
+- **Goal on top**: run its handler, which may push Tasks or sub-Goals onto the stack.
 
 **Goal handlers** — one method per goal type. Each handler is called repeatedly
-across ticks; `frame.step` tracks which decision point the handler has reached.
-Handlers push sub-goals (onto the goal stack) or tasks (to the active task slot).
+across ticks; `goal.step` (a field on `Goal`) tracks which decision point the
+handler has reached. Handlers push sub-goals via `_push_goal()` or tasks via
+`_push_task()`.
 
-**Task activation** — `_push_task(...)` creates a `Task`, selects the owning
-agent via `registry.agent_by_id(hint)`, calls `agent.activate(...)`, and writes
-a blackboard INTENTION entry. Only one task is active at a time.
+**`TASK_GOAL_TYPES`** — a module-level dict mapping goal_type strings that bypass
+the handler machinery and push a `Task` directly. Currently: `"navigate"` →
+`("navigation", "navigate_to")`. Adding a new task-backed goal type requires one
+line here. The routing decision lives in the coordinator because it is
+execution-layer knowledge, not planning-layer knowledge.
 
-**Sub-goal recursion** — handlers call `_push_goal(GOAL_TYPE, params)` to push
-a `GoalFrame`. When the sub-goal completes, it pops from the stack and the
-parent's step advances. This gives the appearance of recursive decomposition
-while keeping the tick loop flat.
+**`_dispatch_as_task(frame, wq, tick)`** — handles goal types in `TASK_GOAL_TYPES`.
+Step 0 calls `_push_task`; step 1 completes the goal frame when the task resolves.
+`condition_parser` extracts structured params (including a `Position` object for
+navigate targets) from the condition string before the coordinator sees them.
+
+**`_bbox_empty_condition(bbox)`** — generates the task `success_condition` for
+`clear_region` goals. Checks `wq.natural_objects_in_bbox(...)` (not
+`state.entities`) with a staleness guard on the `natural_objects` section.
 
 **Goal type vocabulary:**
 
 | Type | Description |
 |---|---|
+| `navigate` | Walk to a position — task-backed, bypasses goal handler |
 | `collection` | Gather N of a resource from known patches |
 | `acquire` | Get N of an item by any means (mine → produce) |
 | `crafting` | Hand-craft N of an item |
@@ -329,15 +370,17 @@ while keeping the tick loop flat.
 - *Cliff gap* — undestroyable objects (cliffs) cause `clear_region` to fail.
   Fix requires technology-change detection for `minable`, `UseItemOnEntity`
   bridge action, and coordinator retry after unlock (Phase 7/10).
+- *Scan coverage gap* — `clear_region` and other PROXIMAL bbox queries are
+  unreliable without prior navigation across the full bbox. A scan coverage map
+  is needed in WorldState (Phase 10). Current bandaid: navigate to bbox corners
+  before issuing clear_region goals.
 
 #### Blackboard (`execution/blackboard.py`)
 
 Shared working memory for the coordinator and agents. Entries have a category
 (`INTENTION`, `OBSERVATION`, `RESERVATION`) and a scope (`GOAL` or `TASK`).
 `TASK`-scoped entries are cleared when the active task resolves.
-`GOAL`-scoped entries persist until the goal completes. The coordinator calls
-`clear_scope(EntryScope.TASK)` on each task resolution and `clear_all()` on
-goal reset.
+`GOAL`-scoped entries persist until the goal completes.
 
 ---
 
@@ -345,8 +388,7 @@ goal reset.
 
 `AuditReport` — a data container for mechanical and rich examination results.
 Carries anomalies, production rates, power state, damage records, and (in rich
-mode) blueprint candidates and LLM observations. The merge protocol lets
-reports accumulated across ticks be collapsed into a single summary.
+mode) blueprint candidates and LLM observations.
 
 Richer examination (self-model reconciliation, blackboard promotion) is Phase 10.
 
@@ -356,8 +398,7 @@ Richer examination (self-model reconciliation, blackboard promotion) is Phase 10
 
 `SQLiteBehavioralMemory` — stores strategy records (what worked for a goal type),
 performance history (per-goal-type statistics), and spatial pattern metadata
-(factory subgraph summaries). Persists across runs. Full strategy matching and
-pattern deduplication are Phase 8 concerns.
+(factory subgraph summaries). Persists across runs.
 
 ---
 
@@ -368,15 +409,14 @@ pattern deduplication are Phase 8 concerns.
 1. Bridge produces a `WorldState` snapshot. `WorldWriter.integrate_snapshot()`
    merges it into live global state.
 
-2. `RewardEvaluator` checks active goal success/failure conditions against
-   `WorldQuery` and `start_wq` snapshot. If triggered, main loop transitions.
+2. `RewardEvaluator` checks active goal `success_condition` and `failure_condition`
+   against `WorldQuery` and `start_wq` snapshot. If triggered, main loop transitions.
 
 3. `coordinator.tick(wq, ww, tick)` is called:
-   - If a task is active: evaluate task success/failure conditions, tick the
-     owning agent, collect its `SelfModelPatch` objects.
-   - If no task is active: run the top `GoalFrame`'s handler, which either
-     pushes a new task or a new sub-goal.
-   - Completed/failed sub-goals propagate upward in the goal stack.
+   - If top of `_stack` is a `Task`: evaluate task conditions, tick the owning
+     agent, collect `SelfModelPatch` objects. Pop on resolution.
+   - If top of `_stack` is a `Goal`: run its handler, which may push Tasks or
+     sub-Goals. Completed/failed items propagate upward.
 
 4. Main loop dispatches returned actions to `bridge/action_executor.py`.
 
@@ -385,24 +425,25 @@ pattern deduplication are Phase 8 concerns.
 
 ### Per-task
 
-**Push:** coordinator calls `_push_task(...)`, creates `Task`, calls
-`agent.activate(task, ...)`, writes blackboard INTENTION entry.
+**Push:** `_push_task(...)` constructs a `Task`, sets it ACTIVE, looks up the
+agent by `agent_hint`, calls `agent.activate(task, bb, wq, kb)`, and appends the
+task to `_stack`.
 
-**Tick:** `agent.tick(task, ...)` called each poll cycle. Agent runs skills
-and returns actions.
+**Tick:** `agent.tick(task, ...)` called each poll cycle. Agent runs skills and
+returns actions.
 
-**Completion:** coordinator evaluates `task.success_condition`. On True:
-clears the active task, calls `_bb.clear_scope(EntryScope.TASK)`, runs the
-goal handler again (advancing `frame.step`) on the same tick.
+**Completion:** coordinator evaluates `task.success_condition` via `_eval`. On
+True: pops the task, calls `_bb.clear_scope(EntryScope.TASK)`, advances the
+parent goal's `step`.
 
-**Failure/Escalation:** `failure_condition` fires → goal marked failed →
-STUCK propagates to the main loop.
+**Failure/Escalation:** `failure_condition` fires → task popped → parent goal's
+`status` set to `ItemStatus.FAILED` → propagates upward to root → `STUCK`.
 
 ### Per-goal
 
-**Initiation:** `coordinator.reset(goal_type, params, wq)` called. Blackboard
-and goal stack cleared. Loop snapshots `WorldQuery` and stores it as `start_wq`
-for `new` delta conditions.
+**Initiation:** `coordinator.reset(goal_type, params, wq)` called. Stack and
+blackboard cleared. A `Goal` with `goal_type` and `params` is pushed as ACTIVE.
+Loop snapshots `WorldQuery` as `start_wq` for `new` delta conditions.
 
 **Resolution:** `RewardEvaluator` detects success or failure. Behavioral memory
 records outcome. Blackboard cleared. `GoalSource` requests next goal.
@@ -418,6 +459,26 @@ layer (coordinator, agents, skills), examination stub, behavioral memory.
 Rule-based coordinator handles collection, exploration, clearing, crafting,
 and research goals. All unit tests pass.
 
+### Phase 6.5 ✅ 
+
+Major architectural refactors completed:
+
+- **Unified planning stack**: `GoalFrame` eliminated; `Goal` carries `step` and
+  `context` directly; `_goal_stack + _active_task` replaced by `_stack: list[PlanningItem]`.
+- **`PlanningItem` base class**: `Goal` and `Task` share a unified lifecycle enum
+  (`ItemStatus`), `parent_id` linkage, and lifecycle methods.
+- **`navigate` goal type**: Task-backed goal type that walks the player to a
+  position. Used by in-game tests for scan coverage before `clear_region`.
+- **`clear_region` working end-to-end**: trees/rocks now cleared correctly.
+  Fixed: `is_minable` guard removed from clear_natural path; `_bbox_empty_condition`
+  now checks `natural_objects_in_bbox`; `DestroySkill` uses `predicates.is_present`
+  and `predicates.is_reachable` instead of reimplementing game mechanics.
+- **Predicate layer**: `is_present` added to `predicates.py`. Skills delegate all
+  world-state questions to predicates rather than implementing them inline.
+- **`condition_parser`**: extracts structured params (`bbox`, `navigate_to` coords)
+  from condition strings; produces `Position` objects for navigate targets.
+- **`TASK_GOAL_TYPES`**: routing table in coordinator for task-backed goal types.
+
 ### Phase 7 — Construction agent (RL)
 
 The construction agent places entities, connects inserters and belts, and
@@ -426,28 +487,26 @@ verifies that placed infrastructure is functional. Also planned for Phase 7:
 
 ### Phase 8 — Production agent
 
-First learned agent. Handles recipe selection, machine configuration, and
-production chain management. The `production` and `byproduct` coordinator stubs
-become real.
+First learned agent. The `production` and `byproduct` coordinator stubs become real.
 
 ### Phase 9 — Spatial-logistics agent
 
 Spatial reasoning and logistics: belt routing, inserter placement, layout.
-The `logistics` coordinator stub becomes real. Internal structure (one agent
-or two) decided at phase start — see OD-5.
+The `logistics` coordinator stub becomes real.
 
-### Phase 10 — Examination layer revision
+### Phase 10 — Examination layer revision + WorldState refactor
 
-Examination gains self-model reconciliation, blackboard promotion, and structured
-factory summaries. `RewardEvaluator` namespace extended with STRUCTURAL conditions
-backed by the self-model — see OD-6. Technology-change detection (cliff gap fix)
-planned here.
+- Examination gains self-model reconciliation, blackboard promotion, structured
+  factory summaries.
+- `RewardEvaluator` namespace extended with STRUCTURAL conditions (OD-6).
+- **WorldState scan coverage map** — track which regions have been observed;
+  generate navigation targets for unobserved sub-regions of a bbox query.
+- Technology-change detection (cliff gap fix).
 
 ### Phase 11 — LLM layer revision
 
-Real LLM client capable of replacing `GoalQueue`. Receives self-model summary and behavioral
-memory statistics. Handles escalation via `StuckContext`. The `noop` coordinator
-stub becomes real.
+Real LLM client replacing `GoalQueue`. Receives self-model summary and behavioral
+memory statistics. The `noop` coordinator stub becomes real.
 
 ### Deferred
 
@@ -472,6 +531,9 @@ See `OPEN_DECISIONS.md` for full discussion.
 - **OD-6** — RewardEvaluator namespace extension for self-model (STRUCTURAL conditions)
 - **OD-7** — NodeType-specific FactoryNode subclasses
 - **OD-8** — Agent architecture: thin protocol vs behavioral composition
+- **OD-9** — WorldState dialect: translate Factorio internals into a convenient
+  agent-facing representation rather than exposing raw game concepts (entity_id=0,
+  unit numbers, etc.) to the planning and execution layers.
 
 ---
 

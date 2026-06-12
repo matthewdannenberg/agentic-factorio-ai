@@ -17,53 +17,32 @@ then update the relevant section of `ARCHITECTURE.md`.
 **What we know:**
 - Observations should be goal-conditioned — state expressed relative to goal
   structure rather than in absolute game terms
-- This normalisation is what makes structurally similar goals (different recipes,
-  same task type) produce structurally similar observations
-- The KnowledgeBase production chain queries make goal-relative construction
-  tractable
+- The KnowledgeBase production chain queries make goal-relative construction tractable
 
 **What is undecided:**
 - Whether observation spaces are fixed per goal type or evolve over time
 - Whether a single unified observation space or per-agent spaces
-- Whether the representation should be high-dimensional and fixed, or lower-
-  dimensional and adaptive
-- How to handle goals that don't map cleanly to a single goal type
+- Whether the representation should be high-dimensional and fixed, or lower-dimensional and adaptive
 
-**Where the decision lives:** `execution/observation.py` and individual agent
-implementations. Nothing outside these files assumes anything about observation
-shape.
-
-**Research needed:** representation learning approaches for goal-conditioned RL;
-universal value function approximators (UVFAs); whether adaptive representations
-are worth the added complexity given the training stability cost.
+**Where the decision lives:** `execution/observation.py` and individual agent implementations.
 
 ---
 
 ## OD-2 — Coordinator Learning
 
-**Question:** Does the coordinator transition from rule-based to learned, and if
-so, how and when?
+**Question:** Does the coordinator transition from rule-based to learned, and if so, how and when?
 
 **What we know:**
-- The coordinator starts rule-based — routes goals to agents by goal type, derives
-  simple subtask trees from KB and self-model
-- A learned coordinator could handle more complex goal-agent routing, conflict
-  resolution, and subtask sequencing
+- The coordinator starts rule-based
+- A learned coordinator could handle more complex goal-agent routing and subtask sequencing
 - The coordinator satisfies `CoordinatorProtocol` regardless of implementation
 
 **What is undecided:**
-- Whether coordinator learning is necessary or whether a sophisticated rule-based
-  coordinator is sufficient
-- If learned: which MARL coordination approach (centralised training with
-  decentralised execution, emergent communication, explicit communication channels)
-- When to transition — after individual agents are stable, or jointly from the start
+- Whether coordinator learning is necessary or whether rule-based is sufficient
+- If learned: which MARL coordination approach
+- When to transition
 
-**Where the decision lives:** `execution/coordinator/coordinator.py`. The protocol boundary
-means this can be swapped without touching agents or the execution protocol.
-
-**Research needed:** MARL coordination literature; whether the coordination problem
-here is hard enough to warrant learned coordination or whether rule-based routing
-with learned agents is sufficient.
+**Where the decision lives:** `execution/coordinator/coordinator.py`.
 
 ---
 
@@ -72,22 +51,16 @@ with learned agents is sufficient.
 **Question:** What self-model information survives a run and in what form?
 
 **What we know:**
-- The self-model graph represents this factory — it starts empty each run
+- The self-model graph starts empty each run
 - Something useful should cross the run boundary into behavioral memory
-- Candidates: full graph (probably too run-specific), subgraph summaries,
-  spatial patterns that proved effective, throughput benchmarks
+- Candidates: subgraph summaries, spatial patterns, throughput benchmarks
 
 **What is undecided:**
 - Exactly what is extracted at end-of-run
 - How spatial patterns are represented in behavioral memory
-- Whether pattern similarity matching is needed to avoid duplicates across runs
-- How this feeds the eventual blueprint system
+- Whether pattern similarity matching is needed
 
 **Where the decision lives:** `world/model/self_model.py` and `memory/behavioral.py`.
-The interface between them (what gets passed at end-of-run) is the key boundary.
-
-**Research needed:** graph summarisation approaches; whether learned spatial patterns
-need explicit representation or emerge implicitly from policy structure.
 
 ---
 
@@ -110,39 +83,24 @@ need explicit representation or emerge implicitly from policy structure.
 - How to handle the partial observability introduced by scan radius limits
 - Online vs offline learning (learning during play vs between runs)
 
-**Where the decision lives:** individual agent implementations. Each satisfies
-`AgentProtocol` regardless of algorithm. Training harness is internal to each agent.
-
-**Research needed:** RL approaches for real-time strategy games; handling of
-partial observability; whether the goal-conditioned observation space design
-(OD-1) constrains algorithm choice.
+**Where the decision lives:** individual agent implementations.
 
 ---
 
 ## OD-5 — Spatial-Logistics Internal Structure
 
-**Question:** Is the spatial-logistics concern handled by one agent or two
-coordinating agents?
+**Question:** Is the spatial-logistics concern handled by one agent or two coordinating agents?
 
 **What we know:**
 - Spatial reasoning (layout, placement, region designation) and logistics reasoning
   (belt routing, inserter placement, throughput) are deeply interdependent
 - Separating them creates coordination overhead that may exceed the benefit
-- Both will be doing significant work at essentially all times during factory building
 
 **What is undecided:**
-- Whether a single agent with richer internal structure handles both concerns
+- Whether a single agent with richer internal structure handles both
 - Or two agents with heavy blackboard coordination
-- Whether the MARL literature suggests a natural factoring for spatially-entangled
-  concerns of this kind
 
-**Where the decision lives:** `execution/agents/spatial_logistics.py` (or
-split into two files if two agents). The coordinator routes to this subsystem;
-the internal structure is invisible above that boundary.
-
-**Research needed:** MARL approaches for spatially-coupled tasks; whether emergent
-coordination between two agents can learn the entanglement or whether it needs to
-be explicitly modelled in a single agent.
+**Where the decision lives:** `execution/agents/spatial_logistics.py`.
 
 ---
 
@@ -152,60 +110,37 @@ be explicitly modelled in a single agent.
 the self-model in addition to `WorldQuery`, and what does that namespace look like?
 
 **What we know:**
-- The current evaluator evaluates condition strings against a namespace derived
-  from `WorldQuery`. This works well for directly observable conditions: inventory
-  counts, research state, exploration progress, time, damage events.
-- Many goals the LLM will set are structural and persistent — "establish iron plate
-  production at 30 plates/second", "connect ore site to smelting line" — and are
-  more naturally and reliably evaluated against the self-model than against
-  scan-radius-limited WorldQuery.
-- The self-model is non-proximal by nature: it is persistent, globally accurate,
-  and not subject to staleness in the way entity scans are.
-- The proximal/non-proximal distinction in `CONDITION_SCOPE.md` should eventually
-  gain a third category — STRUCTURAL — for self-model-backed conditions.
-
-**What is undecided:**
-- Exactly which self-model queries belong in the evaluator namespace
-- Whether STRUCTURAL conditions should be guarded differently from NON-PROXIMAL
-  ones (the self-model can lag behind game reality if the examination layer hasn't
-  run recently — this is a different kind of staleness from scan radius limits)
-- Whether the self-model namespace entries should be added to the existing evaluator
-  or whether a separate structural evaluator is cleaner
-- How to express self-model staleness in condition strings — the existing
-  `staleness(section)` mechanism is WorldQuery-scoped and doesn't apply
+- Many goals the LLM will set are structural ("establish iron plate production")
+  and are more naturally evaluated against the self-model
+- The self-model is non-proximal and not subject to scan-radius staleness
 
 **Proposed namespace entries (tentative):**
 ```python
-production_line(item)       # -> FactoryNode | None — active producer of item
-production_capacity(item)   # -> float — total throughput in units per minute
-has_infrastructure(type)    # -> bool — any active node of given type exists
-connected(node_a, node_b)   # -> bool — path exists between nodes in self-model
-sm_staleness()              # -> int — ticks since examination layer last reconciled
+production_line(item)       # -> FactoryNode | None
+production_capacity(item)   # -> float — throughput in units per minute
+has_infrastructure(type)    # -> bool
+connected(node_a, node_b)   # -> bool
+sm_staleness()              # -> int — ticks since examination last reconciled
 ```
 
-**Where the decision lives:** `planning/reward_evaluator.py` (namespace extension)
-and `CONDITION_SCOPE.md` (new STRUCTURAL scope category). The self-model is passed
-into the evaluator alongside `WorldQuery`; callers that don't have a self-model
-pass `None` and structural conditions evaluate to `False` rather than raising.
+**Where the decision lives:** `planning/reward_evaluator.py` and `CONDITION_SCOPE.md`.
 
-**When this becomes relevant:** Phase 10, when the examination layer gains
-self-model reconciliation responsibilities and the self-model is reliably populated.
-Until then, structural conditions are not useful even if the namespace exists.
+**When relevant:** Phase 7, when the self-model is reliably populated.
 
-**Files to update when this is implemented:**
-- `planning/reward_evaluator.py` — `_build_namespace()` and docstrings
-- `CONDITION_SCOPE.md` — new STRUCTURAL scope category and summary table
-- `REWARD_NAMESPACE.md` — new namespace entries
-- `ARCHITECTURE.md` — RewardEvaluator description
-- `world/model/self_model.py` — self-model query interface exposed to evaluator
-- `tests/integration/test_evaluator_capabilities.py` — new SM category
+**Files to update when implemented:**
+- `planning/reward_evaluator.py`
+- `CONDITION_SCOPE.md`
+- `REWARD_NAMESPACE.md`
+- `ARCHITECTURE.md`
+- `world/model/self_model.py`
+- `tests/integration/test_evaluator_capabilities.py`
 
 ---
 
 ## OD-7 — NodeType-Specific FactoryNode Attributes
 
-**Question:** Should different NodeType values have different attributes, and if
-so, should that be modelled through subclasses of FactoryNode?
+**Question:** Should different NodeType values have different attributes, modelled
+through `FactoryNode` subclasses?
 
 **What we know:**
 - The current `FactoryNode` carries a `throughput: dict[str, float]` field
@@ -220,78 +155,70 @@ so, should that be modelled through subclasses of FactoryNode?
   this, and is localized to `world/model/self_model.py` and the examination layer.
 
 **What is undecided:**
-- Whether `throughput` plus ad-hoc extra fields in the examination layer is
-  sufficient through Phase 10, or whether type-specific subclasses are needed
-  before that.
-- If subclasses: whether the graph queries (`query_nodes`, `find_producers`,
-  etc.) need to be updated to return typed subclasses, or whether a generic
-  `extra: dict` field is a simpler interim.
+- Whether `throughput` plus ad-hoc extra fields is sufficient through Phase 10
+- If subclasses: whether graph queries need to return typed subclasses
 
-**Where the decision lives:** `world/model/self_model.py`. The graph interface
-(`SelfModelProtocol`) does not need to change — only the node dataclass and
-the examination layer code that writes to it.
+**When relevant:** Phase 10.
 
-**When this becomes relevant:** Phase 10, when the examination layer begins
-writing type-specific verification data to nodes (throughput metrics for
-production lines, wattage for power grids, etc.).
-
-**Proposed approach when implemented:**
-- Introduce typed subclasses (`ProductionLineNode`, `PowerGridNode`, etc.)
-  each adding their own fields
-- `SelfModel.add_node()` accepts any `FactoryNode` subclass
-- `FactoryGraph.get_nodes_by_type(NodeType.POWER_GRID)` returns `list[FactoryNode]`
-  (caller casts to the subtype); or add a typed variant `get_nodes_typed(type, cls)`
-- Keep `throughput` on the base class; it remains the common currency for
-  cross-type capacity queries
+**Where the decision lives:** `world/model/self_model.py`.
 
 ---
 
 ## OD-8 — Agent Architecture: Thin Protocol vs Behavioral Composition
 
-**Question:** Is the current thin `AgentProtocol` + single-responsibility agent design
-the right long-term architecture, or should agents be able to compose reusable
-behavioral units internally?
+**Question:** Is the thin `AgentProtocol` + single-responsibility design the right
+long-term architecture, or should agents compose reusable behavioral units internally?
 
-**What we know:**
-- The current design keeps `AgentProtocol` minimal (`activate`, `tick`, `observe`,
-  `progress`) and delegates multi-step goal decomposition entirely to the coordinator,
-  which derives sequential subtasks each handled by a single-responsibility agent.
-- This is clean and testable through Phases 6–7. The coordinator owns all routing
-  logic; agents are small and focused.
-- The "fat base class" alternative (moving shared implementation into `AgentProtocol`
-  and having subclasses override) is almost certainly worse — the things different
-  agents need are qualitatively different, not just different quantities of the same
-  thing. The RL agents in particular (production, spatial-logistics) will need
-  observation spaces, policy networks, and replay buffers that have nothing in common
-  with rule-based navigation state.
-- A middle path — **behavioral composition** — was identified as the likely right
-  answer at scale: a `behaviors/` module containing `NavigationBehavior`,
-  `MiningBehavior`, etc., which agents can hold references to and delegate tick logic
-  into. The agent's `tick()` becomes a state machine over these behaviors rather than
-  monolithic logic. Behaviors are only extracted when reused by ≥2 agents or when
-  their internal complexity (stall detection, grace periods, state machines) justifies
-  isolation in its own right.
+**Conclusion:**
+The `execution/skills/` directory was established to contain reusable behavioral units.
+The behavior within skills is largely logic-free - actual decisions are made by agents,
+the skills serve as replicable patterns which can execute extended sequences of commands
+in order to achieve a particular goal. These can be used by multiple agents.
+Examples include NavigateSkill, DestroySkill, CraftSkill, MineSkill, etc.
+
+---
+
+## OD-9 — WorldState Dialect
+
+**Question:** Should WorldState translate Factorio internals into a convenient
+agent-facing representation, rather than exposing raw game concepts directly?
+
+**The problem:**
+The current WorldState exposes Factorio implementation details that leak into the
+planning and execution layers:
+- `entity_id=0` for natural objects (trees, rocks have no unit number in Factorio 2.x)
+- `NaturalObject.is_minable` is unreliable (False for trees even though they are minable)
+- `PlayerState.reachable` exposes a raw set of integer entity IDs
+
+These have caused repeated bugs (trees skipped because `is_minable` is False;
+entities considered reachable because they're in the scan radius rather than within
+mining reach; etc.). Each fix has required special-casing in predicates, skills, and
+agents. The root cause is that WorldState speaks Factorio rather than speaking to the
+agent's needs.
+
+**Proposed direction:**
+The bridge/parser layer should translate Factorio internals into stable, semantically
+correct agent concepts before they reach WorldState:
+- Natural objects should carry an explicit `is_minable: bool` that reflects KB knowledge,
+  not raw `entity_id != 0`
+- Reachability should be expressed as a distance or a flag that reflects actual
+  game-engine mining reach, not a raw entity ID set
+- The `entity_id=0` pattern should be invisible above the bridge; natural objects
+  should have a stable identity scheme that doesn't require callers to special-case 0
 
 **What is undecided:**
-- Whether the coordinator-derives-subtasks pattern will remain clean as goal types
-  proliferate, or whether construction and production agents will need to handle
-  multi-step internal sequences (navigate-then-place, navigate-then-mine-then-craft)
-  that don't decompose naturally into atomic coordinator-derived subtasks.
-- Whether RL agents that need to navigate *and* act will benefit from a unified
-  observation space (requiring a single agent that composes behaviors) vs the current
-  sequential-subtask model (which splits the observation across two agents).
-- The exact interface for behavioral units if they are introduced — they need access
-  to blackboard, WorldQuery, and KnowledgeBase, making them substantial objects rather
-  than lightweight helpers.
+- The exact representation (richer NaturalObject fields? A separate natural object
+  identity scheme? A post-parse enrichment step using the KB?)
+- Whether this belongs in the bridge parser, the WorldWriter, or a new enrichment
+  layer between them
+- How to handle the bootstrap problem (KB needs to be populated before enrichment
+  can be correct)
 
-**When this becomes relevant:** The construction agent (Phase 7) is the first test.
-If writing it requires reimplementing navigation logic, or if the coordinator's
-construction derivation becomes complex because construction has multi-step structure
-that doesn't decompose cleanly into atomic subtasks, that is the signal to introduce
-the behavioral composition layer before proceeding to Phase 8.
+**Where the decision lives:** `bridge/state_parser.py`, `world/observable/state.py`,
+`world/observable/writer.py`.
 
-**Where the decision lives:** `execution/agents/base.py` and the agent
-implementations. A `behaviors/` module would live at `execution/behaviors/`.
+**When relevant:** Phase 10, in conjunction with the WorldState refactor already
+planned for that phase.
 
 ---
 
@@ -299,4 +226,6 @@ implementations. A `behaviors/` module would live at `execution/behaviors/`.
 
 | ID | Decision | Date | Notes |
 |---|---|---|---|
-| — | — | — | No decisions recorded yet |
+| — | Unified planning stack | Session 4 | GoalFrame eliminated; Goal carries step/context; _stack replaces _goal_stack + _active_task |
+| — | navigate as TASK_GOAL_TYPE | Session 4 | task-backed goal type; no coordinator handler needed |
+| — | Predicates own world-state logic | Session 4 | is_present, is_reachable, can_destroy in predicates.py; skills delegate to them |
