@@ -208,13 +208,15 @@ When generating a `success_condition` or `failure_condition` string:
    success_condition="bbox(-50,-50,50,50).is_clear"
    ```
 
-   A scan coverage map (Phase 10) will eventually provide a principled solution.
-   Until then, the staleness guard is also recommended:
+   A scan coverage map was added in Phase 6.6: `WorldState.tile_map` now records
+   the last observation tick for every tile, and `WorldWriter` computes the
+   scanned tile set each poll. The staleness guard remains recommended for
+   condition strings that must work before a full scan of the region:
 
    ```python
    # Guard so condition only fires when scan is fresh
-   "staleness('natural_objects') is not None and "
-   "staleness('natural_objects') < 300 and "
+   "staleness('entities') is not None and "
+   "staleness('entities') < 300 and "
    "len(wq.natural_objects_in_bbox(-50,-50,50,50)) == 0"
    ```
 
@@ -223,7 +225,7 @@ When generating a `success_condition` or `failure_condition` string:
    charted_area_km2 >= 1.0   # explored at least 1 square kilometre
    ```
 
-7. **Use the `wq` composable builder for compound entity conditions.** The
+8. **Use the `wq` composable builder for compound entity conditions.** The
    `wq` name in the namespace gives access to the full `WorldQuery` interface,
    including the `EntityQuery` builder. This is more reliable than ad-hoc
    Python comprehensions over raw lists because it uses pre-built indices and
@@ -287,7 +289,7 @@ Always returns a non-negative integer if observed.
 | `connected(node_a, node_b)` | **STRUCTURAL** | Self-model: path exists between nodes (Phase 10+) |
 | `sm_staleness()` | META | Use to guard structural conditions (Phase 10+) |
 | `navigate_to(x, y)` | PROXIMAL | True when player within 1.5 tiles; used as navigate task success_condition |
-| `bbox(x,y,x,y).is_clear` | **PROXIMAL** | True when natural_objects_in_bbox is empty; requires prior navigation for large bboxes |
+| `bbox(x,y,x,y).is_clear` | **PROXIMAL** | True when natural_objects_in_bbox is empty; guard with `staleness('entities')` for large bboxes |
 | `wq` | — | WorldQuery object; composable builder; non-proximal methods safe anywhere |
 | `state` | — | Raw WorldState; backwards-compat escape hatch |
 

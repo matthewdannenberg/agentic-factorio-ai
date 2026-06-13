@@ -11,9 +11,11 @@ start() parameters
 ------------------
 target_position  : Tile-space Position to walk to. Mutually exclusive with
                    target_entity_id, but one must be provided.
-target_entity_id : Entity id to walk toward (uses entity's current position).
-                   On each tick the entity's position is re-resolved from wq,
-                   so the skill tracks moving entities correctly.
+target_entity_id : System entity ID (sys_id assigned by WorldWriter) to walk
+                   toward. Uses the entity's current position from wq on each
+                   tick, so the skill tracks moving entities correctly.
+                   Arrival is detected via is_reachable(sys_id, wq) — True
+                   when the entity's sys_id is in the player's reachable set.
 
 Status transitions
 ------------------

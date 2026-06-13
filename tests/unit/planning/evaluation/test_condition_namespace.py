@@ -357,14 +357,15 @@ class TestEvalIntegration(unittest.TestCase):
 
 class TestNaturalObjectsInBboxMethod(unittest.TestCase):
     def _obj(self, x, y):
-        from unittest.mock import MagicMock
-        o = MagicMock()
-        o.position = Position(x=float(x), y=float(y))
-        return o
+        from world import EntityState
+        return EntityState(
+            entity_id=0, name="tree-01",
+            position=Position(x=float(x), y=float(y)),
+            force="neutral", is_natural=True,
+        )
 
     def _wq(self, objects):
-        ws = WorldState()
-        ws.natural_objects = objects
+        ws = WorldState(entities=objects)
         ws._rebuild_entity_indices()
         return WorldQuery(ws)
 
@@ -392,14 +393,15 @@ class TestNaturalObjectsInBboxMethod(unittest.TestCase):
 
 class TestBBoxQueryInNamespace(unittest.TestCase):
     def _obj(self, x, y):
-        from unittest.mock import MagicMock
-        o = MagicMock()
-        o.position = Position(x=float(x), y=float(y))
-        return o
+        from world import EntityState
+        return EntityState(
+            entity_id=0, name="tree-01",
+            position=Position(x=float(x), y=float(y)),
+            force="neutral", is_natural=True,
+        )
 
     def _wq(self, objects):
-        ws = WorldState()
-        ws.natural_objects = objects
+        ws = WorldState(entities=objects)
         ws._rebuild_entity_indices()
         return WorldQuery(ws)
 
@@ -453,6 +455,7 @@ class TestEntityQueryBbox(unittest.TestCase):
         e.prototype_type = proto
         e.status = EntityStatus.WORKING
         e.recipe = None
+        e.is_natural = False
         return e
 
     def _wq(self, entities):
@@ -508,12 +511,21 @@ class TestBBoxQueryEntities(unittest.TestCase):
         e.prototype_type = "container"
         e.status = EntityStatus.WORKING
         e.recipe = None
+        e.is_natural = False
         return e
 
     def _wq(self, entities=None, naturals=None):
-        from unittest.mock import MagicMock
-        ws = WorldState(entities=entities or [])
-        ws.natural_objects = naturals or []
+        from world import EntityState
+        nat_states = [
+            EntityState(
+                entity_id=0, name="tree-01",
+                position=n.position,
+                force="neutral", is_natural=True,
+            )
+            for n in (naturals or [])
+        ]
+        all_entities = list(entities or []) + nat_states
+        ws = WorldState(entities=all_entities)
         ws._rebuild_entity_indices()
         return WorldQuery(ws)
 

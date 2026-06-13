@@ -35,8 +35,7 @@ from typing import TYPE_CHECKING
 from world import Position
 
 if TYPE_CHECKING:
-    from world import WorldQuery, KnowledgeBase
-    from world import NaturalObject, Position
+    from world import WorldQuery, KnowledgeBase, EntityState, Position
 
 
 def is_at(
@@ -61,28 +60,28 @@ def is_at(
 
 def is_reachable(entity_id: int, wq: "WorldQuery") -> bool:
     """
-    True if *entity_id* is in the player's current reachable set.
+    True if *entity_id* (a sys_id) is in the player's current reachable set.
 
-    The reachable set is populated by the bridge from Factorio's reach radius
-    as reported by the Lua mod — it reflects the actual game-engine reach,
-    not a hardcoded Python constant.
+    The reachable set is populated by WorldWriter each poll: placed entities
+    are included if their Factorio unit_number was in the bridge-reported reach
+    set; natural objects are included if their position is within
+    player.reach_distance tiles of the player. All entries are sys_ids.
 
     Used by agents to decide whether to interact with an entity immediately
-    or navigate closer first, and as a cut-off condition for NavigateSkill
-    when navigating toward entity targets.
-
-    Returns False if the entity is not present in the scan or not reachable.
+    or navigate closer first, and as a gate for immediate action dispatch.
     """
     return entity_id in wq.state.player.reachable
 
 
 def can_mine(entity_id: int, wq: "WorldQuery") -> bool:
     """
-    True if *entity_id* is present in the current scan and reachable.
+    True if *entity_id* is present in the accumulated entity list and reachable.
 
-    A convenience wrapper: an entity that is not in the scan cannot be mined
-    even if it appears reachable by id. This can happen when the player has
-    moved since the last scan and the entity is now outside scan radius.
+    Both conditions are checked as a defensive guard: reachability implies the
+    entity was within reach distance on the most recent poll, but checking
+    entity presence additionally guards against sys_ids that have since been
+    removed from the entity list (confirmed gone by the writer) but whose
+    sys_id might theoretically linger in a stale reachable set.
 
     Used by agents before issuing MineEntity actions.
     """
@@ -100,51 +99,30 @@ def player_has_item(item: str, count: int, wq: "WorldQuery") -> bool:
     """
     return wq.inventory_count(item) >= count
 
-def is_present(
-    entity_id: int,
-    position: "Position",
-    wq: "WorldQuery",
-    name: str = "",
-    natural_radius: float = 1.5,
-) -> bool:
+def is_present(sys_id: int, wq: "WorldQuery") -> bool:
     """
-    True if the target entity currently exists in the world.
+    True if the entity with the given sys_id currently exists in the world.
 
-    For entities with a real unit number (entity_id != 0): checks the entity
-    scan via wq.entity_by_id().
-
-    For natural objects (entity_id == 0, e.g. trees in Factorio 2.x): scans
-    wq.natural_objects by proximity — present if any object with the same name
-    exists within *natural_radius* tiles of *position*. Natural objects have
-    no unit number so entity_by_id cannot be used.
+    Works uniformly for both placed entities and natural objects — all entities
+    now carry stable sys_ids assigned by WorldWriter and live in the unified
+    wq.state.entities list. The old two-case logic (entity_id=0 proximity scan
+    for natural objects) is no longer needed.
 
     Used by DestroySkill to detect completion and by MiningAgent to detect
     that a harvest target has been cleared.
     """
-    if entity_id != 0:
-        return wq.entity_by_id(entity_id) is not None
-
-    # Natural object: proximity check
-    r2 = natural_radius * natural_radius
-    for obj in wq.natural_objects:
-        if name and obj.name != name:
-            continue
-        dx = obj.position.x - position.x
-        dy = obj.position.y - position.y
-        if dx * dx + dy * dy < r2:
-            return True
-    return False
+    return wq.entity_by_id(sys_id) is not None
 
 
-def can_destroy(obj: "NaturalObject", kb: "KnowledgeBase") -> bool:
+def can_destroy(obj: "EntityState", kb: "KnowledgeBase") -> bool:
     """
     True if the player can destroy this natural object with a plain MineEntity
     action (no special item or technology required).
 
-    The check is made against the KnowledgeBase's EntityRecord, which stores
-    prototype mineable_properties.minable learned at runtime from
-    fa.get_entity_prototype. This works correctly for any total-conversion
-    mod — nothing is hardcoded about entity names.
+    Takes an EntityState with is_natural=True. The check is made against the
+    KnowledgeBase's EntityRecord, which stores prototype mineable_properties.minable
+    learned at runtime from fa.get_entity_prototype. This works correctly for
+    any total-conversion mod — nothing is hardcoded about entity names.
 
     The KB record is the sole authority. Unknown entities (no record or
     placeholder) are conservatively treated as not destroyable until the

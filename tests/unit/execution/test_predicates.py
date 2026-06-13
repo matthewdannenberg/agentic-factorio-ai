@@ -3,7 +3,7 @@ tests/unit/execution/test_predicates.py
 
 Unit tests for execution/predicates.py
 
-Covers: is_at, is_reachable, can_mine, player_has_item, can_destroy
+Covers: is_at, is_reachable, can_mine, player_has_item, is_present, can_destroy
 
 Run with:  python -m pytest tests/unit/execution/test_predicates.py -v
 """
@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import MagicMock
 
-from execution.predicates import is_at, is_reachable, can_mine, player_has_item, can_destroy
-from world import Position, NaturalObject
+from execution.predicates import is_at, is_reachable, can_mine, player_has_item, can_destroy, is_present
+from world import Position, EntityState
 
 
 # ===========================================================================
@@ -48,8 +48,9 @@ class _WQ:
 
 
 def _nat(name="tree-01", eid=1, proto="tree"):
-    return NaturalObject(entity_id=eid, name=name,
-                        position=Position(0, 0), prototype_type=proto)
+    return EntityState(entity_id=eid, name=name,
+                       position=Position(0, 0), prototype_type=proto,
+                       is_natural=True, force="neutral")
 
 
 def _kb_with(name, minable=True, placeholder=False):
@@ -170,12 +171,51 @@ class TestPlayerHasItem(unittest.TestCase):
 
 
 # ===========================================================================
+# is_present
+# ===========================================================================
+
+class TestIsPresent(unittest.TestCase):
+    """
+    is_present(sys_id, wq) — uniform lookup for both placed and natural entities.
+
+    All entities (placed and natural) now carry stable sys_ids and live in the
+    unified wq.state.entities list. No two-case logic is needed.
+    """
+
+    def test_present_when_entity_found(self):
+        wq = _WQ()
+        wq.add_entity(42)
+        self.assertTrue(is_present(42, wq))
+
+    def test_absent_when_entity_not_found(self):
+        wq = _WQ()
+        self.assertFalse(is_present(42, wq))
+
+    def test_natural_object_present_by_sys_id(self):
+        # Natural objects have sys_ids just like placed entities.
+        wq = _WQ()
+        wq.add_entity(7)
+        self.assertTrue(is_present(7, wq))
+
+    def test_natural_object_absent_after_removal(self):
+        wq = _WQ()
+        # sys_id 7 was never added — represents a natural object that's gone.
+        self.assertFalse(is_present(7, wq))
+
+    def test_zero_sys_id_absent(self):
+        # entity_id=0 is a placeholder; should never appear in the live state
+        # but if it does, it is not in the entity list and returns False.
+        wq = _WQ()
+        self.assertFalse(is_present(0, wq))
+
+
+# ===========================================================================
 # can_destroy
 # ===========================================================================
 
 class TestCanDestroy(unittest.TestCase):
     """
-    can_destroy checks NaturalObject.is_minable and EntityRecord.minable.
+    can_destroy checks the KB's EntityRecord.minable for a natural EntityState.
 
     Key insight from live testing: mineable_properties.minable=True for
     trees, rocks, machines, and chests (all MineEntity-destroyable).
@@ -211,12 +251,6 @@ class TestCanDestroy(unittest.TestCase):
         kb  = _kb_with("modded-locked-obstacle", minable=False)
         self.assertFalse(can_destroy(obj, kb))
 
-    def test_zero_entity_id_not_destroyable(self):
-        obj = NaturalObject(entity_id=0, name="cliff",
-                            position=Position(0, 0), prototype_type="cliff")
-        kb  = _kb_with("cliff", minable=False)
-        self.assertFalse(can_destroy(obj, kb))
-
     def test_unknown_entity_not_destroyable(self):
         obj = _nat("modded-unknown-thing", eid=5)
         kb  = _kb_unknown()
@@ -227,6 +261,13 @@ class TestCanDestroy(unittest.TestCase):
         kb  = MagicMock()
         kb.get_entity.return_value = _make_placeholder()
         self.assertFalse(can_destroy(obj, kb))
+
+    def test_kb_lookup_uses_entity_name(self):
+        # can_destroy looks up obj.name in the KB — the sys_id is irrelevant.
+        obj = _nat("tree-01", eid=99, proto="tree")
+        kb  = _kb_with("tree-01", minable=True)
+        self.assertTrue(can_destroy(obj, kb))
+        kb.get_entity.assert_called_with("tree-01")
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ from execution.coordinator.coordinator import (
 from planning.goals.goal import Goal
 from planning.planning_item import ItemStatus
 from execution.blackboard import Blackboard, EntryCategory, EntryScope
-from world import Position, NaturalObject
+from world import Position, EntityState
 from world.observable.state import ChunkCoord
 
 
@@ -72,6 +72,9 @@ from world.observable.state import ChunkCoord
 @dataclass
 class _BBox:
     x_min: float; y_min: float; x_max: float; y_max: float
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
 
 
 @dataclass
@@ -88,6 +91,7 @@ class _EntityState:
     prototype_type: str = "assembling-machine"
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
     force: str = "player"
+    is_natural: bool = False
 
 
 @dataclass
@@ -279,10 +283,11 @@ def _make_coord(agents: dict = None, kb=None) -> RuleBasedCoordinator:
 
 
 def _nat(entity_id, name="tree-01", x=5.0, y=5.0, proto="tree"):
-    return NaturalObject(
+    return EntityState(
         entity_id=entity_id, name=name,
         position=Position(x=x, y=y),
         force="neutral", prototype_type=proto,
+        is_natural=True,
     )
 
 
@@ -1574,9 +1579,16 @@ class TestBboxEmptyCondition(unittest.TestCase):
     def test_contains_staleness_guard(self):
         self.assertIn("staleness", _bbox_empty_condition(_BBox(0,0,100,100)))
 
-    def test_references_state_entities(self):
-        self.assertIn("state.entities",
-                      _bbox_empty_condition(_BBox(0,0,100,100)))
+    def test_staleness_uses_entities_section(self):
+        # Natural objects now live in the unified 'entities' section.
+        cond = _bbox_empty_condition(_BBox(0,0,100,100))
+        self.assertIn("staleness('entities')", cond)
+
+    def test_references_natural_objects_in_bbox(self):
+        # Completion is driven by natural_objects_in_bbox(), which filters
+        # the unified entity list by is_natural=True.
+        cond = _bbox_empty_condition(_BBox(0,0,100,100))
+        self.assertIn("natural_objects_in_bbox", cond)
 
 
 class TestIntersectsMajorFactory(unittest.TestCase):

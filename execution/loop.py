@@ -326,21 +326,30 @@ class FactorioLoop:
         """
         Capture a snapshot of current world state at goal activation time.
 
-        Returns a WorldQuery wrapping a shallow copy of the current WorldState.
-        Shallow copy is safe because WorldWriter replaces whole sub-objects
-        (player, entities, resource_map, etc.) rather than mutating them in
-        place — so the snapshot's sub-object references remain stable.
+        Returns a WorldQuery wrapping a copy of the live WorldState where
+        entities is a new list (frozen at this tick), while all other fields
+        are shared references. This is safe because WorldWriter replaces those
+        other fields wholesale (player, resource_map, research, etc.) —
+        so the snapshot's references to them remain stable.
+
+        The entities list must be copied explicitly because WorldWriter now
+        accumulates it in place across polls (appending new entities, removing
+        confirmed-gone ones, updating fields on existing EntityState objects).
+        A shallow copy of WorldState would share the same list object and the
+        baseline would drift as the live state is updated.
+
+        Uses WorldQuery.snapshot() which handles the entity list copy and
+        rebuilds the entity indices on the frozen copy.
 
         Used by _DeltaView to compute delta conditions (new.inventory,
         new.charted_chunks, etc.) relative to goal activation state.
         """
-        import copy
-        state_copy = copy.copy(self._state)
-        wq_snapshot = WorldQuery(state_copy)
+        wq_snapshot = self._wq.snapshot()
         log.debug(
-            "FactorioLoop: goal snapshot taken — charted_chunks=%s iron-ore=%s",
+            "FactorioLoop: goal snapshot taken — tick=%d charted_chunks=%d inventory_items=%d",
+            wq_snapshot.tick,
             wq_snapshot.charted_chunks,
-            wq_snapshot.inventory_count("iron-ore"),
+            sum(s.count for s in wq_snapshot.state.player.inventory.slots),
         )
         return wq_snapshot
 
@@ -353,10 +362,9 @@ class FactorioLoop:
         # integrate_snapshot accumulates newly_charted_chunks into
         # ExplorationState.charted_chunk_coords automatically.
         self._ww.integrate_snapshot(snapshot)
-        if len(self._wq.natural_objects) > 0:
-            log.debug("_poll_world: natural_objects=%d", len(self._wq.natural_objects))
-        else:
-            log.warning("_poll_world: natural_objects=0 (scan radius may be too small or area cleared)")
+        log.debug("_poll_world: entities=%d (natural=%d)",
+                  len(self._wq.state.entities),
+                  len(self._wq.natural_objects))
         # Warm the KB from everything visible in this scan so that
         # entities_that_produce() is populated before collection goals fire.
         # This is what lets harvest_natural goals find tree entity types.

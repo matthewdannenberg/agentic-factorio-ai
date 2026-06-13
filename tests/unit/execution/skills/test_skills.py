@@ -140,7 +140,11 @@ class _WQ:
         self.state.player.reachable = self._reachable
 
 
-_WW = MagicMock()  # WorldWriter — skills don't use it; a single stub is fine
+_WW = MagicMock()  # WorldWriter — skills don't use it directly except for
+                   # DestroySkill which calls ww.factorio_id_for(sys_id).
+                   # Configure it to return the sys_id unchanged so that
+                   # MineEntity.entity_id assertions in tests remain simple.
+_WW.factorio_id_for.side_effect = lambda sys_id: sys_id
 
 
 # ===========================================================================
@@ -741,7 +745,7 @@ class TestDestroySkillStart(unittest.TestCase):
 
     def test_running_after_start(self):
         skill = DestroySkill()
-        skill.start(entity_id=10)
+        skill.start(sys_id=10)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
 
 
@@ -751,7 +755,7 @@ class TestDestroySkillFirstIssue(unittest.TestCase):
         entity = _EntityState(entity_id=10, position=Position(x=5, y=5))
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=10)
+        skill.start(sys_id=10)
         actions = skill.tick(wq, _WW, tick=1)
         self.assertEqual(len(actions), 1)
         self.assertIsInstance(actions[0], MineEntity)
@@ -761,7 +765,7 @@ class TestDestroySkillFirstIssue(unittest.TestCase):
         entity = _EntityState(entity_id=10)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=10)
+        skill.start(sys_id=10)
         skill.tick(wq, _WW, tick=1)
         actions = skill.tick(wq, _WW, tick=11)
         self.assertEqual(actions, [])
@@ -773,7 +777,7 @@ class TestDestroySkillEntityGone(unittest.TestCase):
         entity = _EntityState(entity_id=7)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=7)
+        skill.start(sys_id=7)
         skill.tick(wq, _WW, tick=1)    # issues MineEntity
         wq.remove_entity(7)
         skill.tick(wq, _WW, tick=11)
@@ -782,7 +786,7 @@ class TestDestroySkillEntityGone(unittest.TestCase):
     def test_succeeds_immediately_if_entity_already_gone(self):
         wq = _WQ()   # no entities
         skill = DestroySkill()
-        skill.start(entity_id=99)
+        skill.start(sys_id=99)
         skill.tick(wq, _WW, tick=1)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
@@ -790,7 +794,7 @@ class TestDestroySkillEntityGone(unittest.TestCase):
         entity = _EntityState(entity_id=7)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=7)
+        skill.start(sys_id=7)
         skill.tick(wq, _WW, tick=1)
         wq.remove_entity(7)
         skill.tick(wq, _WW, tick=11)
@@ -811,7 +815,7 @@ class TestDestroySkillStall(unittest.TestCase):
         entity = _EntityState(entity_id=3)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=3)
+        skill.start(sys_id=3)
         skill.tick(wq, _WW, tick=1)
         actions = skill.tick(wq, _WW, tick=1 + _DESTROY_GRACE + 10)
         self.assertEqual(len(actions), 1)
@@ -822,7 +826,7 @@ class TestDestroySkillStall(unittest.TestCase):
         entity = _EntityState(entity_id=3)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=3)
+        skill.start(sys_id=3)
         skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, _DESTROY_MAX_REISSUE + 1)
         self.assertEqual(skill.status(), SkillStatus.STUCK)
@@ -831,7 +835,7 @@ class TestDestroySkillStall(unittest.TestCase):
         entity = _EntityState(entity_id=3)
         wq = _WQ(entities=[entity])
         skill = DestroySkill()
-        skill.start(entity_id=3)
+        skill.start(sys_id=3)
         skill.tick(wq, _WW, tick=1)   # first issue
         self._tick_to_stall(skill, wq, 2)
         obs = skill.observe()
@@ -842,7 +846,7 @@ class TestDestroySkillReset(unittest.TestCase):
 
     def test_reset_returns_to_idle(self):
         skill = DestroySkill()
-        skill.start(entity_id=5)
+        skill.start(sys_id=5)
         skill.reset()
         self.assertEqual(skill.status(), SkillStatus.IDLE)
 
@@ -852,14 +856,14 @@ class TestDestroySkillReset(unittest.TestCase):
         wq = _WQ(entities=[entity_a, entity_b])
         skill = DestroySkill()
 
-        skill.start(entity_id=1)
+        skill.start(sys_id=1)
         skill.tick(wq, _WW, tick=1)
         wq.remove_entity(1)
         skill.tick(wq, _WW, tick=11)
         self.assertEqual(skill.status(), SkillStatus.SUCCEEDED)
 
         skill.reset()
-        skill.start(entity_id=2)
+        skill.start(sys_id=2)
         actions = skill.tick(wq, _WW, tick=21)
         self.assertEqual(skill.status(), SkillStatus.RUNNING)
         self.assertIsInstance(actions[0], MineEntity)
@@ -867,7 +871,7 @@ class TestDestroySkillReset(unittest.TestCase):
 
     def test_observe_keys(self):
         skill = DestroySkill()
-        skill.start(entity_id=5)
+        skill.start(sys_id=5)
         obs = skill.observe()
         self.assertIn("destroy_status", obs)
         self.assertIn("destroy_entity_id", obs)
@@ -899,7 +903,7 @@ class TestSkillProtocolConformance(unittest.TestCase):
         craft.start([CraftTarget("iron-gear-wheel", "iron-gear-wheel", 1)])
 
         destroy = DestroySkill()
-        destroy.start(entity_id=1)
+        destroy.start(sys_id=1)
 
         return [nav, mine, craft, destroy]
 

@@ -88,9 +88,8 @@ class _TaskKind(Enum):
 
 @dataclass
 class _ClearTarget:
-    entity_id: int
+    entity_id: int   # sys_id assigned by WorldWriter
     position: Position
-    name: str = ""   # entity prototype name; used by DestroySkill for entity_id=0
 
 
 class _GatherPhase(Enum):
@@ -474,8 +473,6 @@ class MiningAgent(AgentProtocol):
                 return []
 
         # Advance if the DestroySkill reports the target is gone.
-        # DestroySkill owns presence detection — including the entity_id=0
-        # case for natural objects — so the agent never inspects entity_id.
         if self._current_target is not None:
             if self._destroy_skill.status() == SkillStatus.SUCCEEDED:
                 log.debug(
@@ -494,9 +491,7 @@ class MiningAgent(AgentProtocol):
             self._current_target = self._clear_targets.pop(0)
             self._nav_skill.reset()
             self._destroy_skill.reset()
-            self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position,
-                                      target_name=self._current_target.name)
+            self._destroy_skill.start(sys_id=self._current_target.entity_id)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: targeting entity %d",
@@ -521,8 +516,6 @@ class MiningAgent(AgentProtocol):
         target = self._current_target
 
         # Already reachable — skip navigation.
-        # DestroySkill.is_target_reachable() encapsulates entity_id=0 handling:
-        # returns False for trees (no unit_number), True when in reach otherwise.
         if self._destroy_skill.is_target_reachable(wq):
             self._nav_skill.reset()
             self._clear_phase = _ClearPhase.DESTROY
@@ -533,9 +526,7 @@ class MiningAgent(AgentProtocol):
         if nav_status == SkillStatus.IDLE:
             self._nav_skill.start(target_position=target.position)
         elif nav_status == SkillStatus.SUCCEEDED:
-            # Arrived — switch to DESTROY.
-            # For entity_id=0 targets (trees) this is the only trigger
-            # since is_target_reachable() always returns False for them.
+            # Arrived at target position — switch to DESTROY.
             self._nav_skill.reset()
             self._clear_phase = _ClearPhase.DESTROY
             return self._clear_destroy(task, blackboard, wq, ww, tick)
@@ -565,9 +556,7 @@ class MiningAgent(AgentProtocol):
         if d_status == SkillStatus.IDLE:
             # Skill started at target selection — IDLE here is unexpected.
             # Restart defensively rather than stalling.
-            self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position,
-                                      target_name=self._current_target.name)
+            self._destroy_skill.start(sys_id=self._current_target.entity_id)
 
         if d_status == SkillStatus.SUCCEEDED:
             # Entity gone — advance handled at top of _tick_clear next tick.
@@ -606,13 +595,8 @@ class MiningAgent(AgentProtocol):
         rebuilds from the next scan, and keeps harvesting until the task's
         success_condition fires externally (evaluated by the coordinator).
         """
-        # Advance if current target was destroyed or gone from scan.
-        # Natural objects live in wq.natural_objects, NOT wq.state.entities,
-        # so entity_by_id() always returns None for trees. Check the natural
-        # objects list directly by entity_id instead.
+        # Advance if current target was destroyed or gone from the entity list.
         if self._current_target is not None:
-            # DestroySkill.is_target_present() owns the entity_id=0 vs
-            # entity_id>0 detection — no entity_id logic needed here.
             if not self._destroy_skill.is_target_present(wq):
                 log.debug(
                     "MiningAgent: harvest target %d gone — advancing",
@@ -636,9 +620,7 @@ class MiningAgent(AgentProtocol):
             self._current_target = self._clear_targets.pop(0)
             self._nav_skill.reset()
             self._destroy_skill.reset()
-            self._destroy_skill.start(entity_id=self._current_target.entity_id,
-                                      position=self._current_target.position,
-                                      target_name=self._current_target.name)
+            self._destroy_skill.start(sys_id=self._current_target.entity_id)
             self._clear_phase = _ClearPhase.NAVIGATE
             log.debug(
                 "MiningAgent: harvesting entity %d",
@@ -656,22 +638,22 @@ class MiningAgent(AgentProtocol):
         kb: "KnowledgeBase",
     ) -> None:
         """
-        Scan wq.natural_objects for entities in _harvest_entity_types and
-        queue them as _ClearTarget entries, nearest-first.
+        Scan the unified entity list for natural objects in _harvest_entity_types
+        and queue them as _ClearTarget entries, nearest-first.
         Called each time the queue empties during a harvest_natural task.
         """
         type_set = set(self._harvest_entity_types)
         targets: list[_ClearTarget] = []
-        for obj in wq.natural_objects:
-            if obj.name not in type_set:
+        for entity in wq.state.entities:
+            if not entity.is_natural:
                 continue
-            # can_destroy() checks KB.minable authoritatively when a record
-            # exists, falling back to obj.is_minable for unknown entities.
-            # This handles both trees (entity_id=0, KB record has minable=True)
-            # and cliffs (minable=False in KB or obj.is_minable=False).
-            if not can_destroy(obj, kb):
+            if entity.name not in type_set:
                 continue
-            targets.append(_ClearTarget(entity_id=obj.entity_id, position=obj.position, name=obj.name))
+            if not can_destroy(entity, kb):
+                continue
+            targets.append(_ClearTarget(
+                entity_id=entity.entity_id, position=entity.position
+            ))
         player_pos = wq.player_position()
         targets.sort(
             key=lambda t: math.hypot(
@@ -710,47 +692,35 @@ class MiningAgent(AgentProtocol):
         targets: list[_ClearTarget] = []
         blocked: list = []   # objects in bbox that can't be destroyed yet
         if clear_mode == "clear_natural":
-            # Use wq.natural_objects — the dedicated natural-object scan that
-            # returns trees, rocks, and cliffs. These are excluded from
-            # wq.state.entities because they have no unit_number in Factorio.
-            for obj in wq.natural_objects:
-                pos = obj.position
+            for entity in wq.state.entities:
+                if not entity.is_natural:
+                    continue
+                pos = entity.position
                 if not (bbox['x_min'] <= pos.x <= bbox['x_max']
                         and bbox['y_min'] <= pos.y <= bbox['y_max']):
                     continue
-                if not obj.is_minable:
+                if not can_destroy(entity, kb):
                     log.debug(
-                        "MiningAgent: skipping non-minable %s at %s",
-                        obj.name, pos,
-                    )
-                    blocked.append(obj.name)
-                    continue
-                if not can_destroy(obj, kb):
-                    log.debug(
-                        "MiningAgent: %s at %s requires trigger/special "
+                        "MiningAgent: %s at %s requires special "
                         "action — not yet supported, skipping",
-                        obj.name, pos,
+                        entity.name, pos,
                     )
-                    blocked.append(obj.name)
+                    blocked.append(entity.name)
                     continue
-                targets.append(_ClearTarget(entity_id=obj.entity_id, position=pos))
+                targets.append(_ClearTarget(entity_id=entity.entity_id, position=pos))
         else:
-            # clear_all — use both natural objects and player-built entities
-            for obj in wq.natural_objects:
-                pos = obj.position
-                if not (bbox['x_min'] <= pos.x <= bbox['x_max']
-                        and bbox['y_min'] <= pos.y <= bbox['y_max']):
-                    continue
-                if not obj.is_minable or not can_destroy(obj, kb):
-                    blocked.append(obj.name)
-                    continue
-                targets.append(_ClearTarget(entity_id=obj.entity_id, position=pos))
+            # clear_all — every entity in the bbox, natural or placed.
             for entity in wq.state.entities:
                 pos = entity.position
-                if bbox['x_min'] <= pos.x <= bbox['x_max'] and bbox['y_min'] <= pos.y <= bbox['y_max']:
-                    targets.append(_ClearTarget(
-                        entity_id=entity.entity_id, position=pos
-                    ))
+                if not (bbox['x_min'] <= pos.x <= bbox['x_max']
+                        and bbox['y_min'] <= pos.y <= bbox['y_max']):
+                    continue
+                if entity.is_natural and not can_destroy(entity, kb):
+                    blocked.append(entity.name)
+                    continue
+                targets.append(_ClearTarget(
+                    entity_id=entity.entity_id, position=pos
+                ))
 
         player_pos = wq.player_position()
         targets.sort(

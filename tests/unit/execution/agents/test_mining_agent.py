@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 from execution.agents.mining import MiningAgent, _TaskKind, _ClearPhase, _GatherPhase
 from execution.blackboard import Blackboard, EntryCategory, EntryScope
 from execution.skills.base import SkillStatus
-from world import Position, NaturalObject
+from world import Position, EntityState
 from bridge import MineResource, MineEntity, MoveTo, StopMining
 
 
@@ -40,6 +40,9 @@ class _BBox:
     y_min: float
     x_max: float
     y_max: float
+
+    def __getitem__(self, key: str) -> float:
+        return getattr(self, key)
 
 
 @dataclass
@@ -68,6 +71,7 @@ class _EntityState:
     entity_id: int
     name: str = "iron-ore"
     position: Position = field(default_factory=lambda: Position(0.0, 0.0))
+    is_natural: bool = False
 
 
 class _WQ:
@@ -86,14 +90,21 @@ class _WQ:
         self._position  = position or Position(x=0.0, y=0.0)
         self._reachable = reachable or []
         self._inventory = dict(inventory or {})
+        # Placed entities keyed by entity_id
         self._entities  = {e.entity_id: e for e in (entities or [])}
-        self._natural_objects = list(natural_objects or [])
+        # Natural objects (EntityState with is_natural=True) keyed by entity_id
+        self._natural_entity_map = {e.entity_id: e for e in (natural_objects or [])}
         self.tick       = tick
         self._crafting_queue_size = crafting_queue_size
         self.state      = MagicMock()
         self.state.player.reachable     = self._reachable
         self.state.player.inventory.slots = self._build_slots()
-        self.state.entities = list(self._entities.values())
+        self._rebuild_state_entities()
+
+    def _rebuild_state_entities(self):
+        """Rebuild state.entities to include both placed and natural objects."""
+        all_entities = list(self._entities.values()) + list(self._natural_entity_map.values())
+        self.state.entities = all_entities
 
     def _build_slots(self):
         return [_Slot(item=k, count=v) for k, v in self._inventory.items() if v > 0]
@@ -102,14 +113,7 @@ class _WQ:
         return self._position
 
     def entity_by_id(self, eid: int):
-        if eid in self._entities:
-            return self._entities[eid]
-        # Natural objects are also findable by entity_id so DestroySkill
-        # can confirm they still exist before issuing MineEntity.
-        for obj in self._natural_objects:
-            if obj.entity_id == eid:
-                return obj
-        return None
+        return self._entities.get(eid) or self._natural_entity_map.get(eid)
 
     def inventory_count(self, item: str) -> int:
         return self._inventory.get(item, 0)
@@ -120,7 +124,7 @@ class _WQ:
 
     @property
     def natural_objects(self) -> list:
-        return self._natural_objects
+        return list(self._natural_entity_map.values())
 
     @property
     def nearby_uncharted_chunks(self) -> list:
@@ -144,17 +148,16 @@ class _WQ:
 
     def remove_entity(self, eid: int) -> None:
         self._entities.pop(eid, None)
-        self.state.entities = list(self._entities.values())
-        self._natural_objects = [
-            o for o in self._natural_objects if o.entity_id != eid
-        ]
+        self._natural_entity_map.pop(eid, None)
+        self._rebuild_state_entities()
 
     def add_entity(self, e: _EntityState) -> None:
         self._entities[e.entity_id] = e
-        self.state.entities = list(self._entities.values())
+        self._rebuild_state_entities()
 
     def set_natural_objects(self, objs: list) -> None:
-        self._natural_objects = list(objs)
+        self._natural_entity_map = {e.entity_id: e for e in objs}
+        self._rebuild_state_entities()
 
     # Properties needed by build_full_namespace / RewardEvaluator
     @property
@@ -207,7 +210,7 @@ class _WQ:
         return BBoxQuery(self, x_min, y_min, x_max, y_max)
 
     def natural_objects_in_bbox(self, x_min, y_min, x_max, y_max):
-        return [o for o in self._natural_objects
+        return [o for o in self._natural_entity_map.values()
                 if x_min <= o.position.x <= x_max and y_min <= o.position.y <= y_max]
 
     def section_staleness(self, section: str, tick: int):
@@ -218,6 +221,7 @@ class _WQ:
 
 
 _WW = MagicMock()
+_WW.factorio_id_for.side_effect = lambda sys_id: sys_id
 
 def _gather_task(resource_type="iron-ore", count=10):
     """Module-level gather task helper for teardown tests."""
@@ -444,8 +448,8 @@ class TestMiningAgentClearTargetBuilding(unittest.TestCase):
     def test_builds_target_list_from_natural_objects(self):
         agent = _make_agent()
         natural = [
-            NaturalObject(1, "tree-01",   Position(x=10, y=10), "neutral", "tree"),
-            NaturalObject(2, "rock-huge", Position(x=20, y=20), "neutral", "simple-entity"),
+            EntityState(entity_id=1, name="tree-01", position=Position(x=10, y=10), force="neutral", prototype_type="tree", is_natural=True),
+            EntityState(entity_id=2, name="rock-huge", position=Position(x=20, y=20), force="neutral", prototype_type="simple-entity", is_natural=True),
         ]
         # iron-chest is a player entity — not in natural_objects
         entities = [_EntityState(3, "iron-chest", Position(x=30, y=30))]
@@ -459,7 +463,7 @@ class TestMiningAgentClearTargetBuilding(unittest.TestCase):
 
     def test_clear_all_includes_both_natural_and_player_built(self):
         agent = _make_agent()
-        natural = [NaturalObject(1, "tree-01", Position(x=10, y=10), "neutral", "tree")]
+        natural = [EntityState(entity_id=1, name="tree-01", position=Position(x=10, y=10), force="neutral", prototype_type="tree", is_natural=True)]
         entities = [_EntityState(2, "iron-chest", Position(x=20, y=20))]
         wq = _WQ(entities=entities, natural_objects=natural)
         task = self._clear_task(mode="clear_all")
@@ -472,8 +476,8 @@ class TestMiningAgentClearTargetBuilding(unittest.TestCase):
     def test_excludes_objects_outside_bbox(self):
         agent = _make_agent()
         natural = [
-            NaturalObject(1, "tree-01", Position(x=10, y=10),   "neutral", "tree"),
-            NaturalObject(2, "tree-02", Position(x=200, y=200), "neutral", "tree"),
+            EntityState(entity_id=1, name="tree-01", position=Position(x=10, y=10), force="neutral", prototype_type="tree", is_natural=True),
+            EntityState(entity_id=2, name="tree-02", position=Position(x=200, y=200), force="neutral", prototype_type="tree", is_natural=True),
         ]
         wq = _WQ(natural_objects=natural)
         task = self._clear_task(bbox=_BBox(0, 0, 50, 50))
@@ -513,7 +517,7 @@ class TestMiningAgentClearLoop(unittest.TestCase):
         )
 
     def test_navigates_to_unreachable_natural_target(self):
-        nat = [NaturalObject(1, "tree-01", Position(x=50, y=50), "neutral", "tree")]
+        nat = [EntityState(entity_id=1, name="tree-01", position=Position(x=50, y=50), force="neutral", prototype_type="tree", is_natural=True)]
         wq = self._make_clear_natural_wq(nat, reachable=[])
         task = _Task(
             task_type="clear_region",
@@ -529,7 +533,7 @@ class TestMiningAgentClearLoop(unittest.TestCase):
         self.assertEqual(agent._clear_phase, _ClearPhase.NAVIGATE)
 
     def test_destroys_reachable_natural_target(self):
-        nat = [NaturalObject(1, "tree-01", Position(x=5, y=5), "neutral", "tree")]
+        nat = [EntityState(entity_id=1, name="tree-01", position=Position(x=5, y=5), force="neutral", prototype_type="tree", is_natural=True)]
         wq = _WQ(
             position=Position(x=0, y=0),
             reachable=[1],
@@ -550,8 +554,8 @@ class TestMiningAgentClearLoop(unittest.TestCase):
 
     def test_advances_after_natural_target_destroyed(self):
         nat = [
-            NaturalObject(1, "tree-01", Position(x=5, y=5),   "neutral", "tree"),
-            NaturalObject(2, "rock-01", Position(x=10, y=10), "neutral", "simple-entity"),
+            EntityState(entity_id=1, name="tree-01", position=Position(x=5, y=5), force="neutral", prototype_type="tree", is_natural=True),
+            EntityState(entity_id=2, name="rock-01", position=Position(x=10, y=10), force="neutral", prototype_type="simple-entity", is_natural=True),
         ]
         wq = self._make_clear_natural_wq(nat, reachable=[1, 2])
         task = _Task(
@@ -576,7 +580,7 @@ class TestMiningAgentClearLoop(unittest.TestCase):
 
     def test_skips_target_when_nav_stuck(self):
         from execution.skills.navigate import _UNREACHABLE_GRACE_TICKS
-        nat = [NaturalObject(1, "tree-01", Position(x=500, y=500), "neutral", "tree")]
+        nat = [EntityState(entity_id=1, name="tree-01", position=Position(x=500, y=500), force="neutral", prototype_type="tree", is_natural=True)]
         wq = self._make_clear_natural_wq(nat, reachable=[])
         task = _Task(
             task_type="clear_region",
@@ -634,8 +638,8 @@ class TestMiningAgentObserveProgress(unittest.TestCase):
     def test_progress_clear_increases_as_targets_cleared(self):
         agent = _make_agent()
         nat = [
-            NaturalObject(1, "tree-01", Position(x=5, y=5),   "neutral", "tree"),
-            NaturalObject(2, "tree-02", Position(x=10, y=10), "neutral", "tree"),
+            EntityState(entity_id=1, name="tree-01", position=Position(x=5, y=5), force="neutral", prototype_type="tree", is_natural=True),
+            EntityState(entity_id=2, name="tree-02", position=Position(x=10, y=10), force="neutral", prototype_type="tree", is_natural=True),
         ]
         wq = _WQ(natural_objects=nat, reachable=[1, 2])
         task = _Task(
@@ -688,12 +692,17 @@ class TestMiningAgentHarvest(unittest.TestCase):
 
     def _make_natural_obj(self, name="tree-01", entity_id=1,
                            x=5.0, y=5.0, is_minable=True):
-        obj = MagicMock()
-        obj.name = name
-        obj.entity_id = entity_id
-        obj.position = Position(x=x, y=y)
-        obj.is_minable = is_minable
-        return obj
+        # is_minable is no longer a field on EntityState; KB controls
+        # destroyability. The parameter is kept for call-site compatibility
+        # but is ignored here — tests that need non-minable objects pass
+        # a KB stub with minable=False instead.
+        return EntityState(
+            entity_id=entity_id,
+            name=name,
+            position=Position(x=x, y=y),
+            force="neutral",
+            is_natural=True,
+        )
 
     def _harvest_task(self, entity_types=None):
         return _Task(

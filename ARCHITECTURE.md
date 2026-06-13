@@ -278,15 +278,18 @@ called by the coordinator.
 `WorldQuery` only. No KnowledgeBase. No side effects. Key predicates:
 
 - `is_at(target, wq, tolerance)` — True if player is within tolerance tiles of target.
-- `is_reachable(entity_id, wq)` — True if entity_id is in `wq.state.player.reachable`
-  (the actual game-engine reach set from the Lua mod, not a hardcoded distance).
-- `can_mine(entity_id, wq)` — True if entity is present in scan AND reachable.
-- `is_present(entity_id, position, wq, name, natural_radius)` — True if the target
-  still exists. For `entity_id != 0`: uses entity scan. For `entity_id == 0`
-  (natural objects without a unit number): proximity scan of `wq.natural_objects`.
-- `can_destroy(obj, kb)` — True if KB confirms the natural object is minable.
-  **This is the authoritative check for natural object clearability** — do not use
-  `NaturalObject.is_minable` directly.
+- `is_reachable(sys_id, wq)` — True if sys_id is in `wq.state.player.reachable`.
+  The reachable set is populated by `WorldWriter` each poll: placed entities by
+  Factorio reach set translation, natural objects by geometric distance check.
+- `can_mine(sys_id, wq)` — True if entity is present in accumulated entity list
+  AND in the reachable set. The entity-presence check guards against sys_ids that
+  have been removed from the entity list but might linger in a stale reachable set.
+- `is_present(sys_id, wq)` — True if the entity with the given sys_id exists in
+  the unified `wq.state.entities` list. Works uniformly for placed entities and
+  natural objects — the old `entity_id=0` two-case logic is gone.
+- `can_destroy(entity, kb)` — True if KB confirms the `EntityState` (with
+  `is_natural=True`) is minable. The KB record is the sole authority; unknown
+  entities are conservatively treated as not destroyable.
 - `player_has_item(item, count, wq)` — True if player inventory has at least count.
 
 **`execution/preconditions.py`** — richer pre-action checks that may involve
@@ -299,12 +302,13 @@ Skills encode multi-step, well-determined action sequences with built-in
 success/failure detection. They contain **no decision logic** — that belongs to
 agents and the coordinator. Skills delegate world-state questions to predicates.
 
-- `NavigateSkill` — walks the player to a target position or entity.
+- `NavigateSkill` — walks the player to a target position or entity (by sys_id).
 - `MineSkill` — gathers resources from a resource patch.
-- `DestroySkill` — deconstructs a single entity. Uses `predicates.is_present()`
-  for target-gone detection (handles `entity_id=0` natural objects correctly) and
-  `predicates.is_reachable()` for reach checks. Exposes `is_target_present(wq)`
-  and `is_target_reachable(wq)` for agents.
+- `DestroySkill` — deconstructs a single entity identified by sys_id. Uses
+  `predicates.is_present(sys_id, wq)` for target-gone detection and
+  `predicates.is_reachable(sys_id, wq)` for reach checks. Exposes
+  `is_target_present(wq)` and `is_target_reachable(wq)` for agents. See the
+  *MineEntity Factorio ID gap* note in Known capability gaps below.
 - `CraftSkill` — hand-crafts items.
 
 #### Agents (`execution/agents/`)
@@ -341,8 +345,9 @@ Step 0 calls `_push_task`; step 1 completes the goal frame when the task resolve
 navigate targets) from the condition string before the coordinator sees them.
 
 **`_bbox_empty_condition(bbox)`** — generates the task `success_condition` for
-`clear_region` goals. Checks `wq.natural_objects_in_bbox(...)` (not
-`state.entities`) with a staleness guard on the `natural_objects` section.
+`clear_region` goals. Checks `wq.natural_objects_in_bbox(...)` with a staleness
+guard on the `entities` section (natural objects now live in the unified entity
+list; the `natural_objects` section key no longer exists on the live WorldState).
 
 **Goal type vocabulary:**
 
@@ -370,10 +375,14 @@ navigate targets) from the condition string before the coordinator sees them.
 - *Cliff gap* — undestroyable objects (cliffs) cause `clear_region` to fail.
   Fix requires technology-change detection for `minable`, `UseItemOnEntity`
   bridge action, and coordinator retry after unlock (Phase 7/10).
-- *Scan coverage gap* — `clear_region` and other PROXIMAL bbox queries are
-  unreliable without prior navigation across the full bbox. A scan coverage map
-  is needed in WorldState (Phase 10). Current bandaid: navigate to bbox corners
-  before issuing clear_region goals.
+- *MineEntity Factorio ID gap* — `DestroySkill.tick()` must pass a raw Factorio
+  unit_number to the `MineEntity` bridge action, retrieved via
+  `ww.factorio_id_for(sys_id)`. This is the one remaining place where a Factorio
+  internal ID surfaces above the bridge layer. The correct long-term fix is a
+  bridge-native position-based mine action so the execution layer never needs to
+  know the Factorio ID; `DestroySkill` would then pass position + name, the same
+  as any other spatial interaction. Deferred — the current compromise (Factorio ID
+  visible only inside `DestroySkill.tick()`) is an acceptable boundary.
 
 #### Blackboard (`execution/blackboard.py`)
 
@@ -479,6 +488,35 @@ Major architectural refactors completed:
   from condition strings; produces `Position` objects for navigate targets.
 - **`TASK_GOAL_TYPES`**: routing table in coordinator for task-backed goal types.
 
+### Phase 6.6 ✅
+
+Entity identity and WorldState accumulation refactor:
+
+- **Unified entity identity**: `WorldWriter` assigns stable system-side sys_ids to
+  all entities (placed and natural). Raw Factorio unit_numbers no longer appear above
+  the writer layer. `WorldQuery.factorio_id_for(sys_id)` is the sole controlled
+  escape hatch for bridge action dispatch.
+- **Unified entity list**: `WorldState.entities` now holds both placed entities and
+  natural objects as `EntityState` entries with `is_natural: bool`. `NaturalObject`
+  dataclass deleted. The old `entity_id=0` two-case pattern is gone throughout.
+- **Entity accumulation**: `WorldState.entities` is now a persistent accumulating
+  map. Entities are added on first observation, updated in place on re-observation,
+  and removed only when their tile was in scan range this poll and they were absent.
+  Entities outside scan range are retained as stale knowledge.
+- **Scan coverage map**: `WorldState.tile_map` extended from `dict[(x,y), str]` to
+  `dict[(x,y), (last_observed_at: int, tile_type: str)]`. `WorldWriter` computes the
+  set of tiles within `LOCAL_SCAN_RADIUS` each poll and stamps them. Provides
+  principled staleness for entity removal and tile-level observation history.
+  `WorldQuery.tile_observed_at(x, y)` and `entity_last_observed(entity)` expose this.
+- **`PlayerState.reach_distance`**: populated from `player.character.reach_distance`
+  via the Lua mod. Used by `WorldWriter` for geometric reachability of natural objects.
+  Sentinel default 0.0 indicates the field has not yet been populated.
+- **Predicate simplification**: `is_present(sys_id, wq)` replaces the old two-argument
+  form. `can_destroy` takes `EntityState` instead of `NaturalObject`.
+- **`DestroySkill` simplification**: `start(sys_id)` replaces `start(entity_id,
+  position, target_name)`. All presence and reachability checks are now single-case.
+- **`ClearSkill` removed**: logic moved to `MiningAgent` where it belongs.
+
 ### Phase 7 — Construction agent (RL)
 
 The construction agent places entities, connects inserters and belts, and
@@ -494,13 +532,11 @@ First learned agent. The `production` and `byproduct` coordinator stubs become r
 Spatial reasoning and logistics: belt routing, inserter placement, layout.
 The `logistics` coordinator stub becomes real.
 
-### Phase 10 — Examination layer revision + WorldState refactor
+### Phase 10 — Examination layer revision
 
 - Examination gains self-model reconciliation, blackboard promotion, structured
   factory summaries.
 - `RewardEvaluator` namespace extended with STRUCTURAL conditions (OD-6).
-- **WorldState scan coverage map** — track which regions have been observed;
-  generate navigation targets for unobserved sub-regions of a bbox query.
 - Technology-change detection (cliff gap fix).
 
 ### Phase 11 — LLM layer revision
@@ -531,9 +567,11 @@ See `OPEN_DECISIONS.md` for full discussion.
 - **OD-6** — RewardEvaluator namespace extension for self-model (STRUCTURAL conditions)
 - **OD-7** — NodeType-specific FactoryNode subclasses
 - **OD-8** — Agent architecture: thin protocol vs behavioral composition
-- **OD-9** — WorldState dialect: translate Factorio internals into a convenient
-  agent-facing representation rather than exposing raw game concepts (entity_id=0,
-  unit numbers, etc.) to the planning and execution layers.
+- **OD-9** ✅ — WorldState dialect: resolved in Phase 6.6. Factorio internals
+  (entity_id=0, unit numbers, NaturalObject) are now encapsulated in the bridge
+  and WorldWriter. sys_ids are used throughout the planning and execution layers.
+  Remaining gap: `DestroySkill.tick()` calls `ww.factorio_id_for(sys_id)` to
+  construct `MineEntity` — see *MineEntity Factorio ID gap* in Known capability gaps.
 
 ---
 

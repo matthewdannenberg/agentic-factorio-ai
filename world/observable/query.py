@@ -477,6 +477,29 @@ class WorldQuery:
         self._state = state
         self._kb = kb
 
+    def snapshot(self) -> "WorldQuery":
+        """
+        Return a WorldQuery whose entity list is frozen at this moment.
+
+        Used by the run loop to capture start_wq at goal activation. The
+        returned WorldQuery wraps a shallow-copied WorldState where:
+          - entities is a new list (a copy of the current list at this tick),
+            so subsequent accumulation (appends, removals, in-place field
+            updates) in the live state does not affect the baseline.
+          - All other fields (player, resource_map, research, tile_map, etc.)
+            are shared references — safe because WorldWriter replaces them
+            wholesale rather than mutating them in place.
+
+        The _DeltaView in condition_namespace reads player, resource_map, and
+        scalar WorldQuery properties from start_wq — all wholesale-replaced
+        fields. The entity copy is a forward-looking safety measure: if a
+        future delta condition reads entity data, the baseline will be correct.
+        """
+        import dataclasses
+        frozen = dataclasses.replace(self._state, entities=list(self._state.entities))
+        frozen._rebuild_entity_indices()
+        return WorldQuery(frozen, self._kb)
+
     # ------------------------------------------------------------------
     # Composable builder entry point
     # ------------------------------------------------------------------

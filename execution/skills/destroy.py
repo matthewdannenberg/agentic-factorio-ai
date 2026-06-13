@@ -9,18 +9,20 @@ no game mechanics are reimplemented here.
 
 start() parameters
 ------------------
-entity_id    : Id of the entity to destroy. 0 for natural objects (trees,
-               rocks) which have no unit number in Factorio 2.x.
-position     : World position of the target. Required when entity_id == 0
-               for proximity-based presence detection via is_present().
-target_name  : Prototype name. Used by is_present() to distinguish natural
-               objects at similar positions.
+sys_id : System-assigned entity ID (assigned by WorldWriter, not the raw
+         Factorio unit_number). Works uniformly for both placed entities and
+         natural objects — the old entity_id=0 special case no longer exists.
+
+The MineEntity bridge action requires the raw Factorio unit_number, not the
+sys_id. DestroySkill retrieves it via ww.factorio_id_for(sys_id) on each
+tick where an action is issued. For natural objects this returns 0, which
+the bridge handles as a position-based mine command.
 
 Status transitions
 ------------------
 IDLE      -> RUNNING  : start() called.
 RUNNING   -> SUCCEEDED: is_present() returns False (entity gone).
-RUNNING   -> SUCCEEDED: entity already gone on first tick — advance loop.
+RUNNING   -> SUCCEEDED: entity already gone on first tick.
 RUNNING   -> STUCK    : entity persists after _MAX_REISSUE re-issues.
 Any       -> IDLE     : reset() called.
 """
@@ -35,7 +37,7 @@ from execution.predicates import is_present, is_reachable
 from bridge import Action, MineEntity
 
 if TYPE_CHECKING:
-    from world import WorldQuery, WorldWriter, Position
+    from world import WorldQuery, WorldWriter
 
 log = logging.getLogger(__name__)
 
@@ -46,29 +48,25 @@ _MAX_REISSUE        = 3
 class DestroySkill(SkillProtocol):
 
     def __init__(self) -> None:
-        self._status:        SkillStatus          = SkillStatus.IDLE
-        self._entity_id:     Optional[int]        = None
-        self._position:      Optional["Position"] = None
-        self._target_name:   str                  = ""
-        self._issued_at:     int                  = 0
-        self._reissue_count: int                  = 0
+        self._status:        SkillStatus  = SkillStatus.IDLE
+        self._sys_id:        Optional[int] = None
+        self._issued_at:     int           = 0
+        self._reissue_count: int           = 0
 
-    def start(
-        self,
-        entity_id:   int,
-        position:    "Optional[Position]" = None,
-        target_name: str = "",
-    ) -> None:
-        self._entity_id     = entity_id
-        self._position      = position
-        self._target_name   = target_name
+    def start(self, sys_id: int) -> None:
+        """
+        Initialise for a new destruction job.
+
+        Parameters
+        ----------
+        sys_id : System entity ID as assigned by WorldWriter. Works for both
+                 placed entities and natural objects.
+        """
+        self._sys_id        = sys_id
         self._issued_at     = 0
         self._reissue_count = 0
         self._status        = SkillStatus.RUNNING
-        log.debug(
-            "DestroySkill started: entity_id=%d name=%s",
-            entity_id, target_name,
-        )
+        log.debug("DestroySkill started: sys_id=%d", sys_id)
 
     def tick(
         self,
@@ -80,34 +78,36 @@ class DestroySkill(SkillProtocol):
             return []
 
         if not self.is_target_present(wq):
-            log.debug(
-                "DestroySkill: entity %d (%s) gone — SUCCEEDED",
-                self._entity_id, self._target_name,
-            )
+            log.debug("DestroySkill: entity sys_id=%d gone — SUCCEEDED", self._sys_id)
             self._status = SkillStatus.SUCCEEDED
             return []
 
+        factorio_id = ww.factorio_id_for(self._sys_id)
+
         if self._issued_at == 0:
             self._issued_at = tick
-            log.debug("DestroySkill: issuing MineEntity %d", self._entity_id)
-            return [MineEntity(entity_id=self._entity_id)]
+            log.debug(
+                "DestroySkill: issuing MineEntity sys_id=%d factorio_id=%d",
+                self._sys_id, factorio_id,
+            )
+            return [MineEntity(entity_id=factorio_id)]
 
         grace_elapsed = (tick - self._issued_at) >= _MINING_GRACE_TICKS
         if grace_elapsed:
             if self._reissue_count >= _MAX_REISSUE:
                 log.warning(
-                    "DestroySkill: %d re-issues on entity %d (%s) — STUCK",
-                    _MAX_REISSUE, self._entity_id, self._target_name,
+                    "DestroySkill: %d re-issues on sys_id=%d — STUCK",
+                    _MAX_REISSUE, self._sys_id,
                 )
                 self._status = SkillStatus.STUCK
                 return []
             self._reissue_count += 1
             self._issued_at = tick
             log.debug(
-                "DestroySkill: stall on entity %d, re-issuing (%d/%d)",
-                self._entity_id, self._reissue_count, _MAX_REISSUE,
+                "DestroySkill: stall on sys_id=%d, re-issuing (%d/%d)",
+                self._sys_id, self._reissue_count, _MAX_REISSUE,
             )
-            return [MineEntity(entity_id=self._entity_id)]
+            return [MineEntity(entity_id=factorio_id)]
 
         return []
 
@@ -116,40 +116,31 @@ class DestroySkill(SkillProtocol):
 
     def reset(self) -> None:
         self._status        = SkillStatus.IDLE
-        self._entity_id     = None
-        self._position      = None
-        self._target_name   = ""
+        self._sys_id        = None
         self._issued_at     = 0
         self._reissue_count = 0
 
     def observe(self) -> dict:
         return {
             "destroy_status":        self._status.name,
-            "destroy_entity_id":     self._entity_id,
+            "destroy_entity_id":     self._sys_id,
             "destroy_reissue_count": self._reissue_count,
         }
 
     def is_target_present(self, wq: "WorldQuery") -> bool:
         """True if the target still exists. Delegates to predicates.is_present()."""
-        if self._entity_id is None:
+        if self._sys_id is None:
             return False
-        pos = self._position
-        if pos is None and self._entity_id == 0:
-            return True   # no position recorded — assume present, avoid spurious SUCCEEDED
-        return is_present(self._entity_id, pos, wq, name=self._target_name)
+        return is_present(self._sys_id, wq)
 
     def is_target_reachable(self, wq: "WorldQuery") -> bool:
         """
-        True if the target entity is within game-engine mining reach.
+        True if the target entity is within game-engine reach.
 
-        For real entities: delegates to predicates.is_reachable() which uses
-        the actual reachable set reported by the Lua mod — no hardcoded
-        distance constants.
-
-        For natural objects (entity_id == 0): always False — reach is
-        determined by navigation arrival, since natural objects have no
-        unit number to look up in the reachable set.
+        Delegates to predicates.is_reachable() which checks the sys_id-keyed
+        reachable set populated by WorldWriter. Works uniformly for placed
+        entities and natural objects — no special cases.
         """
-        if self._entity_id is None or self._entity_id == 0:
+        if self._sys_id is None:
             return False
-        return is_reachable(self._entity_id, wq)
+        return is_reachable(self._sys_id, wq)

@@ -565,7 +565,7 @@ class RuleBasedCoordinator:
             if self._kb:
                 harvestable = self._kb.entities_that_produce(item)
                 log.info(
-                    "Collection Path B: item=%r, natural_objects in scan=%r, "
+                    "Collection Path B: item=%r, natural objects in scan=%r, "
                     "entities_that_produce=%r",
                     item,
                     [o.name for o in wq.natural_objects][:10],
@@ -1602,39 +1602,38 @@ def _undestroyable_in_bbox(bbox, wq: "WorldQuery", kb) -> list:
 
     Uses can_destroy() from execution.predicates, which reads
     EntityRecord.minable from the KnowledgeBase — no entity names hardcoded.
+    Natural objects are now EntityState entries with is_natural=True in the
+    unified entity list; natural_objects_in_bbox() filters them correctly.
     """
     from execution.predicates import can_destroy
     result = []
-    for obj in getattr(wq, "natural_objects", []):
-        pos = obj.position
-        if (bbox['x_min'] <= pos.x <= bbox['x_max']
-                and bbox['y_min'] <= pos.y <= bbox['y_max']):
-            if not can_destroy(obj, kb):
-                result.append(obj)
+    for obj in wq.natural_objects_in_bbox(
+        bbox['x_min'], bbox['y_min'], bbox['x_max'], bbox['y_max']
+    ):
+        if not can_destroy(obj, kb):
+            result.append(obj)
     return result
 
 
 def _bbox_is_clear(bbox, wq: "WorldQuery") -> bool:
     """True if no natural objects remain in the bbox."""
-    for obj in getattr(wq, "natural_objects", []):
-        pos = obj.position
-        if (bbox['x_min'] <= pos.x <= bbox['x_max']
-                and bbox['y_min'] <= pos.y <= bbox['y_max']):
-            return False
-    return True
+    return len(wq.natural_objects_in_bbox(
+        bbox['x_min'], bbox['y_min'], bbox['x_max'], bbox['y_max']
+    )) == 0
 
 
 def _bbox_empty_condition(bbox) -> str:
     """
     Build a success condition string for a clear_natural task.
 
-    Checks natural_objects_in_bbox() — the correct data source for trees,
-    rocks and cliffs. state.entities contains placed factory buildings, not
-    natural objects, so it would never correctly signal completion here.
+    Checks natural_objects_in_bbox() — which filters the unified
+    state.entities list by is_natural=True. The staleness guard uses
+    the 'entities' section (natural objects now live in the unified
+    entity list, not in a separate 'natural_objects' section).
     """
     return (
-        f"staleness('natural_objects') is not None and "
-        f"staleness('natural_objects') < 300 and "
+        f"staleness('entities') is not None and "
+        f"staleness('entities') < 300 and "
         f"len(wq.natural_objects_in_bbox("
         f"{bbox['x_min']}, {bbox['y_min']}, "
         f"{bbox['x_max']}, {bbox['y_max']})) == 0"

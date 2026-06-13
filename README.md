@@ -31,13 +31,13 @@ stack and an active-task slot.
 **Predicates own world-state logic.** Skills and agents delegate all world-state
 questions (is this entity present? is it reachable? can it be mined?) to
 `execution/predicates.py`, which provides pure, cheap, side-effect-free checks
-over `WorldQuery`. Factorio implementation details (entity_id=0 for natural
-objects, unit numbers, etc.) are encapsulated in predicates and never leak into
-agent or coordinator logic.
+over `WorldQuery`. Factorio implementation details (raw unit numbers, the old
+`entity_id=0` pattern for natural objects, etc.) are encapsulated in the bridge
+and `WorldWriter` and never leak into agent or coordinator logic.
 
 ## Status
 
-**Phases 1–6 complete. Phase 6.5 refactors complete.**
+**Phases 1–6 complete. Phase 6.5 refactors complete. Phase 6.6 refactors complete.**
 
 The full end-to-end pipeline is implemented and running against a live Factorio
 instance. The agent can navigate, gather resources, explore, clear terrain, and
@@ -53,10 +53,12 @@ rocks.
 [✅] Phase 6 — Navigation, mining, rule-based coordinator, run loop
 [✅] Phase 6.5 — Unified planning stack (PlanningItem), navigate goal type,
                  clear_region end-to-end, predicate layer, condition_parser
+[✅] Phase 6.6 — Unified entity identity (sys_ids), entity accumulation,
+                 tile coverage map, NaturalObject removed, scan coverage resolved
 [ ] Phase 7 — Construction agent
 [ ] Phase 8 — Production agent (RL)
 [ ] Phase 9 — Spatial-logistics agent (RL)
-[ ] Phase 10 — Examination layer revision + WorldState refactor
+[ ] Phase 10 — Examination layer revision
 [ ] Phase 11 — LLM layer revision
 ```
 
@@ -117,20 +119,20 @@ a new task-backed goal type requires one line in `TASK_GOAL_TYPES`.
 
 `execution/predicates.py` provides pure observation functions over `WorldQuery`:
 
-- `is_present(entity_id, position, wq, name)` — handles `entity_id=0` (trees in
-  Factorio 2.x) via proximity scan of `wq.natural_objects`.
-- `is_reachable(entity_id, wq)` — uses the actual game-engine reach set from the
-  Lua mod. Do not use hardcoded distance constants as a proxy.
-- `can_destroy(obj, kb)` — the authoritative check for natural object clearability.
-  Do not use `NaturalObject.is_minable` directly; trees have `entity_id=0` and will
-  appear non-minable even though they are perfectly minable.
+- `is_present(sys_id, wq)` — True if the entity with the given sys_id exists in
+  the unified entity list. Works uniformly for placed entities and natural objects.
+- `is_reachable(sys_id, wq)` — checks the sys_id-keyed reachable set populated by
+  `WorldWriter`. Do not use hardcoded distance constants as a proxy.
+- `can_destroy(entity, kb)` — the authoritative check for natural object clearability.
+  Takes an `EntityState` with `is_natural=True`; KB is the sole authority.
 
 ### Skills
 
 Skills encode multi-step action sequences with success/failure detection. They
 contain no decision logic and delegate all world-state questions to predicates.
-`DestroySkill` in particular uses `predicates.is_present()` for target-gone
-detection and `predicates.is_reachable()` for reach checks.
+`DestroySkill` uses `predicates.is_present(sys_id, wq)` for target-gone detection
+and `predicates.is_reachable(sys_id, wq)` for reach checks. All entities — placed
+and natural — are identified by stable sys_ids assigned by `WorldWriter`.
 
 ### Writing Goal Conditions
 

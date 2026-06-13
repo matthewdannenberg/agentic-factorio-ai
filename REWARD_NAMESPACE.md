@@ -515,17 +515,19 @@ spuriously, causing the condition to fire before any clearing work has been done
 1. Issue `navigate` goals to each corner of the bbox first (ensuring full scan coverage).
 2. Then issue the `clear_region` goal with the bbox condition.
 
-Or guard with a staleness check:
+Or guard with a staleness check using the `'entities'` section
 
 ```python
 (
-    "staleness('natural_objects') is not None and "
-    "staleness('natural_objects') < 300 and "
+    "staleness('entities') is not None and "
+    "staleness('entities') < 300 and "
     "len(wq.natural_objects_in_bbox(-50,-50,50,50)) == 0"
 )
 ```
 
-A scan coverage map (Phase 10) will provide a principled solution.
+`WorldState.tile_map` (added in Phase 6.6) records the last observation tick for
+every tile scanned each poll, providing principled staleness at tile granularity.
+The staleness guard above remains the recommended pattern for condition strings.
 
 ---
 

@@ -178,47 +178,30 @@ Examples include NavigateSkill, DestroySkill, CraftSkill, MineSkill, etc.
 
 ---
 
-## OD-9 — WorldState Dialect
+## OD-9 — WorldState Dialect ✅ Resolved in Phase 6.6
 
 **Question:** Should WorldState translate Factorio internals into a convenient
 agent-facing representation, rather than exposing raw game concepts directly?
 
-**The problem:**
-The current WorldState exposes Factorio implementation details that leak into the
-planning and execution layers:
-- `entity_id=0` for natural objects (trees, rocks have no unit number in Factorio 2.x)
-- `NaturalObject.is_minable` is unreliable (False for trees even though they are minable)
-- `PlayerState.reachable` exposes a raw set of integer entity IDs
+**Decision:** Yes. Implemented in Phase 6.6.
 
-These have caused repeated bugs (trees skipped because `is_minable` is False;
-entities considered reachable because they're in the scan radius rather than within
-mining reach; etc.). Each fix has required special-casing in predicates, skills, and
-agents. The root cause is that WorldState speaks Factorio rather than speaking to the
-agent's needs.
+**What was done:**
+- `NaturalObject` dataclass deleted. Natural objects are now `EntityState` entries
+  with `is_natural=True` in the unified `WorldState.entities` list.
+- `WorldWriter` assigns stable sys_ids to all entities (placed and natural).
+  Raw Factorio unit_numbers no longer appear above the writer layer.
+- `WorldState.entities` accumulates across polls: entities persist until their
+  tile is confirmed empty by the scan coverage map.
+- `PlayerState.reach_distance` populated from `player.character.reach_distance`.
+  Natural objects are added to the reachable set geometrically by `WorldWriter`.
+- `is_present(sys_id, wq)` and `can_destroy(entity, kb)` in predicates simplified
+  to single-case; all `entity_id=0` special-casing removed throughout the system.
 
-**Proposed direction:**
-The bridge/parser layer should translate Factorio internals into stable, semantically
-correct agent concepts before they reach WorldState:
-- Natural objects should carry an explicit `is_minable: bool` that reflects KB knowledge,
-  not raw `entity_id != 0`
-- Reachability should be expressed as a distance or a flag that reflects actual
-  game-engine mining reach, not a raw entity ID set
-- The `entity_id=0` pattern should be invisible above the bridge; natural objects
-  should have a stable identity scheme that doesn't require callers to special-case 0
-
-**What is undecided:**
-- The exact representation (richer NaturalObject fields? A separate natural object
-  identity scheme? A post-parse enrichment step using the KB?)
-- Whether this belongs in the bridge parser, the WorldWriter, or a new enrichment
-  layer between them
-- How to handle the bootstrap problem (KB needs to be populated before enrichment
-  can be correct)
-
-**Where the decision lives:** `bridge/state_parser.py`, `world/observable/state.py`,
-`world/observable/writer.py`.
-
-**When relevant:** Phase 10, in conjunction with the WorldState refactor already
-planned for that phase.
+**Remaining gap:** `DestroySkill.tick()` calls `ww.factorio_id_for(sys_id)` to
+construct the `MineEntity` bridge action — the one place a Factorio unit_number
+surfaces above the bridge. The long-term fix is a position-based mine bridge
+action; the current compromise is acceptable. See *MineEntity Factorio ID gap*
+in `ARCHITECTURE.md` Known capability gaps.
 
 ---
 
@@ -229,3 +212,6 @@ planned for that phase.
 | — | Unified planning stack | Session 4 | GoalFrame eliminated; Goal carries step/context; _stack replaces _goal_stack + _active_task |
 | — | navigate as TASK_GOAL_TYPE | Session 4 | task-backed goal type; no coordinator handler needed |
 | — | Predicates own world-state logic | Session 4 | is_present, is_reachable, can_destroy in predicates.py; skills delegate to them |
+| OD-9 | WorldState dialect resolved | Session 5 | sys_ids throughout; NaturalObject deleted; entities unified; entity accumulation; tile coverage map added |
+| — | ClearSkill removed | Session 5 | Decision logic belonged in MiningAgent; skill deleted |
+| — | MineEntity Factorio ID gap accepted | Session 5 | ww.factorio_id_for() in DestroySkill.tick() is acceptable boundary; position-based mine action deferred |
